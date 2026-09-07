@@ -4,7 +4,7 @@
 // — Token 은 localStorage 에 1시간 캐시
 // — 만료 5분 전 자동 silent refresh 시도, 실패하면 다음 API 호출 시 null 반환
 
-const CLIENT_ID = "329003207663-t43ejjbg1plt0l5u2kftpa41ofkq7e1o.apps.googleusercontent.com";
+const CLIENT_ID = "103182209420-am9ojjlfnh7m00a06nn84dkhnut2mja8.apps.googleusercontent.com";
 const SCOPE = "https://www.googleapis.com/auth/drive.appdata";
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const REVOKE_URL = "https://oauth2.googleapis.com/revoke";
