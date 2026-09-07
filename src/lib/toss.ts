@@ -23,9 +23,13 @@ export const TOSS_SYMBOL_URL: Record<string, string> = {
   "^DJI":  "https://www.tossinvest.com/indices/DJI.DJI",
   "RTY=F": "https://www.tossinvest.com/indices/RFU.RTYc1",
   "^VIX":  "https://www.tossinvest.com/indices/RGI..VIX",
-  // 환율
+  // 환율 — KRW=X 는 개별 통화 코드가 아니라 토스의 환율 허브 페이지("exchange-rate")로 연결됨.
+  //   달러 외 통화(EUR/JPY)도 개별 인덱스 코드가 없어 동일 허브 페이지로 연결 — 사용자 확인 결과
+  //   실제 링크 목적지가 야후(finance.yahoo.com/quote/EURKRW=X)였던 것을 토스로 전환.
   "DX-Y.NYB": "https://www.tossinvest.com/indices/RGI..DXY",
   "KRW=X":    "https://www.tossinvest.com/indices/exchange-rate",
+  "EURKRW=X": "https://www.tossinvest.com/indices/exchange-rate",
+  "JPYKRW=X": "https://www.tossinvest.com/indices/exchange-rate",
   // 미국 국채금리 커브
   "^US2Y": "https://www.tossinvest.com/indices/ROB.US2YT-RR",
   "^FVX":  "https://www.tossinvest.com/indices/ROB.US5YT-RR",

@@ -2101,7 +2101,7 @@ function SettingsModal({
         <header className="px-4 py-3 border-b bg-gray-50 flex items-center gap-2">
           <h2 className="text-base font-bold">⚙️ 설정</h2>
           {/* 개발이력 — GitHub commit 로그 (외부 링크: 새 탭). 헤더 우측 border 박스 */}
-          <a href="https://github.com/hanjungwoo3/portfolio-web/commits/main/"
+          <a href="https://github.com/statclaude/portfolio-web/commits/main/"
              target="_blank" rel="noopener noreferrer"
              className="ml-auto inline-flex items-center gap-1 px-2 py-1
                         border border-blue-200 rounded
@@ -2248,7 +2248,7 @@ function SettingsModal({
               없으면 공개 4-way. 본인 worker URL 등록 시 본인만 사용. 여러 개 등록·각각 켜고 끄기 가능,
               켜진 게 여러 개면 요청마다 랜덤 분산.
             </p>
-            <a href="https://github.com/hanjungwoo3/portfolio-web/blob/main/workers/proxy/DEPLOY-USER.md"
+            <a href="https://github.com/statclaude/portfolio-web/blob/main/workers/proxy/DEPLOY-USER.md"
                target="_blank" rel="noopener noreferrer"
                className="text-[11px] text-blue-600 underline block">
               📖 배포 가이드 보기
@@ -2279,7 +2279,7 @@ function SettingsModal({
                       u === "unsupported" ? (
                         <div className="text-[10px] text-amber-600 pl-6">
                           사용량 표시하려면 워커 업데이트 필요(/usage).&nbsp;
-                          <a href="https://github.com/hanjungwoo3/portfolio-web/blob/main/workers/proxy/PROXY-USAGE.md"
+                          <a href="https://github.com/statclaude/portfolio-web/blob/main/workers/proxy/PROXY-USAGE.md"
                              target="_blank" rel="noopener noreferrer" className="underline">가이드 ↗</a>
                         </div>
                       ) : (() => {

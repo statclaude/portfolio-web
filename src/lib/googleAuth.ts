@@ -173,7 +173,7 @@ function scheduleSilentRefresh(): void {
 
 // redirect_uri — Google Cloud Console 에 등록된 값과 정확히 일치해야 함
 function getRedirectUri(): string {
-  // gh-pages: https://hanjungwoo3.github.io/portfolio-web/
+  // gh-pages: https://statclaude.github.io/portfolio-web/
   // local:    http://localhost:5173/
   // pathname 끝에 슬래시 강제 (CSC 등록 형식 일치)
   const path = window.location.pathname.endsWith("/")

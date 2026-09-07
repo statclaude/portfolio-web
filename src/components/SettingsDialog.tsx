@@ -18,14 +18,15 @@ import { getTodayProxyCalls, getRecentProxyCalls } from "../lib/usageCounter";
 import { resetProxyStats } from "../lib/proxyStatus";
 import { useExtensionProxyVersion, EXPECTED_EXTENSION_VERSION, compareVersion } from "../lib/extensionProxy";
 
-const UPDATE_GUIDE_URL = "https://github.com/hanjungwoo3/portfolio-web/blob/main/workers/proxy/UPDATE-POST-SUPPORT.md";
-const LOCAL_GUIDE_URL = "https://github.com/hanjungwoo3/portfolio-web/blob/main/workers/local-proxy/README.md";
-const EXT_GUIDE_URL = "https://github.com/hanjungwoo3/portfolio-web/blob/main/extension/README.md";
+const UPDATE_GUIDE_URL = "https://github.com/statclaude/portfolio-web/blob/main/workers/proxy/UPDATE-POST-SUPPORT.md";
+const LOCAL_GUIDE_URL = "https://github.com/statclaude/portfolio-web/blob/main/workers/local-proxy/README.md";
+const EXT_GUIDE_URL = "https://github.com/statclaude/portfolio-web/blob/main/extension/README.md";
+// ⚠ releases 는 fork 시 자동 복사 안 됨 — 본인 저장소에 직접 release 를 만들기 전까진 원저작자 release 를 가리킴.
 const EXT_RELEASE_URL = "https://github.com/hanjungwoo3/portfolio-web/releases/latest";
 // 전용 프록시 배포 가이드 — Deno 가 가장 빠르다(브라우저만, GitHub 1클릭 가입).
 // Cloudflare 는 기능은 같지만 가입 절차가 길어 두 번째로 둔다.
-const DENO_GUIDE_URL = "https://github.com/hanjungwoo3/portfolio-web/blob/main/workers/deno-proxy/README.md";
-const CF_GUIDE_URL = "https://github.com/hanjungwoo3/portfolio-web/blob/main/workers/proxy/DEPLOY-USER.md";
+const DENO_GUIDE_URL = "https://github.com/statclaude/portfolio-web/blob/main/workers/deno-proxy/README.md";
+const CF_GUIDE_URL = "https://github.com/statclaude/portfolio-web/blob/main/workers/proxy/DEPLOY-USER.md";
 import { getIndependentGroupsMode, setIndependentGroupsMode } from "../lib/groupMode";
 import { getTabVisibility, setTabVisibility, getMarketSplit, setMarketSplit } from "../lib/tabVisibility";
 import { getGroupFolders, setGroupFolders, type GroupFolder } from "../lib/groupFolders";
@@ -452,7 +453,7 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
           <span className="text-xs text-gray-500 truncate">{statusMsg}</span>
           {/* 개발이력 — GitHub commit 로그 (외부 링크: 새 탭).
               헤더 우측에 border 박스 + ↗ 으로 외부 링크임을 명시 */}
-          <a href="https://github.com/hanjungwoo3/portfolio-web/commits/main/"
+          <a href="https://github.com/statclaude/portfolio-web/commits/main/"
              target="_blank" rel="noopener noreferrer"
              className="ml-auto inline-flex items-center gap-1 px-2 py-1
                         border border-blue-200 rounded

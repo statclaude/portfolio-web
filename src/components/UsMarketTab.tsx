@@ -25,7 +25,7 @@ import { requestHeatmap, CARD_HEATMAP_LINK } from "../lib/heatmapNav";
 // KR ETF Yahoo 심볼 패턴 (예: "091160.KS") — 토스 compositions API 지원 대상
 const KR_ETF_SYMBOL_RE = /^([\dA-Za-z]{6})\.K[SQ]$/;
 
-const WORKER_UPDATE_GUIDE_URL = "https://github.com/hanjungwoo3/portfolio-web/blob/main/workers/proxy/UPDATE-POST-SUPPORT.md";
+const WORKER_UPDATE_GUIDE_URL = "https://github.com/statclaude/portfolio-web/blob/main/workers/proxy/UPDATE-POST-SUPPORT.md";
 function krEtfTicker(symbol: string): string | null {
   const m = KR_ETF_SYMBOL_RE.exec(symbol);
   return m ? m[1] : null;

@@ -101,7 +101,7 @@ function needsYahooAuth(url: URL): boolean {
 
 // 허용 클라이언트 — 내 GitHub Pages 도메인 + 로컬 개발만 (fork·외부 무단 호출 차단).
 const ALLOWED_ORIGINS = new Set<string>([
-  "https://hanjungwoo3.github.io",
+  "https://statclaude.github.io",
 ]);
 function clientAllowed(request: Request): boolean {
   const origin = request.headers.get("Origin");
