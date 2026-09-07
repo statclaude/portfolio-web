@@ -1,0 +1,20 @@
+node_modules/
+dist/
+.env
+.env.local
+.env.*.local
+.env.production
+.env.development
+.wrangler/
+*.log
+.DS_Store
+.vscode/
+.idea/
+
+# Local Netlify folder
+.netlify
+
+# Proxy worker CLI 생성물
+workers/netlify-proxy/deno.lock
+workers/supabase-proxy/supabase/.temp/
+dist-extension/
