@@ -1,0 +1,85 @@
+name: Upstream Sync Check
+
+on:
+  schedule:
+    - cron: '0 0 * * *'   # 매일 UTC 00:00 (한국시간 09:00)
+  workflow_dispatch:        # Actions 탭에서 수동 실행 버튼도 제공
+
+permissions:
+  issues: write
+  contents: write
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: upstream 리모트 추가
+        run: git remote add upstream https://github.com/hanjungwoo3/portfolio-web.git
+
+      - name: upstream fetch
+        run: git fetch upstream main
+
+      - name: 지난 확인 시점(SHA) 읽기
+        id: last
+        run: |
+          if [ -f .github/upstream-sync-state.txt ]; then
+            echo "sha=$(cat .github/upstream-sync-state.txt)" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 새 커밋 여부 확인
+        id: check
+        run: |
+          CURRENT=$(git rev-parse upstream/main)
+          LAST="${{ steps.last.outputs.sha }}"
+          if [ -z "$LAST" ]; then
+            echo "첫 실행 — 알림 없이 기준선만 저장합니다."
+            echo "has_new=false" >> "$GITHUB_OUTPUT"
+            echo "first_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$CURRENT" = "$LAST" ]; then
+            echo "새 커밋 없음."
+            echo "has_new=false" >> "$GITHUB_OUTPUT"
+            echo "first_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "has_new=true" >> "$GITHUB_OUTPUT"
+          echo "first_run=false" >> "$GITHUB_OUTPUT"
+          git log "$LAST..upstream/main" --oneline --max-count=100 > /tmp/new-commits.txt
+          cat /tmp/new-commits.txt
+
+      - name: 새 커밋 목록으로 이슈 생성
+        if: steps.check.outputs.has_new == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const commits = fs.readFileSync('/tmp/new-commits.txt', 'utf8');
+            const today = new Date().toISOString().slice(0, 10);
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[upstream-sync] 원저작자 저장소에 새 커밋 (${today})`,
+              body:
+                "hanjungwoo3/portfolio-web 에 다음 새 커밋이 있습니다:\n\n" +
+                "```\n" + commits + "\n```\n\n" +
+                "필요한 것만 선별해서 직접 cherry-pick 하세요. upstream 브랜치에는 절대 push 하지 않습니다.",
+              labels: ["upstream-sync"],
+            });
+
+      - name: 확인 시점(SHA) 갱신
+        if: steps.check.outputs.has_new == 'true' || steps.check.outputs.first_run == 'true'
+        run: |
+          mkdir -p .github
+          git rev-parse upstream/main > .github/upstream-sync-state.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .github/upstream-sync-state.txt
+          git commit -m "chore: upstream sync 상태 갱신 [skip ci]"
+          git push origin main
