@@ -10,7 +10,7 @@ interface Props {
 }
 
 const GUIDE_URL =
-  "https://github.com/hanjungwoo3/portfolio-web/blob/main/workers/proxy/DEPLOY-USER.md";
+  "https://github.com/statclaude/portfolio-web/blob/main/workers/proxy/DEPLOY-USER.md";
 
 export function ProxyStatusBadge({ baseRefreshMs, usePersonalProxy, onOpenSettings }: Props) {
   const [state, setState] = useState<ProxyState>(

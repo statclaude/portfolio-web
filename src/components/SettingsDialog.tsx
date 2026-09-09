@@ -21,8 +21,7 @@ import { useExtensionProxyVersion, EXPECTED_EXTENSION_VERSION, compareVersion } 
 const UPDATE_GUIDE_URL = "https://github.com/statclaude/portfolio-web/blob/main/workers/proxy/UPDATE-POST-SUPPORT.md";
 const LOCAL_GUIDE_URL = "https://github.com/statclaude/portfolio-web/blob/main/workers/local-proxy/README.md";
 const EXT_GUIDE_URL = "https://github.com/statclaude/portfolio-web/blob/main/extension/README.md";
-// ⚠ releases 는 fork 시 자동 복사 안 됨 — 본인 저장소에 직접 release 를 만들기 전까진 원저작자 release 를 가리킴.
-const EXT_RELEASE_URL = "https://github.com/hanjungwoo3/portfolio-web/releases/latest";
+const EXT_RELEASE_URL = "https://github.com/statclaude/portfolio-web/releases/latest";
 // 전용 프록시 배포 가이드 — Deno 가 가장 빠르다(브라우저만, GitHub 1클릭 가입).
 // Cloudflare 는 기능은 같지만 가입 절차가 길어 두 번째로 둔다.
 const DENO_GUIDE_URL = "https://github.com/statclaude/portfolio-web/blob/main/workers/deno-proxy/README.md";

@@ -16,7 +16,7 @@
 
 아래 파일을 내려받고 **압축을 풉니다.**
 
-📦 [portfolio-proxy-extension.zip 받기](https://github.com/hanjungwoo3/portfolio-web/releases/latest)
+📦 [portfolio-proxy-extension.zip 받기](https://github.com/statclaude/portfolio-web/releases/latest)
 
 압축을 풀면 `manifest.json` 등이 들어 있는 폴더가 생깁니다. **이 폴더를 기억해 두세요.**
 
@@ -163,7 +163,7 @@ chrome://extensions
 - **바이트 그대로 전달** — 네이버 자금동향은 EUC-KR이라 텍스트로 옮기면 깨집니다.
   응답을 base64로 넘기고 디코딩은 앱이 합니다.
 - **권한** — `declarativeNetRequest` 하나뿐입니다. 이미 열린 탭을 찾는 데 필요한
-  앱 주소(`hanjungwoo3.github.io`)는 호스트 권한으로만 받습니다. `tabs` 권한을 쓰면
+  앱 주소(`statclaude.github.io`)는 호스트 권한으로만 받습니다. `tabs` 권한을 쓰면
   "방문 기록 읽기" 경고가 뜨는데, 호스트 하나만 받으면 그게 없습니다.
 
 ## Yahoo — 확장이라서 되는 부분

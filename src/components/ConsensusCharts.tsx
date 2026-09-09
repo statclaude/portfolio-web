@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import type { EstimateSeries, EstimatePoint } from "../lib/api";
 import { checkPersonalProxyPostSupport, type PersonalProxyStatus } from "../lib/proxyConfig";
 
-const UPDATE_GUIDE_URL = "https://github.com/hanjungwoo3/portfolio-web/blob/main/workers/proxy/UPDATE-POST-SUPPORT.md";
+const UPDATE_GUIDE_URL = "https://github.com/statclaude/portfolio-web/blob/main/workers/proxy/UPDATE-POST-SUPPORT.md";
 
 interface Props {
   revenue?: EstimateSeries | null;

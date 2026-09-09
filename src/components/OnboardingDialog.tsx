@@ -6,11 +6,11 @@ import { getPersonalProxyUrl } from "../lib/proxyConfig";
 //   Cloudflare 워커를 배포해봐야 같이 막힌다. 안내가 그걸 권하면 사용자가 10분을 쓰고도
 //   증상이 그대로다. Cloudflare 가이드는 보조 링크로만 남긴다.
 const DENO_GUIDE_URL =
-  "https://github.com/hanjungwoo3/portfolio-web/blob/main/workers/deno-proxy/README.md";
+  "https://github.com/statclaude/portfolio-web/blob/main/workers/deno-proxy/README.md";
 const CF_GUIDE_URL =
-  "https://github.com/hanjungwoo3/portfolio-web/blob/main/workers/proxy/DEPLOY-USER.md";
+  "https://github.com/statclaude/portfolio-web/blob/main/workers/proxy/DEPLOY-USER.md";
 const EXT_GUIDE_URL =
-  "https://github.com/hanjungwoo3/portfolio-web/blob/main/extension/README.md";
+  "https://github.com/statclaude/portfolio-web/blob/main/extension/README.md";
 
 interface Props {
   onOpenSettings: () => void;

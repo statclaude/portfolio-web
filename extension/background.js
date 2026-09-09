@@ -164,7 +164,7 @@ async function doFetch(msg) {
 //   그냥 탭으로 열면 브라우저 크기 그대로라 제약이 없고, 콘텐트 스크립트는 URL 기준으로
 //   주입되므로 프록시는 똑같이 동작한다.
 //   이미 열려 있으면 새로 만들지 않고 그 탭으로 이동한다.
-const APP_URL = "https://hanjungwoo3.github.io/portfolio-web/";
+const APP_URL = "https://statclaude.github.io/portfolio-web/";
 
 chrome.action.onClicked.addListener(async () => {
   try {
