@@ -3,6 +3,7 @@
 // → 공개 인프라 부담 0, 사용자 본인 100k/일 무료 한도 전용
 
 import { isExtensionProxyReady } from "./extensionProxy";
+import { isNativeApp } from "./nativeProxy";
 
 const KEY = "portfolio_personal_proxy_url";        // 레거시 단일 URL (마이그레이션/호환)
 const LIST_KEY = "portfolio_personal_proxies";     // 신규 — 여러 개 {url, enabled}
@@ -87,6 +88,12 @@ export const EXTENSION_PROXY_URL = "extension:local";
 
 export function isExtensionProxyUrl(u: string): boolean {
   return u === EXTENSION_PROXY_URL;
+}
+
+// 합성 표식 — 실제 HTTP 로 때릴 수 없는 항목. 라우팅 순회에서 걸러낸다.
+//   (upstream 은 여기에 안드로이드 앱 표식도 묶지만, 우리 앱은 isNativeApp() 으로 따로 판별한다)
+export function isSyntheticProxyUrl(u: string): boolean {
+  return isExtensionProxyUrl(u);
 }
 
 export function isLocalProxyUrl(u: string): boolean {
