@@ -503,7 +503,6 @@ export function ValuationModal({
             <span className="hidden sm:inline-flex items-baseline gap-3">
               <span className="text-base font-bold">{name}</span>
               <span className="text-sm text-gray-500">({ticker})</span>
-              <ExternalLinks ticker={ticker} name={name} onDraw={() => setDrawOpen(true)} />
               {onRequestSearch && (
                 <button onClick={() => { onClose(); onRequestSearch(name); }}
                         title={`${name} 검색 — 관심종목에 추가`}
@@ -512,6 +511,7 @@ export function ValuationModal({
                   🔍 추가
                 </button>
               )}
+              <ExternalLinks ticker={ticker} name={name} onDraw={() => setDrawOpen(true)} />
               {effCurPrice && (
                 <span className="ml-3 inline-flex items-baseline gap-1.5">
                   {headSpark.length >= 2 && (
@@ -538,7 +538,6 @@ export function ValuationModal({
           <div className="sm:hidden flex items-baseline gap-2 mt-1 flex-wrap">
             <span className="text-base font-bold">{name}</span>
             <span className="text-sm text-gray-500">({ticker})</span>
-            <ExternalLinks ticker={ticker} name={name} onDraw={() => setDrawOpen(true)} />
             {onRequestSearch && (
               <button onClick={() => { onClose(); onRequestSearch(name); }}
                       title={`${name} 검색 — 관심종목에 추가`}
@@ -547,6 +546,7 @@ export function ValuationModal({
                 🔍 추가
               </button>
             )}
+            <ExternalLinks ticker={ticker} name={name} onDraw={() => setDrawOpen(true)} />
             {effCurPrice && (
               <span className="ml-auto inline-flex items-baseline gap-1.5">
                 {headSpark.length >= 2 && (
