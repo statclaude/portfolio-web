@@ -108,6 +108,7 @@ import {
   tryRestoreSession, peekPendingSyncAction,
 } from "../lib/syncManager";
 import { isSignedIn, getAccessToken, wasSignedIn } from "../lib/googleAuth";
+import { isNativeApp } from "../lib/nativeProxy";
 import type { Stock } from "../types";
 import { getTabVisibility, setTabVisibility, getMarketSplit, setMarketSplit } from "../lib/tabVisibility";
 import { splitByMarket, splitHeldAndMarket, type MarketSection } from "../lib/marketSplit";
@@ -242,6 +243,40 @@ export function MobileSimpleView() {
   useEffect(() => {
     localStorage.setItem(TAB_KEY, activeTab);
   }, [activeTab]);
+
+  // 안드로이드 뒤로가기 — 실제 폰에서 쓰이는 건 Dashboard 가 아니라 이 컴포넌트라
+  // (isMobile 이면 MobileSimpleView 렌더) 여기에도 같은 로직을 둔다.
+  // 우선순위: 1) 열린 다이얼로그/모달(또는 이 "더보기" 드롭다운)이 있으면 그것만 닫는다.
+  // 2) 없고 기본 탭(KR_KEY)이 아니면 기본 탭으로 돌아간다. 3) 이미 기본 탭이면 종료한다.
+  const activeTabRef = useRef(activeTab);
+  useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
+  const moreOpenRef = useRef(moreOpen);
+  useEffect(() => { moreOpenRef.current = moreOpen; }, [moreOpen]);
+  useEffect(() => {
+    if (!isNativeApp()) return;
+    let cancelled = false;
+    let handle: { remove: () => void } | undefined;
+    void import("@capacitor/app").then(({ App: CapApp }) => {
+      if (cancelled) return;
+      void CapApp.addListener("backButton", () => {
+        if (moreOpenRef.current) {
+          setMoreOpen(false);
+          return;
+        }
+        const hasOpenDialog = document.querySelector(".fixed.inset-0") !== null;
+        if (hasOpenDialog) {
+          window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+          return;
+        }
+        if (activeTabRef.current !== KR_KEY) {
+          setActiveTab(KR_KEY);
+          return;
+        }
+        void CapApp.exitApp();
+      }).then((h) => { handle = h; });
+    });
+    return () => { cancelled = true; handle?.remove(); };
+  }, []);
 
   // 밸류업 카드 등에서 히트맵 딥링크 요청 → 히트맵 탭으로 전환.
   useEffect(() => {
@@ -936,6 +971,13 @@ export function MobileSimpleView() {
                         className="block w-full text-left px-3 py-1.5 text-gray-700 hover:bg-gray-100">후원하기</button>
                 <button onClick={() => { setSettingsOpen(true); setMoreOpen(false); }}
                         className="block w-full text-left px-3 py-1.5 text-gray-700 hover:bg-gray-100">설정</button>
+                {isNativeApp() && (
+                  <button onClick={() => {
+                            setMoreOpen(false);
+                            void import("@capacitor/app").then(({ App: CapApp }) => void CapApp.exitApp());
+                          }}
+                          className="block w-full text-left px-3 py-1.5 text-red-600 hover:bg-red-50 border-t border-gray-100">⏻ 종료</button>
+                )}
               </div>
             </>
           )}
