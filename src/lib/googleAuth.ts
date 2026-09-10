@@ -48,6 +48,7 @@ export interface AuthDiag {
 
 function noteAuthFailure(stage: string, err?: unknown): void {
   let error: string | undefined;
+  // 아래에서 값을 뽑은 뒤 '예상된 실패' 는 걸러낸다(함수 끝 참조).
   let detail: string | undefined;
   if (err && typeof err === "object") {
     const o = err as Record<string, unknown>;
