@@ -3,12 +3,31 @@
 // — Drive appdata 스코프만 (이메일·프로필 미요청)
 // — Token 은 localStorage 에 1시간 캐시
 // — 만료 5분 전 자동 silent refresh 시도, 실패하면 다음 API 호출 시 null 반환
+//
+// 네이티브 앱(APK)은 Google 이 임베디드 WebView 안에서의 OAuth 를 막기 때문에
+// (disallowed_useragent) 시스템 브라우저(Chrome Custom Tab)를 열어 로그인시키고,
+// 커스텀 스킴 딥링크(pfportfolio://oauth)로 앱에 돌아온다. 시스템 브라우저는
+// 앱 WebView 와 localStorage 가 분리돼 있어 토큰을 거기 저장해봐야 앱이 못 보므로,
+// 시스템 브라우저에 돌아온 이 페이지는 토큰을 저장하지 않고 그대로 딥링크로 릴레이만 한다.
+// (관련: WEB_RELAY_URI, APP_SCHEME_REDIRECT, handleAppAuthUrl)
+
+import { Browser } from "@capacitor/browser";
+import { App as CapApp } from "@capacitor/app";
+import { isNativeApp } from "./nativeProxy";
 
 const CLIENT_ID = "103182209420-am9ojjlfnh7m00a06nn84dkhnut2mja8.apps.googleusercontent.com";
 const SCOPE = "https://www.googleapis.com/auth/drive.appdata";
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const REVOKE_URL = "https://oauth2.googleapis.com/revoke";
 const STATE_VALUE = "drive_auth_v1";
+
+// 네이티브 앱 전용 — 시스템 브라우저로 로그인시킬 때 쓰는 state/redirect.
+//   redirect_uri 는 웹과 동일한(이미 Google Cloud Console 에 등록된) 주소를 그대로 쓴다 —
+//   새 URI 를 등록할 필요가 없다. 대신 state 값으로 "네이티브 앱발" 요청임을 구분해서
+//   handleAuthRedirect() 가 토큰을 저장하지 않고 앱으로 릴레이하게 만든다.
+const APP_STATE_VALUE = "drive_auth_app_v1";
+const APP_SCHEME_REDIRECT = "pfportfolio://oauth";
+const WEB_RELAY_URI = "https://statclaude.github.io/portfolio-web/";
 
 // localStorage keys
 const TOKEN_KEY = "gdrive_token_cache";
@@ -191,13 +210,27 @@ scheduleSilentRefresh();
 // 가끔 hidden iframe UI 가 잠깐 보이는 문제. 토큰 갱신은 SettingsDialog 진입 시
 // 또는 명시적 sync 액션(uploadToDrive 등) 시점에만 수행 (일관 정책).
 
-// 로그인 — 전체 페이지가 google 로 redirect (사용자 클릭 후)
-// Promise 안 반환 — redirect 후 다시 돌아올 때 token 처리됨
+// 로그인 — 네이티브 앱은 시스템 브라우저로, 웹은 전체 페이지 redirect 로.
+// Promise 안 반환 — 로그인 후 다시 돌아올 때(웹: URL fragment, 앱: 딥링크) 토큰 처리됨
 export function signIn(): void {
   // 로그인 후 돌아갈 path 저장 (예: 모달 다시 열림 등)
   try {
     localStorage.setItem(PRE_AUTH_PATH_KEY, window.location.pathname + window.location.search);
   } catch { /* noop */ }
+
+  if (isNativeApp()) {
+    const params = new URLSearchParams({
+      client_id: CLIENT_ID,
+      redirect_uri: WEB_RELAY_URI,
+      response_type: "token",
+      scope: SCOPE,
+      state: APP_STATE_VALUE,
+      prompt: "consent",
+      include_granted_scopes: "true",
+    });
+    void Browser.open({ url: `${AUTH_URL}?${params}` });
+    return;
+  }
 
   const params = new URLSearchParams({
     client_id: CLIENT_ID,
@@ -216,6 +249,17 @@ export function handleAuthRedirect(): boolean {
   if (typeof window === "undefined" || !window.location.hash) return false;
   const hash = new URLSearchParams(window.location.hash.slice(1));
   const state = hash.get("state");
+
+  // 네이티브 앱이 연 시스템 브라우저가 로그인 후 돌아온 경우 — 여기(시스템 브라우저)엔
+  // 토큰을 저장하지 않는다(앱 WebView 와 storage 가 분리돼 있어 저장해도 앱이 못 봄).
+  // 대신 커스텀 스킴으로 그대로 넘겨 앱이 직접 저장하게 한다.
+  if (state === APP_STATE_VALUE) {
+    if (!isNativeApp()) {
+      window.location.replace(`${APP_SCHEME_REDIRECT}#${window.location.hash.slice(1)}`);
+    }
+    return false;
+  }
+
   if (state !== STATE_VALUE) return false;
 
   const token = hash.get("access_token");
@@ -232,6 +276,30 @@ export function handleAuthRedirect(): boolean {
   // URL hash 청소
   history.replaceState({}, "", window.location.pathname + window.location.search);
   return true;
+}
+
+// pfportfolio://oauth#access_token=... 딥링크 처리 — appUrlOpen 리스너에서 호출.
+// 시스템 브라우저가 handleAuthRedirect() 에서 릴레이해 준 토큰을 여기서 실제로 저장한다.
+export function handleAppAuthUrl(url: string): boolean {
+  const hashIdx = url.indexOf("#");
+  if (hashIdx === -1) return false;
+  const hash = new URLSearchParams(url.slice(hashIdx + 1));
+  const token = hash.get("access_token");
+  const expiresIn = parseInt(hash.get("expires_in") ?? "3600", 10);
+  const error = hash.get("error");
+  if (error || !token) return false;
+  saveToken(token, expiresIn);
+  return true;
+}
+
+// 네이티브 앱에서만: 딥링크 복귀를 상시 구독하고, 토큰을 받으면 로그인에 썼던
+// 시스템 브라우저(Custom Tab)도 정리한다.
+if (isNativeApp()) {
+  void CapApp.addListener("appUrlOpen", ({ url }: { url: string }) => {
+    if (handleAppAuthUrl(url)) {
+      void Browser.close().catch(() => { /* 이미 닫혀있으면 무시 */ });
+    }
+  });
 }
 
 // 토큰 가져오기 — 캐시 유효 시 즉시 반환, 만료/없음이면 silent refresh 시도

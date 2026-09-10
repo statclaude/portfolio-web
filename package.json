@@ -16,6 +16,9 @@
     "gen-etf-weights": "node scripts/gen-etf-weights.mjs"
   },
   "dependencies": {
+    "@capacitor/app": "^8.1.1",
+    "@capacitor/browser": "^8.0.4",
+    "@capacitor/core": "^8.5.1",
     "@tanstack/react-query": "^5.100.5",
     "dexie": "^4.4.2",
     "lightweight-charts": "^5.2.0",
@@ -25,6 +28,8 @@
     "zustand": "^5.0.12"
   },
   "devDependencies": {
+    "@capacitor/android": "^8.5.1",
+    "@capacitor/cli": "^8.5.1",
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.12.2",
     "@types/react": "^19.2.14",
