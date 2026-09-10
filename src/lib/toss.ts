@@ -1,5 +1,5 @@
 // 토스 외부 링크 — 모바일에서는 토스 앱(supertoss://) deep link 우선,
-// 미설치/실패 시 1.2초 후 https 새 탭으로 폴백. PC 는 https 새 탭만.
+// 미설치/실패 시 5초 후 https 새 탭으로 폴백(로그인할 시간을 넉넉히 줌). PC 는 https 새 탭만.
 // 참고: MobileStockCard 에 있던 패턴을 일반화해 추출.
 //
 // 네이티브 APK 에서는 새 탭(window.open)이 아니라 Capacitor Browser 플러그인으로 연다 —
@@ -118,18 +118,17 @@ function openInBrowser(url: string): void {
 }
 
 // 임의의 URL 열기 — toss URL 이면 모바일에서 앱 시도 후 https 폴백, 그 외는 새 탭.
-// 단, 우리 네이티브 앱(APK) 안에서는 토스 앱으로의 딥링크 시도를 아예 건너뛴다 — 이미
-// 네이티브 앱인데 거기서 또 다른 앱(로그인 필요한 토스증권 앱)으로 튕기면 UX 가 나빠져서,
-// 이 경우엔 그냥 토스 웹페이지를 바로 연다. 일반 모바일 브라우저에서는 기존 동작 유지.
+// 토스 앱이 뜨면(로그인 화면 포함) 5초 동안은 폴백하지 않고 기다린다 — 너무 빨리
+// 폴백하면 로그인하려는 도중에 앱 화면 위로 웹페이지가 겹쳐 뜨는 것처럼 보일 수 있다.
 export function openExternal(url: string): void {
-  const deep = isNativeApp() ? null : toDeepLink(url);
+  const deep = toDeepLink(url);
   if (deep && isMobile()) {
     location.href = deep;
     setTimeout(() => {
       if (document.visibilityState === "visible") {
         openInBrowser(url);
       }
-    }, 1200);
+    }, 5000);
     return;
   }
   openInBrowser(url);
