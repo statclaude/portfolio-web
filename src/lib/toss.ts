@@ -1,6 +1,14 @@
 // 토스 외부 링크 — 모바일에서는 토스 앱(supertoss://) deep link 우선,
 // 미설치/실패 시 1.2초 후 https 새 탭으로 폴백. PC 는 https 새 탭만.
 // 참고: MobileStockCard 에 있던 패턴을 일반화해 추출.
+//
+// 네이티브 APK 에서는 새 탭(window.open)이 아니라 Capacitor Browser 플러그인으로 연다 —
+// WebView 의 window.open → 안드로이드 Intent 로 새 탭을 넘기는 경로가 일부 사이트(토스 등)에서
+// "PC로 접속해주세요" 로 잘못 인식되는 문제가 있어, 같은 Custom Tab 이라도 좀 더 표준적인
+// 경로인 Browser.open() 으로 통일한다.
+
+import { isNativeApp } from "./nativeProxy";
+import { Browser } from "@capacitor/browser";
 
 const MOBILE_UA_RE = /Android|iPhone|iPad|iPod/i;
 
@@ -100,6 +108,15 @@ function toDeepLink(httpsUrl: string): string | null {
   }
 }
 
+// 새 탭/외부 브라우저로 열기 — 네이티브 앱은 Capacitor Browser(Custom Tab), 웹은 window.open.
+function openInBrowser(url: string): void {
+  if (isNativeApp()) {
+    void Browser.open({ url });
+    return;
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
 // 임의의 URL 열기 — toss URL 이면 모바일에서 앱 시도 후 https 폴백, 그 외는 새 탭.
 export function openExternal(url: string): void {
   const deep = toDeepLink(url);
@@ -107,12 +124,12 @@ export function openExternal(url: string): void {
     location.href = deep;
     setTimeout(() => {
       if (document.visibilityState === "visible") {
-        window.open(url, "_blank", "noopener,noreferrer");
+        openInBrowser(url);
       }
     }, 1200);
     return;
   }
-  window.open(url, "_blank", "noopener,noreferrer");
+  openInBrowser(url);
 }
 
 // <a href={url}> 의 onClick 핸들러로 사용.

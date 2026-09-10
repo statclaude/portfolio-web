@@ -147,7 +147,10 @@ function Dashboard() {
   // 없고 기본 탭(지수, US_MARKET_TAB_KEY)이 아니면 기본 탭으로 돌아간다(다이얼로그가
   // 아니라 탭 전환으로 "여러 단계" 들어온 경우 한 번에 종료되던 문제 방지).
   // 3) 이미 기본 탭이고 아무것도 안 열려 있으면 그때 앱을 종료한다.
-  // activeTab 이 바뀔 때마다 최신 값을 보도록 다시 등록한다(클로저 고정 방지).
+  // 리스너는 한 번만 등록(activeTab 바뀔 때마다 재등록하면 등록 순서가 꼬여 중복/누락이
+  // 생길 수 있어서) 하고, 최신 activeTab 은 ref 로 읽는다.
+  const activeTabRef = useRef(activeTab);
+  useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
   useEffect(() => {
     if (!isNativeApp()) return;
     let cancelled = false;
@@ -160,7 +163,7 @@ function Dashboard() {
           window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
           return;
         }
-        if (activeTab !== US_MARKET_TAB_KEY) {
+        if (activeTabRef.current !== US_MARKET_TAB_KEY) {
           setActiveTab(US_MARKET_TAB_KEY);
           return;
         }
@@ -168,7 +171,7 @@ function Dashboard() {
       }).then((h) => { handle = h; });
     });
     return () => { cancelled = true; handle?.remove(); };
-  }, [activeTab]);
+  }, []);
 
   const extReady = useExtensionProxyReady();
   // 자동 동기화 제거됨 — 백업은 설정의 파일 저장/불러오기 또는 수동 구글 업·다운로드 사용.

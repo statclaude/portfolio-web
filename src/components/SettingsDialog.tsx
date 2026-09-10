@@ -40,6 +40,7 @@ import {
 } from "../lib/syncManager";
 import { isSignedIn, getAccessToken, wasSignedIn, signIn } from "../lib/googleAuth";
 import { useEscClose } from "../lib/useEscClose";
+import { isNativeApp } from "../lib/nativeProxy";
 
 interface Props {
   isOpen: boolean;
@@ -461,6 +462,17 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
                         whitespace-nowrap">
             GitHub 의 최근 변경/수정 commit 목록 <span className="text-[9px]">↗</span>
           </a>
+          {/* 뒤로가기로 종료가 안 될 때의 확실한 대안 — 네이티브 앱에서만 노출 */}
+          {isNativeApp() && (
+            <button
+              onClick={() => {
+                void import("@capacitor/app").then(({ App: CapApp }) => void CapApp.exitApp());
+              }}
+              className="text-[11px] px-2 py-1 rounded border border-red-200
+                         text-red-600 bg-red-50 hover:bg-red-100 whitespace-nowrap">
+              ⏻ 앱 종료
+            </button>
+          )}
           <button onClick={onClose}
                   className="text-gray-400 hover:text-gray-600 text-xl">✕</button>
         </header>
