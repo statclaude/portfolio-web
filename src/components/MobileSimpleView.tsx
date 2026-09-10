@@ -976,7 +976,7 @@ export function MobileSimpleView() {
                             setMoreOpen(false);
                             void import("@capacitor/app").then(({ App: CapApp }) => void CapApp.exitApp());
                           }}
-                          className="block w-full text-left px-3 py-1.5 text-red-600 hover:bg-red-50 border-t border-gray-100">⏻ 종료</button>
+                          className="block w-full text-left px-3 py-1.5 text-red-600 hover:bg-red-50 border-t border-gray-100">🚪 종료</button>
                 )}
               </div>
             </>

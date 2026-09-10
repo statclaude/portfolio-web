@@ -118,8 +118,11 @@ function openInBrowser(url: string): void {
 }
 
 // 임의의 URL 열기 — toss URL 이면 모바일에서 앱 시도 후 https 폴백, 그 외는 새 탭.
+// 단, 우리 네이티브 앱(APK) 안에서는 토스 앱으로의 딥링크 시도를 아예 건너뛴다 — 이미
+// 네이티브 앱인데 거기서 또 다른 앱(로그인 필요한 토스증권 앱)으로 튕기면 UX 가 나빠져서,
+// 이 경우엔 그냥 토스 웹페이지를 바로 연다. 일반 모바일 브라우저에서는 기존 동작 유지.
 export function openExternal(url: string): void {
-  const deep = toDeepLink(url);
+  const deep = isNativeApp() ? null : toDeepLink(url);
   if (deep && isMobile()) {
     location.href = deep;
     setTimeout(() => {
