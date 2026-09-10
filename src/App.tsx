@@ -65,6 +65,7 @@ import { SortSelector, makeSortHandlers } from "./components/SortSelector";
 import { reportRefresh, useLastRefresh } from "./lib/lastRefresh";
 import { getEffectivePollMs, getPersonalProxyUrl } from "./lib/proxyConfig";
 import { GOTO_HEATMAP_EVENT } from "./lib/heatmapNav";
+import { isNativeApp } from "./lib/nativeProxy";
 import { ValuationModal } from "./components/ValuationModal";
 import { MobileSimpleView } from "./components/MobileSimpleView";
 import { useExtensionProxyReady } from "./lib/extensionProxy";
@@ -140,6 +141,34 @@ function Dashboard() {
     const t = setTimeout(() => setSettingsOpen(true), 0);
     return () => clearTimeout(t);
   }, []);
+
+  // 안드로이드 뒤로가기 — 우선순위: 1) 열린 다이얼로그/모달이 있으면 그것만 닫는다
+  // (다이얼로그들이 이미 useEscClose 로 Escape 를 구독 중이라 재사용). 2) 다이얼로그가
+  // 없고 기본 탭(지수, US_MARKET_TAB_KEY)이 아니면 기본 탭으로 돌아간다(다이얼로그가
+  // 아니라 탭 전환으로 "여러 단계" 들어온 경우 한 번에 종료되던 문제 방지).
+  // 3) 이미 기본 탭이고 아무것도 안 열려 있으면 그때 앱을 종료한다.
+  // activeTab 이 바뀔 때마다 최신 값을 보도록 다시 등록한다(클로저 고정 방지).
+  useEffect(() => {
+    if (!isNativeApp()) return;
+    let cancelled = false;
+    let handle: { remove: () => void } | undefined;
+    void import("@capacitor/app").then(({ App: CapApp }) => {
+      if (cancelled) return;
+      void CapApp.addListener("backButton", () => {
+        const hasOpenDialog = document.querySelector(".fixed.inset-0") !== null;
+        if (hasOpenDialog) {
+          window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+          return;
+        }
+        if (activeTab !== US_MARKET_TAB_KEY) {
+          setActiveTab(US_MARKET_TAB_KEY);
+          return;
+        }
+        void CapApp.exitApp();
+      }).then((h) => { handle = h; });
+    });
+    return () => { cancelled = true; handle?.remove(); };
+  }, [activeTab]);
 
   const extReady = useExtensionProxyReady();
   // 자동 동기화 제거됨 — 백업은 설정의 파일 저장/불러오기 또는 수동 구글 업·다운로드 사용.
