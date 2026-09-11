@@ -46,6 +46,28 @@ interface Props {
   entryPrice?: number;       // 메모의 기대가 (차트 가로선)
 }
 
+// 외부 링크 — 원래 모달 하단에 있었는데 스크롤해야 보여서 헤더로 올렸다.
+//   PC·모바일 두 줄이 같은 걸 써야 한쪽만 빠지는 일이 없다.
+//   토스는 모바일에서 앱 딥링크로 가른다(handleTossLinkClick). 나머지는 새 탭.
+function ExternalLinks({ ticker, name }: { ticker: string; name: string }) {
+  const tossUrl = `https://tossinvest.com/stocks/A${ticker}`;
+  const cls = "px-1.5 py-0.5 rounded border border-gray-300 bg-white text-xs "
+            + "text-gray-600 hover:bg-gray-100 whitespace-nowrap";
+  return (
+    <span className="inline-flex items-center gap-1">
+      <a href={tossUrl} target="_blank" rel="noopener noreferrer"
+         onClick={e => handleTossLinkClick(e, tossUrl)}
+         title={`${name} 토스증권에서 보기`} className={cls}>🔗 토스</a>
+      <a href={`https://finance.naver.com/item/main.naver?code=${ticker}`}
+         target="_blank" rel="noopener noreferrer"
+         title={`${name} 네이버 금융`} className={cls}>🔗 네이버</a>
+      <a href={`https://navercomp.wisereport.co.kr/v2/company/c1010001.aspx?cmp_cd=${ticker}`}
+         target="_blank" rel="noopener noreferrer"
+         title={`${name} Wisereport`} className={cls}>🔗 Wisereport</a>
+    </span>
+  );
+}
+
 // 오늘(당일) 실시간 시/고/저 — 부모 Price 객체에서 추출. 일봉 마지막 캔들 꼬리용.
 export interface TodayBar { open?: number; high?: number; low?: number }
 
@@ -422,6 +444,7 @@ export function ValuationModal({
             <span className="hidden sm:inline-flex items-baseline gap-3">
               <span className="text-base font-bold">{name}</span>
               <span className="text-sm text-gray-500">({ticker})</span>
+              <ExternalLinks ticker={ticker} name={name} />
               {effCurPrice && (
                 <span className="text-base font-bold ml-3">
                   {effCurPrice.toLocaleString()}원
@@ -437,6 +460,7 @@ export function ValuationModal({
           <div className="sm:hidden flex items-baseline gap-2 mt-1 flex-wrap">
             <span className="text-base font-bold">{name}</span>
             <span className="text-sm text-gray-500">({ticker})</span>
+            <ExternalLinks ticker={ticker} name={name} />
             {effCurPrice && (
               <span className="text-base font-bold ml-auto">
                 {effCurPrice.toLocaleString()}원
@@ -540,23 +564,6 @@ export function ValuationModal({
             {!isEtf && <DisclosureSection ticker={ticker} />}
           </div>
 
-          {/* 외부 링크 */}
-          <section className="mt-4 flex flex-wrap gap-2 text-xs">
-            <a href={`https://tossinvest.com/stocks/A${ticker}`}
-               target="_blank" rel="noopener noreferrer"
-               onClick={e => handleTossLinkClick(e, `https://tossinvest.com/stocks/A${ticker}`)}
-               className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded">
-              🔗 토스
-            </a>
-            <a href={`https://finance.naver.com/item/main.naver?code=${ticker}`}
-               className="px-2.5 py-1 bg-green-600 hover:bg-green-700 text-white rounded">
-              🔗 네이버 금융
-            </a>
-            <a href={`https://navercomp.wisereport.co.kr/v2/company/c1010001.aspx?cmp_cd=${ticker}`}
-               className="px-2.5 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded">
-              🔗 Wisereport
-            </a>
-          </section>
         </div>
       </div>
     </div>

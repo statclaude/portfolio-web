@@ -7,7 +7,7 @@ import {
 import {
   getPersonalProxies, setPersonalProxies, type PersonalProxy,
   fetchProxyUsage, type ProxyUsage,
-  getPersonalPollMs, setPersonalPollMs, POLL_OPTIONS, PUBLIC_MIN_POLL_MS,
+  getPersonalPollMs, setPersonalPollMs, POLL_OPTIONS, PUBLIC_MIN_POLL_MS, pollLabel,
   getDimSleepingEnabled, setDimSleepingEnabled,
   checkPersonalProxyPostSupport,
   invalidatePersonalProxyStatusCache,
@@ -38,7 +38,7 @@ import {
   setPendingSyncAction, peekPendingSyncAction, clearPendingSyncAction,
   type PendingSyncAction,
 } from "../lib/syncManager";
-import { isSignedIn, getAccessToken, wasSignedIn, signIn } from "../lib/googleAuth";
+import { isSignedIn, getAccessToken, wasSignedIn, signIn, getAuthDiag } from "../lib/googleAuth";
 import { useEscClose } from "../lib/useEscClose";
 import { isNativeApp } from "../lib/nativeProxy";
 
@@ -71,6 +71,7 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
   const [syncBusyMsg, setSyncBusyMsg] = useState("");   // 진행 중 오버레이 메시지
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(getLastSyncedAt());
   const [signedIn, setSignedIn] = useState(isSignedIn());  // 구글 로그인 여부 (UI 반응형)
+  const authDiag = getAuthDiag();  // 마지막 자동 로그인 갱신 실패 진단 (있으면 표시)
   const [independentMode, setIndependent] = useState(getIndependentGroupsMode());
   const [conflicts, setConflicts] = useState<TickerConflict[] | null>(null);
   const [tabVis, setTabVis] = useState(getTabVisibility());
@@ -243,7 +244,7 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
     setStatusMsg("Google 로그인 중...");
     setSyncBusy(true);
     setSyncBusyMsg("Google 로그인 중...");
-    signIn();   // 전체 페이지 redirect — 이후 코드는 실행 안 됨
+    void signIn();   // 확장 있으면 그 자리에서 완료, 없으면 전체 페이지 redirect(이후 코드는 실행 안 됨)
   }, []);
 
   const onUploadClick = useCallback(() => {
@@ -498,6 +499,18 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
                   🔐 로그인 안 됨 — 저장/가져오기를 누르면 Google 로그인 후 그대로 실행됩니다.
                 </div>
               )}
+              {authDiag && (
+                <div className="text-[11px] text-rose-700 bg-rose-50 border border-rose-200 rounded px-1.5 py-1 leading-relaxed">
+                  ⚠️ 자동 로그인 갱신 실패 ·{" "}
+                  {new Date(authDiag.at).toLocaleString("ko-KR")}
+                  <br />
+                  <span className="font-mono text-[10px] text-rose-600">
+                    {authDiag.stage}
+                    {authDiag.error ? ` · ${authDiag.error}` : ""}
+                    {authDiag.detail ? ` · ${authDiag.detail}` : ""}
+                  </span>
+                </div>
+              )}
               <div className="flex gap-2 flex-wrap">
                 <button disabled={syncBusy}
                   onClick={onUploadClick}
@@ -712,7 +725,7 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
                 </a>
               </div>
             )}
-            {/* 폴링 주기 — 공개는 30/60초·수동만. 5/10초는 전용 프록시 또는 확장일 때.
+            {/* 폴링 주기 — 공개는 5분 고정·수동만. 그보다 빠른 주기는 전용 프록시 또는 확장일 때.
                 확장은 브라우저가 직접 요청하므로 워커 호출 한도가 아예 없다. */}
             <div className="flex items-center gap-2 mt-1">
               <span className={`text-[11px] ${fastPollAllowed ? "text-gray-700" : "text-gray-400"}`}>
@@ -732,13 +745,13 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
                                         ? "bg-blue-600 text-white border-blue-700 font-bold"
                                         : "bg-white text-gray-600 border-gray-300 hover:bg-gray-50"}
                                       ${!enabled ? "opacity-40 cursor-not-allowed" : ""}`}>
-                    {ms === 0 ? "수동" : `${ms / 1000}초`}
+                    {pollLabel(ms)}
                   </button>
                 );
               })}
               {!fastPollAllowed && (
                 <span className="text-[10px] text-gray-400 ml-1">
-                  (공개: 기본 60초 · 30·60·수동 선택 · 5·10초는 전용 프록시 또는 확장)
+                  (공개는 5분 고정 — 무료 워커 한도 보호. 더 빠르게는 확장·앱·개인 프록시)
                 </span>
               )}
             </div>

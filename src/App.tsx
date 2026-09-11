@@ -146,11 +146,16 @@ function Dashboard() {
   // (다이얼로그들이 이미 useEscClose 로 Escape 를 구독 중이라 재사용). 2) 다이얼로그가
   // 없고 기본 탭(지수, US_MARKET_TAB_KEY)이 아니면 기본 탭으로 돌아간다(다이얼로그가
   // 아니라 탭 전환으로 "여러 단계" 들어온 경우 한 번에 종료되던 문제 방지).
-  // 3) 이미 기본 탭이고 아무것도 안 열려 있으면 그때 앱을 종료한다.
+  // 3) 이미 기본 탭이고 아무것도 안 열려 있으면 — 안드로이드 표준 관례대로 바로 종료하지
+  //    않고 "한 번 더 누르면 종료돼요" 토스트를 띄운 뒤, 2초 안에 한 번 더 눌러야 종료한다
+  //    (의도치 않은 종료 방지).
   // 리스너는 한 번만 등록(activeTab 바뀔 때마다 재등록하면 등록 순서가 꼬여 중복/누락이
   // 생길 수 있어서) 하고, 최신 activeTab 은 ref 로 읽는다.
   const activeTabRef = useRef(activeTab);
   useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
+  const [exitArmed, setExitArmed] = useState(false);
+  const exitArmedRef = useRef(false);
+  const exitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (!isNativeApp()) return;
     let cancelled = false;
@@ -167,10 +172,26 @@ function Dashboard() {
           setActiveTab(US_MARKET_TAB_KEY);
           return;
         }
-        void CapApp.exitApp();
+        if (exitArmedRef.current) {
+          if (exitTimerRef.current) clearTimeout(exitTimerRef.current);
+          exitArmedRef.current = false;
+          setExitArmed(false);
+          void CapApp.exitApp();
+          return;
+        }
+        exitArmedRef.current = true;
+        setExitArmed(true);
+        exitTimerRef.current = setTimeout(() => {
+          exitArmedRef.current = false;
+          setExitArmed(false);
+        }, 2000);
       }).then((h) => { handle = h; });
     });
-    return () => { cancelled = true; handle?.remove(); };
+    return () => {
+      cancelled = true;
+      handle?.remove();
+      if (exitTimerRef.current) clearTimeout(exitTimerRef.current);
+    };
   }, []);
 
   const extReady = useExtensionProxyReady();
@@ -730,6 +751,14 @@ function Dashboard() {
   return (
     <div className="min-h-screen bg-gray-50">
       <NewVersionToast />
+      {exitArmed && (
+        <div className="fixed bottom-6 inset-x-0 mx-auto w-fit max-w-[calc(100vw-2rem)] z-[70]
+                        bg-gray-900/90 text-white text-xs font-medium
+                        px-4 py-2 rounded-full shadow-lg text-center
+                        animate-[fadeIn_0.2s_ease-out]">
+          한 번 더 누르면 종료돼요
+        </div>
+      )}
       {tossMaint.active && (
         <div className="bg-amber-100 border-b border-amber-300 text-amber-900 text-xs
                         px-4 py-1.5 text-center">

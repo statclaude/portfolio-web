@@ -14,12 +14,63 @@
 import { Browser } from "@capacitor/browser";
 import { App as CapApp } from "@capacitor/app";
 import { isNativeApp } from "./nativeProxy";
+import {
+  isExtensionProxyReady, getGoogleTokenViaExtension, clearGoogleTokenViaExtension,
+} from "./extensionProxy";
 
 const CLIENT_ID = "103182209420-am9ojjlfnh7m00a06nn84dkhnut2mja8.apps.googleusercontent.com";
 const SCOPE = "https://www.googleapis.com/auth/drive.appdata";
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const REVOKE_URL = "https://oauth2.googleapis.com/revoke";
 const STATE_VALUE = "drive_auth_v1";
+
+// ─── silent refresh 진단 ──────────────────────────────────────
+// 왜 필요한가 — GIS 의 실패 사유가 전부 삼켜지고 있어서 1시간마다 로그아웃되는 원인을
+//   짐작만 할 수 있었다(서드파티 쿠키 차단? interaction_required? 스크립트 로드 실패?).
+//   사유마다 대응이 완전히 달라서, 추측으로 고치면 헛수고다. 마지막 1건만 남긴다.
+const DIAG_KEY = "gdrive_auth_diag";
+
+export interface AuthDiag {
+  at: number;             // 실패 시각 (ms)
+  stage: string;          // 어느 단계에서 실패했나
+  error?: string;         // GIS 가 준 error 코드
+  detail?: string;        // error_description 등
+}
+
+function noteAuthFailure(stage: string, err?: unknown): void {
+  let error: string | undefined;
+  let detail: string | undefined;
+  if (err && typeof err === "object") {
+    const o = err as Record<string, unknown>;
+    error = typeof o.type === "string" ? o.type
+      : typeof o.error === "string" ? o.error : undefined;
+    detail = typeof o.error_description === "string" ? o.error_description
+      : typeof o.message === "string" ? o.message : undefined;
+  } else if (typeof err === "string") {
+    error = err;
+  }
+  // ★ 확장 없는 웹의 popup_closed 는 '예상된 실패' 다 — 고칠 방법이 없다.
+  //   GIS 는 prompt:"none" 이어도 팝업을 띄우는데 만료 타이머엔 사용자 제스처가 없어
+  //   브라우저가 즉시 닫는다. 이걸 빨간 박스로 띄우면 사용자가 고장으로 오해한다.
+  //   그 사용자에게 필요한 신호는 "로그인 안 됨" 하나면 충분하다(이미 표시된다).
+  const expected = error === "popup_closed" && !isNativeApp() && !isExtensionProxyReady();
+  const diag: AuthDiag = { at: Date.now(), stage, error, detail };
+  console.warn("[googleAuth] silent refresh 실패", diag);
+  if (expected) return;
+  try { localStorage.setItem(DIAG_KEY, JSON.stringify(diag)); } catch { /* noop */ }
+}
+
+// 성공하면 지운다 — 옛 실패 기록이 남아 오해를 부르지 않게.
+function clearAuthDiag(): void {
+  try { localStorage.removeItem(DIAG_KEY); } catch { /* noop */ }
+}
+
+export function getAuthDiag(): AuthDiag | null {
+  try {
+    const raw = localStorage.getItem(DIAG_KEY);
+    return raw ? JSON.parse(raw) as AuthDiag : null;
+  } catch { return null; }
+}
 
 // 네이티브 앱 전용 — 시스템 브라우저로 로그인시킬 때 쓰는 state/redirect.
 //   redirect_uri 는 웹과 동일한(이미 Google Cloud Console 에 등록된) 주소를 그대로 쓴다 —
@@ -36,6 +87,10 @@ const PRE_AUTH_PATH_KEY = "gdrive_pre_auth_path";
 
 // silent refresh 를 토큰 만료 N ms 전에 시도
 const SILENT_REFRESH_LEAD_MS = 5 * 60 * 1000;
+// silent refresh 가 GIS 콜백을 영영 못 받는 경우(일부 Android WebView 에서 서드파티
+// 쿠키/iframe 제한으로 callback·error_callback 둘 다 안 불리는 케이스 확인됨) 대비 —
+// 이 시간 안에 응답 없으면 강제로 null 반환해 "저장중" 무한 대기를 막는다.
+const SILENT_REFRESH_TIMEOUT_MS = 8000;
 
 interface CachedToken { token: string; expiresAt: number; }
 
@@ -123,22 +178,29 @@ function ensureTokenClient(): Promise<GisTokenClient | null> {
           scope: SCOPE,
           callback: (resp) => {
             if (resp.error || !resp.access_token) {
+              noteAuthFailure("callback", resp);
               resolveSilent(null);
               return;
             }
+            clearAuthDiag();
             const exp = typeof resp.expires_in === "string"
               ? parseInt(resp.expires_in, 10)
               : (resp.expires_in ?? 3600);
             saveToken(resp.access_token, exp);
             resolveSilent(resp.access_token);
           },
-          error_callback: () => resolveSilent(null),
+          error_callback: (err) => {
+            // GIS 가 popup/iframe 을 못 띄웠거나 세션이 없을 때 여기로 온다.
+            noteAuthFailure("error_callback", err);
+            resolveSilent(null);
+          },
         });
         resolve(tokenClient);
         return;
       }
       // GIS 가 끝내 로드되지 않으면 (e.g. 네트워크 차단) 10초 후 포기
       if (Date.now() - start > 10_000) {
+        noteAuthFailure("gis-load-timeout");
         resolve(null);
         return;
       }
@@ -154,15 +216,60 @@ function resolveSilent(token: string | null): void {
   list.forEach((r) => r(token));
 }
 
+// ─── 웹: 확장 경로 ────────────────────────────────────────────
+// GIS 로는 조용한 갱신이 안 된다 — prompt:"none" 이어도 팝업을 띄우는데, 만료 타이머에서
+//   부르면 사용자 제스처가 없어 브라우저가 즉시 닫는다(위 noteAuthFailure 주석 참고).
+//   확장의 chrome.identity 는 팝업을 안 써서 조용히 재발급된다.
+//   확장이 없으면 기존 GIS 경로로 폴백한다 — 그쪽은 여전히 1시간마다 클릭이 필요하다.
+async function extensionAuthToken(interactive: boolean): Promise<string | null> {
+  if (!isExtensionProxyReady()) return null;
+  const r = await getGoogleTokenViaExtension(interactive);
+  if (!r) { if (!interactive) noteAuthFailure("ext-no-token"); return null; }
+  clearAuthDiag();
+  saveToken(r.token, r.expiresIn);
+  return r.token;
+}
+
+// 확장 갱신 타이머 — 만료 5분 전에 chrome.identity 로 조용히 새 토큰을 받는다.
+function scheduleExtensionRefresh(): void {
+  if (refreshTimer !== null) {
+    window.clearTimeout(refreshTimer);
+    refreshTimer = null;
+  }
+  if (!accessToken) return;
+  const delay = Math.max(0, tokenExpiresAt - Date.now() - SILENT_REFRESH_LEAD_MS);
+  refreshTimer = window.setTimeout(() => {
+    refreshTimer = null;
+    void extensionAuthToken(false);
+  }, delay);
+}
+
 // silent refresh 호출 — 사용자 동의 + Google 세션 있으면 hidden iframe 으로 새 토큰 발급
 // 첫 로그인은 redirect 로 처리하므로 여기선 prompt: '' (interactive 없음) 만 사용
 function requestSilentRefresh(): Promise<string | null> {
   if (!wasSignedIn()) return Promise.resolve(null);
   return new Promise((resolve) => {
-    pendingSilentResolvers.push(resolve);
+    let settled = false;
+    let timeoutId: number | null = null;
+    // 이 요청 전용 finish — pendingSilentResolvers 에서 자기 자신만 안전하게 제거.
+    //   (resolveSilent() 는 배치로 한꺼번에 드레인하므로, timeout 으로 먼저 끝난 뒤
+    //    나중에 GIS 콜백이 resolveSilent() 를 불러도 이미 settled 라 무시됨 — 이중 처리 없음)
+    const finish = (token: string | null) => {
+      if (settled) return;
+      settled = true;
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+      pendingSilentResolvers = pendingSilentResolvers.filter((r) => r !== finish);
+      resolve(token);
+    };
+    pendingSilentResolvers.push(finish);
+    // GIS 가 callback/error_callback 둘 다 영영 안 부르는 경우 대비 — 타임아웃으로 강제 종료.
+    timeoutId = window.setTimeout(() => {
+      noteAuthFailure("silent-refresh-timeout");
+      finish(null);
+    }, SILENT_REFRESH_TIMEOUT_MS);
     void ensureTokenClient().then((client) => {
       if (!client) {
-        resolveSilent(null);
+        finish(null);
         return;
       }
       try {
@@ -170,8 +277,9 @@ function requestSilentRefresh(): Promise<string | null> {
         //   필요한 경우 error_callback 으로 실패 (popup 안 뜸).
         // 빈 문자열 "" 은 "처음만 안 묻고 그 외엔 popup 가능" 이라 토큰 만료 시 팝업 노출됨.
         client.requestAccessToken({ prompt: "none" });
-      } catch {
-        resolveSilent(null);
+      } catch (e) {
+        noteAuthFailure("request-throw", e);
+        finish(null);
       }
     });
   });
@@ -183,6 +291,8 @@ function scheduleSilentRefresh(): void {
     refreshTimer = null;
   }
   if (!accessToken) return;
+  // 확장이 있으면 팝업 없이 갱신되므로 타이머가 실제로 동작한다.
+  if (!isNativeApp() && isExtensionProxyReady()) { scheduleExtensionRefresh(); return; }
   const delay = Math.max(0, tokenExpiresAt - Date.now() - SILENT_REFRESH_LEAD_MS);
   refreshTimer = window.setTimeout(() => {
     refreshTimer = null;
@@ -210,9 +320,11 @@ scheduleSilentRefresh();
 // 가끔 hidden iframe UI 가 잠깐 보이는 문제. 토큰 갱신은 SettingsDialog 진입 시
 // 또는 명시적 sync 액션(uploadToDrive 등) 시점에만 수행 (일관 정책).
 
-// 로그인 — 네이티브 앱은 시스템 브라우저로, 웹은 전체 페이지 redirect 로.
-// Promise 안 반환 — 로그인 후 다시 돌아올 때(웹: URL fragment, 앱: 딥링크) 토큰 처리됨
-export function signIn(): void {
+// 로그인 — 네이티브 앱은 시스템 브라우저로, 확장이 있으면 확장의 chrome.identity 로,
+//   그 외 웹은 전체 페이지 redirect 로.
+// 확장 경로는 Promise 를 실제로 반환한다(페이지 이동이 없어 그 자리에서 끝난다) — redirect/
+//   네이티브 경로는 이 시점 이후 코드가 이어지지 않으므로 호출측은 계속 fire-and-forget 로 쓴다.
+export async function signIn(): Promise<void> {
   // 로그인 후 돌아갈 path 저장 (예: 모달 다시 열림 등)
   try {
     localStorage.setItem(PRE_AUTH_PATH_KEY, window.location.pathname + window.location.search);
@@ -230,6 +342,15 @@ export function signIn(): void {
     });
     void Browser.open({ url: `${AUTH_URL}?${params}` });
     return;
+  }
+
+  // 확장이 있으면 먼저 확장의 chrome.identity 로 로그인 시도 — 크롬 네이티브 동의 팝업이
+  //   최초 1회만 뜨고(사용자 클릭으로 호출되므로 interactive:true 가능), 동의하면 그 뒤로는
+  //   만료 타이머에서도 팝업 없이 조용히 갱신된다(GIS 리다이렉트는 매시간 클릭이 필요해
+  //   이 기능을 만든 이유 자체가 없어진다). 거부/실패하면 기존 GIS 리다이렉트로 폴백.
+  if (isExtensionProxyReady()) {
+    const t = await extensionAuthToken(true);
+    if (t) return;
   }
 
   const params = new URLSearchParams({
@@ -305,7 +426,15 @@ if (isNativeApp()) {
 // 토큰 가져오기 — 캐시 유효 시 즉시 반환, 만료/없음이면 silent refresh 시도
 export async function getAccessToken(): Promise<string | null> {
   if (accessToken && Date.now() < tokenExpiresAt - 30_000) {
+    // 쓸 수 있는 토큰이 있다 = 인증이 지금 정상이다. 옛 실패 기록이 남아 있으면 지운다.
+    //   안 지우면 "실패" 박스가 계속 떠서, 저장·가져오기가 되는데도 고장난 것처럼 보인다.
+    clearAuthDiag();
     return accessToken;
+  }
+  // 확장이 있으면 확장으로 조용히 받는다 — 팝업이 없어 타이머에서도 성공한다.
+  if (!isNativeApp() && isExtensionProxyReady()) {
+    const t = await extensionAuthToken(false);
+    if (t) return t;
   }
   // 이전에 로그인한 적 있으면 silent refresh 시도 (사용자 클릭 불필요)
   if (wasSignedIn()) {
@@ -320,6 +449,11 @@ export async function signOut(): Promise<void> {
   const t = accessToken;
   clearToken();
   if (t) {
+    // 확장도 토큰을 캐시한다 — 안 비우면 로그아웃 후에도 크롬이 같은(이제 revoke 된) 토큰을
+    //   계속 돌려준다(네이티브·확장 갱신 경로와 같은 함정).
+    if (!isNativeApp() && isExtensionProxyReady()) {
+      await clearGoogleTokenViaExtension(t);
+    }
     try {
       await fetch(`${REVOKE_URL}?token=${encodeURIComponent(t)}`, {
         method: "POST",

@@ -21,7 +21,7 @@ import { getTodayProxyCalls, getRecentProxyCalls } from "../lib/usageCounter";
 import {
   getPersonalProxies, setPersonalProxies, type PersonalProxy,
   fetchProxyUsage, type ProxyUsage,
-  getEffectivePollMs, getPersonalPollMs, setPersonalPollMs, POLL_OPTIONS, PUBLIC_MIN_POLL_MS,
+  getEffectivePollMs, getPersonalPollMs, setPersonalPollMs, POLL_OPTIONS, PUBLIC_MIN_POLL_MS, pollLabel,
   getDimSleepingEnabled, setDimSleepingEnabled,
 } from "../lib/proxyConfig";
 import { useAdaptiveRefreshMs } from "../lib/proxyStatus";
@@ -107,7 +107,7 @@ import {
   uploadToDrive, downloadFromDrive,
   tryRestoreSession, peekPendingSyncAction,
 } from "../lib/syncManager";
-import { isSignedIn, getAccessToken, wasSignedIn } from "../lib/googleAuth";
+import { isSignedIn, getAccessToken, wasSignedIn, getAuthDiag } from "../lib/googleAuth";
 import { isNativeApp } from "../lib/nativeProxy";
 import type { Stock } from "../types";
 import { getTabVisibility, setTabVisibility, getMarketSplit, setMarketSplit } from "../lib/tabVisibility";
@@ -247,11 +247,17 @@ export function MobileSimpleView() {
   // 안드로이드 뒤로가기 — 실제 폰에서 쓰이는 건 Dashboard 가 아니라 이 컴포넌트라
   // (isMobile 이면 MobileSimpleView 렌더) 여기에도 같은 로직을 둔다.
   // 우선순위: 1) 열린 다이얼로그/모달(또는 이 "더보기" 드롭다운)이 있으면 그것만 닫는다.
-  // 2) 없고 기본 탭(KR_KEY)이 아니면 기본 탭으로 돌아간다. 3) 이미 기본 탭이면 종료한다.
+  // 2) 없고 기본 탭(KR_KEY)이 아니면 기본 탭으로 돌아간다.
+  // 3) 이미 기본 탭이면 — 안드로이드 표준 관례대로 즉시 종료하지 않고, "한 번 더 누르면
+  //    종료돼요" 토스트를 띄운 뒤 일정 시간(2초) 안에 뒤로가기를 한 번 더 눌러야 실제로
+  //    종료한다. 의도치 않은 종료(오조작)를 막기 위함.
   const activeTabRef = useRef(activeTab);
   useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
   const moreOpenRef = useRef(moreOpen);
   useEffect(() => { moreOpenRef.current = moreOpen; }, [moreOpen]);
+  const [exitArmed, setExitArmed] = useState(false);
+  const exitArmedRef = useRef(false);
+  const exitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (!isNativeApp()) return;
     let cancelled = false;
@@ -272,10 +278,26 @@ export function MobileSimpleView() {
           setActiveTab(KR_KEY);
           return;
         }
-        void CapApp.exitApp();
+        if (exitArmedRef.current) {
+          if (exitTimerRef.current) clearTimeout(exitTimerRef.current);
+          exitArmedRef.current = false;
+          setExitArmed(false);
+          void CapApp.exitApp();
+          return;
+        }
+        exitArmedRef.current = true;
+        setExitArmed(true);
+        exitTimerRef.current = setTimeout(() => {
+          exitArmedRef.current = false;
+          setExitArmed(false);
+        }, 2000);
       }).then((h) => { handle = h; });
     });
-    return () => { cancelled = true; handle?.remove(); };
+    return () => {
+      cancelled = true;
+      handle?.remove();
+      if (exitTimerRef.current) clearTimeout(exitTimerRef.current);
+    };
   }, []);
 
   // 밸류업 카드 등에서 히트맵 딥링크 요청 → 히트맵 탭으로 전환.
@@ -914,6 +936,14 @@ export function MobileSimpleView() {
          onTouchStart={handleTouchStart}
          onTouchEnd={handleTouchEnd}>
       <NewVersionToast />
+      {exitArmed && (
+        <div className="fixed bottom-6 inset-x-0 mx-auto w-fit max-w-[calc(100vw-2rem)] z-[70]
+                        bg-gray-900/90 text-white text-xs font-medium
+                        px-4 py-2 rounded-full shadow-lg text-center
+                        animate-[fadeIn_0.2s_ease-out]">
+          한 번 더 누르면 종료돼요
+        </div>
+      )}
       {tossMaint.active && (
         <div className="bg-amber-100 border-b border-amber-300 text-amber-900 text-[11px]
                         px-3 py-1.5 text-center leading-tight">
@@ -1988,6 +2018,7 @@ function SettingsModal({
   const [syncBusyLocal, setSyncBusyLocal] = useState(false);
   const [syncBusyMsgLocal, setSyncBusyMsgLocal] = useState("");
   const [lastSyncedAtLocal, setLastSyncedAtLocal] = useState<string | null>(getLastSyncedAt());
+  const authDiag = getAuthDiag();  // 마지막 자동 로그인 갱신 실패 진단 (있으면 표시, PC 설정과 동일)
 
   // 모달 열릴 때 현재 데이터 export 해서 textarea 채움
   // + 토큰 만료 감지 시 자동 logout
@@ -2221,6 +2252,18 @@ function SettingsModal({
                     마지막 동기화: {new Date(lastSyncedAtLocal).toLocaleString("ko-KR", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}
                   </div>
                 )}
+                {authDiag && (
+                  <div className="text-[11px] text-rose-700 bg-rose-50 border border-rose-200 rounded px-1.5 py-1 leading-relaxed">
+                    ⚠️ 자동 로그인 갱신 실패 ·{" "}
+                    {new Date(authDiag.at).toLocaleString("ko-KR")}
+                    <br />
+                    <span className="font-mono text-[10px] text-rose-600">
+                      {authDiag.stage}
+                      {authDiag.error ? ` · ${authDiag.error}` : ""}
+                      {authDiag.detail ? ` · ${authDiag.detail}` : ""}
+                    </span>
+                  </div>
+                )}
                 <div className="flex gap-1 flex-wrap">
                   <button disabled={syncBusyLocal}
                     onClick={async () => {
@@ -2381,7 +2424,7 @@ function SettingsModal({
               <p className="text-[11px] text-emerald-700">{savedMsg}</p>
             )}
 
-            {/* 폴링 주기 — 5·10초는 전용 프록시 또는 확장일 때만 enabled */}
+            {/* 폴링 주기 — 공개는 5분 고정, 그보다 빠른 주기는 전용 프록시 또는 확장일 때만 enabled */}
             <div className="flex items-center gap-1 mt-2 flex-wrap">
               <span className={`text-[11px] ${fastPollAllowed ? "text-gray-700" : "text-gray-400"}`}>
                 폴링 주기:
@@ -2399,13 +2442,13 @@ function SettingsModal({
                                         ? "bg-blue-600 text-white border-blue-700 font-bold"
                                         : "bg-white text-gray-600 border-gray-300 hover:bg-gray-50"}
                                       ${!enabled ? "opacity-40 cursor-not-allowed" : ""}`}>
-                    {ms === 0 ? "수동" : `${ms / 1000}초`}
+                    {pollLabel(ms)}
                   </button>
                 );
               })}
               {!fastPollAllowed && (
                 <span className="text-[10px] text-gray-400 w-full mt-0.5">
-                  (공개: 기본 60초 · 30·60·수동 선택 · 5·10초는 전용 프록시 또는 확장)
+                  (공개는 5분 고정 — 무료 워커 한도 보호. 더 빠르게는 확장·앱·개인 프록시)
                 </span>
               )}
             </div>

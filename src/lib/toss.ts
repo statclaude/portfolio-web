@@ -35,7 +35,9 @@ export const TOSS_SYMBOL_URL: Record<string, string> = {
   //   EUR/JPY 는 토스 허브 페이지에 해당 데이터가 없어 매핑하지 않음 — quoteUrl() 이 자동으로
   //   야후(finance.yahoo.com/quote/EURKRW=X 등)로 폴백됨.
   "DX-Y.NYB": "https://www.tossinvest.com/indices/RGI..DXY",
-  "KRW=X":    "https://www.tossinvest.com/indices/exchange-rate",
+  // ?tab=지수·환율 — 사용자가 실기기에서 확인해 준, 토스 사이트 내 "달러 환율" 링크가
+  // 실제로 가리키는 정확한 주소(쿼리 없는 버전은 앱 딥링크에서 정보를 못 불러옴).
+  "KRW=X":    "https://www.tossinvest.com/indices/exchange-rate?tab=%EC%A7%80%EC%88%98%E3%83%BB%ED%99%98%EC%9C%A8",
   // 미국 국채금리 커브
   "^US2Y": "https://www.tossinvest.com/indices/ROB.US2YT-RR",
   "^FVX":  "https://www.tossinvest.com/indices/ROB.US5YT-RR",
@@ -94,8 +96,25 @@ export const TOSS_SYMBOL_URL: Record<string, string> = {
   "KORU": "https://www.tossinvest.com/stocks/US20130410003",   // Direxion 3x 한국 불 (선행·투심 증폭)
 };
 
+// "exchange-rate" 는 다른 항목(RFU.GCv1, RGI..DXY 같은)처럼 개별 종목/지수 코드가
+// 아니라, 달러환율(USD/KRW) 전용으로 따로 만든 웹 허브 페이지다(토스 자체 API 에서도
+// 종목코드 대신 "EXCHANGE_RATE" 라는 특수 카테고리로 취급 — 실제 개별 코드가 없음을 확인함).
+// 1차 시도: nextLandingUrl 래퍼 없이 https 주소를 그대로 넘기는 방식 — 실기기 테스트 결과 실패
+// ("정보를 불러올 수 없어요" 그대로). 2차 시도: 토스 사이트 자체가 내부적으로 쓰는 정확한 주소
+// (?tab=지수·환율 쿼리 포함, TOSS_SYMBOL_URL["KRW=X"] 에 반영)로 다른 항목들과 동일하게
+// nextLandingUrl 래퍼를 태워 보낸다 — 이것도 안 되면 앱 시도 자체를 건너뛰고 곧장 웹으로
+// 여는 방식(이전 커밋에서 검증됨: 로그인 없이 정상 로드)으로 되돌려야 한다.
+
+function isTossUrl(httpsUrl: string): boolean {
+  try {
+    return /(^|\.)tossinvest\.com$/.test(new URL(httpsUrl).hostname);
+  } catch {
+    return false;
+  }
+}
+
 // tossinvest.com URL 을 받아 토스 앱 deep link 로 변환.
-// 비(非) toss URL 은 그대로 반환.
+// 비(非) toss URL 은 null(=앱 시도 안 함).
 function toDeepLink(httpsUrl: string): string | null {
   try {
     const u = new URL(httpsUrl);
@@ -137,14 +156,16 @@ export function openExternal(url: string): void {
 // <a href={url}> 의 onClick 핸들러로 사용.
 // 모바일에서는 기본 동작 가로채 토스 앱 우선 → 폴백 https.
 // 비-toss URL 은 기본 동작 유지 (네이버 금융 등 그대로 새 탭).
+// (toss URL 은 항상 openExternal()/Browser.open() 을 타야 한다 — 기본 <a target=_blank>
+//  로 새면 WebView 의 window.open → Intent 경로로 새어나가 "PC로 접속해주세요"
+//  오인식 문제가 재발한다.)
 export function handleTossLinkClick(
   e: React.MouseEvent<HTMLAnchorElement | HTMLElement>,
   url: string,
 ): void {
   // 새 탭 modifier(중클릭·cmd·ctrl) 는 브라우저 기본 동작 유지
   if (e.ctrlKey || e.metaKey || e.shiftKey || e.button === 1) return;
-  const deep = toDeepLink(url);
-  if (!deep || !isMobile()) return;
+  if (!isTossUrl(url) || !isMobile()) return;
   e.preventDefault();
   e.stopPropagation();
   openExternal(url);

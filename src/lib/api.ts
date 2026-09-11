@@ -93,6 +93,15 @@ function buildProxyUrl(base: string, targetUrl: string): string {
   return `${base}/?url=${encodeURIComponent(targetUrl)}`;
 }
 
+// 특정 (호스트, 공급자) 조합은 원천적으로 막혀 있어 재시도해도 의미가 없다.
+//   예: 토스가 Cloudflare egress 를 통째로 거부 — 다른 공급자로 넘어가야 성공한다.
+const HOST_PROVIDER_DENY: Array<{ host: RegExp; provider: string; why: string }> = [
+  { host: /^wts-info-api\.tossinvest\.com$/, provider: "cloudflare", why: "토스가 CF egress 거부" },
+];
+function isDeniedCombo(host: string, provider: string): boolean {
+  return HOST_PROVIDER_DENY.some(d => d.provider === provider && d.host.test(host));
+}
+
 // 다른 프록시로 재시도할 가치가 있는 status.
 //   ⚠️ 토스는 과호출 시 "400 + 빈 본문"을 돌려준다 (실측: 같은 size 가 한 번은 400, 잠시 뒤 200).
 //      즉 400 은 파라미터 오류가 아니라 사실상 레이트리밋 신호다. 여기서 다른 프록시로 즉시
@@ -145,6 +154,13 @@ export async function fetchProxied(
   }
 
   const plan = proxyPlanFor(targetUrl);
+  // 원천 차단된 (호스트,공급자) 조합은 미리 걸러낸다 — 걸러내고 남는 게 없으면
+  // 원래 목록을 그대로 쓴다 (예: 전용 프록시가 그 공급자 하나뿐인 경우, 안 거르는 게 낫다).
+  const targetHost = (() => { try { return new URL(targetUrl).hostname; } catch { return ""; } })();
+  const denyFilter = (list: string[]) => {
+    const usable = list.filter(u => !isDeniedCombo(targetHost, proxyProvider(u)));
+    return usable.length > 0 ? usable : list;
+  };
   // 건강(=down 아님) 우선, down은 후순위. 그 안에서는 랜덤 (부하 분산)
   const rank = (list: string[]) => [
     ...list.filter(u => !isProxyDown(u)).sort(() => Math.random() - 0.5),
@@ -153,7 +169,7 @@ export async function fetchProxied(
   // fallback(공개)은 항상 전용 프록시 뒤 — 앞에서 성공하면 도달하지 않는다.
   //  확장 표식은 빼고 돈다. 실제 호출은 위 블록에서 이미 시도했고(우선순위 보장),
   //  표식은 "전용 프록시가 있다" 는 판정을 위해 목록에 들어가 있을 뿐이다.
-  const order = [...rank(plan.primary), ...rank(plan.fallback)]
+  const order = [...rank(denyFilter(plan.primary)), ...rank(denyFilter(plan.fallback))]
     .filter(u => !isExtensionProxyUrl(u));
   let lastErr: unknown;
   let lastResp: Response | undefined;

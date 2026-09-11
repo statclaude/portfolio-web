@@ -48,11 +48,14 @@ function getLastSyncedTs(): string | null {
 }
 
 // 로그인 + 모드 OFF 로 시작 (자동 sync 는 사용자가 명시적으로 ON 해야 활성)
-// — signIn() 은 redirect 라 호출 후 페이지가 google 로 이동, 돌아오면 token 저장됨
+// — signIn() 은 확장이 있으면 그 자리에서 완료되고(페이지 이동 없음), 없으면 redirect 라
+//   호출 후 페이지가 google 로 이동, 돌아오면 token 저장됨
 // — 사전 setSyncMode("off") 해두면 redirect 후 이미 OFF 상태 유지
 export async function enableSync(): Promise<void> {
   setSyncMode("off");
-  signIn();  // redirect — 이 시점 이후 코드는 페이지 navigate 로 실행 안 됨
+  // 확장 경로면 여기서 실제로 완료되고 코드가 이어진다. redirect/네이티브 경로는
+  // 여전히 이 시점 이후 코드가 실행되지 않는다.
+  await signIn();
 }
 
 // 로그아웃 + 상태 초기화
