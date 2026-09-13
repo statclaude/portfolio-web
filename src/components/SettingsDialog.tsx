@@ -227,7 +227,7 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
         window.alert("✅ Drive 에서 불러왔습니다.");
         onClose();   // 닫아서 메인 UI(그룹 폴더 등) 즉시 반영
       } else {
-        alert("⚠️ Drive 에 저장된 데이터가 없습니다.\n\n먼저 [↑ 저장하기] 로 현재 기기 데이터를 Drive 에 저장하세요.");
+        alert("⚠️ Drive 에 저장된 데이터가 없습니다.\n\n먼저 [↓ 저장하기] 로 현재 기기 데이터를 Drive 에 저장하세요.");
         setStatusMsg("⚠️ Drive 에 데이터 없음");
       }
     } catch (e) {
@@ -515,12 +515,12 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
                 <button disabled={syncBusy}
                   onClick={onUploadClick}
                   className="px-2 py-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs rounded">
-                  ↑ 저장하기
+                  ↓ 저장하기
                 </button>
                 <button disabled={syncBusy}
                   onClick={onDownloadClick}
                   className="px-2 py-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs rounded">
-                  ↓ 가져오기
+                  ↑ 가져오기
                 </button>
                 {signedIn && (
                   <button disabled={syncBusy}

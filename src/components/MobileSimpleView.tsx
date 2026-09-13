@@ -2285,7 +2285,7 @@ function SettingsModal({
                       finally { setSyncBusyLocal(false); setSyncBusyMsgLocal(""); }
                     }}
                     className="px-2 py-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs rounded">
-                    ↑ 저장하기
+                    ↓ 저장하기
                   </button>
                   <button disabled={syncBusyLocal}
                     onClick={async () => {
@@ -2313,7 +2313,7 @@ function SettingsModal({
                       finally { setSyncBusyLocal(false); setSyncBusyMsgLocal(""); }
                     }}
                     className="px-2 py-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs rounded">
-                    ↓ 가져오기
+                    ↑ 가져오기
                   </button>
                   <button disabled={syncBusyLocal}
                     onClick={async () => {
