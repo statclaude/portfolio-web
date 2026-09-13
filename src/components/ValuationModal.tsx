@@ -454,19 +454,7 @@ export function ValuationModal({
             <span className="hidden sm:inline-flex items-baseline gap-3">
               <span className="text-base font-bold">{name}</span>
               <span className="text-sm text-gray-500">({ticker})</span>
-<<<<<<< HEAD
-              <ExternalLinks ticker={ticker} name={name} />
-=======
-              {onRequestSearch && (
-                <button onClick={() => { onClose(); onRequestSearch(name); }}
-                        title={`${name} 검색 — 관심종목에 추가`}
-                        className="px-1.5 py-0.5 rounded border border-gray-300 bg-white
-                                   text-xs text-gray-600 hover:bg-gray-100">
-                  🔍 추가
-                </button>
-              )}
               <ExternalLinks ticker={ticker} name={name} onDraw={() => setDrawOpen(true)} />
->>>>>>> d95bd3b (feat(차트): 그리기 전용 차트 팝업 — 추세선·수평선·가격선·피보나치)
               {effCurPrice && (
                 <span className="text-base font-bold ml-3">
                   {effCurPrice.toLocaleString()}원
@@ -482,19 +470,7 @@ export function ValuationModal({
           <div className="sm:hidden flex items-baseline gap-2 mt-1 flex-wrap">
             <span className="text-base font-bold">{name}</span>
             <span className="text-sm text-gray-500">({ticker})</span>
-<<<<<<< HEAD
-            <ExternalLinks ticker={ticker} name={name} />
-=======
-            {onRequestSearch && (
-              <button onClick={() => { onClose(); onRequestSearch(name); }}
-                      title={`${name} 검색 — 관심종목에 추가`}
-                      className="px-1.5 py-0.5 rounded border border-gray-300 bg-white
-                                 text-xs text-gray-600 hover:bg-gray-100">
-                🔍 추가
-              </button>
-            )}
             <ExternalLinks ticker={ticker} name={name} onDraw={() => setDrawOpen(true)} />
->>>>>>> d95bd3b (feat(차트): 그리기 전용 차트 팝업 — 추세선·수평선·가격선·피보나치)
             {effCurPrice && (
               <span className="text-base font-bold ml-auto">
                 {effCurPrice.toLocaleString()}원
