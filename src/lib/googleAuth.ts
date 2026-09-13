@@ -10,10 +10,19 @@
 // 앱 WebView 와 localStorage 가 분리돼 있어 토큰을 거기 저장해봐야 앱이 못 보므로,
 // 시스템 브라우저에 돌아온 이 페이지는 토큰을 저장하지 않고 그대로 딥링크로 릴레이만 한다.
 // (관련: WEB_RELAY_URI, APP_SCHEME_REDIRECT, handleAppAuthUrl)
+//
+// ⚠️ 위 방식은 "1시간마다 로그아웃"의 원인이기도 하다 — 시스템 브라우저 릴레이는 implicit
+//   flow(access_token 만)라 refresh 수단이 없고, 앱 WebView 에서의 GIS silent refresh 는
+//   서드파티 쿠키/iframe 제한으로 거의 항상 실패한다(콜백이 영영 안 옴 → 8초 타임아웃).
+//   그래서 APK v1.1.0+ 는 Play 서비스 AuthorizationClient 네이티브 플러그인(GoogleAuthPlugin.java)
+//   을 우선 시도한다 — 한 번 동의하면 이후 authorize() 재호출은 UI 없이 새 토큰을 준다.
+//   플러그인이 없는 구버전 APK(설치돼 있다면)는 위 레거시 릴레이로 그대로 폴백한다.
 
 import { Browser } from "@capacitor/browser";
 import { App as CapApp } from "@capacitor/app";
+import { Capacitor } from "@capacitor/core";
 import { isNativeApp } from "./nativeProxy";
+import { getInstalledAppVersion } from "./appRelease";
 import {
   isExtensionProxyReady, getGoogleTokenViaExtension, clearGoogleTokenViaExtension,
 } from "./extensionProxy";
@@ -72,7 +81,8 @@ export function getAuthDiag(): AuthDiag | null {
   } catch { return null; }
 }
 
-// 네이티브 앱 전용 — 시스템 브라우저로 로그인시킬 때 쓰는 state/redirect.
+// 네이티브 앱 전용 — 시스템 브라우저로 로그인시킬 때 쓰는 state/redirect (레거시 릴레이,
+//   네이티브 인증 플러그인이 없거나 실패했을 때의 폴백 경로).
 //   redirect_uri 는 웹과 동일한(이미 Google Cloud Console 에 등록된) 주소를 그대로 쓴다 —
 //   새 URI 를 등록할 필요가 없다. 대신 state 값으로 "네이티브 앱발" 요청임을 구분해서
 //   handleAuthRedirect() 가 토큰을 저장하지 않고 앱으로 릴레이하게 만든다.
@@ -216,6 +226,89 @@ function resolveSilent(token: string | null): void {
   list.forEach((r) => r(token));
 }
 
+// ─── 앱: 네이티브 구글 인증 (v1.1.0+, GoogleAuthPlugin.java) ───────
+// 앱에서는 브라우저 기반 OAuth 를 쓸 수 없다(위 파일 맨 위 주석). Custom Tab + 커스텀 스킴
+//   리다이렉트도 안드로이드에서 폐기됐다("Custom URI schemes are no longer supported on
+//   Android"). 남은 정식 경로는 플레이 서비스의 AuthorizationClient 다.
+//
+// 이게 앱의 1시간 로그아웃을 푸는 방식이다 — refresh token 을 쓰지 않는다. 계정이 기기에
+//   있으니 한 번 동의한 뒤로는 authorize() 를 다시 부르면 UI 없이 새 토큰이 나온다
+//   (hasResolution()==false 인 경로).
+//
+// ★ 옛 APK 를 깨뜨리지 않는 게 핵심 — 앱은 웹을 원격 로드하므로 웹만 배포해도 옛 APK 가
+//   이 코드를 받는데, 플러그인은 APK 안에 있어서 옛 버전엔 없다. 없는 플러그인을 부르면
+//   로그인이 먹통이 되므로 설치된 앱 버전으로 가른다(미만이면 레거시 릴레이 그대로).
+const NATIVE_AUTH_MIN_APP_VERSION = "1.1.0";
+
+// "1.2.0" 같은 버전 문자열 비교. 자릿수가 달라도(1.10 vs 1.9) 맞게 판정한다.
+function versionGte(a: string, b: string): boolean {
+  const pa = a.split(".").map(n => parseInt(n, 10) || 0);
+  const pb = b.split(".").map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] ?? 0, y = pb[i] ?? 0;
+    if (x !== y) return x > y;
+  }
+  return true;
+}
+
+// 이 앱이 네이티브 인증을 탈 수 있나 — 플러그인이 들어 있는 버전인가.
+let nativeAuthCapable: boolean | null = null;
+async function canUseNativeAuth(): Promise<boolean> {
+  if (!isNativeApp()) return false;
+  if (nativeAuthCapable !== null) return nativeAuthCapable;
+  const v = await getInstalledAppVersion();
+  nativeAuthCapable = !!v && versionGte(v, NATIVE_AUTH_MIN_APP_VERSION);
+  return nativeAuthCapable;
+}
+
+interface NativeAuthResult { accessToken?: string; expiresIn?: number; needsConsent?: boolean }
+
+interface GoogleAuthNativePlugin {
+  getAccessToken?: (o: unknown) => Promise<NativeAuthResult>;
+  clearToken?: (o: { token: string }) => Promise<void>;
+}
+
+function nativePlugin(): GoogleAuthNativePlugin | undefined {
+  return (Capacitor as unknown as {
+    Plugins?: Record<string, GoogleAuthNativePlugin>;
+  }).Plugins?.GoogleAuth;
+}
+
+// 네이티브 토큰 요청. interactive=false 면 동의가 필요할 때 UI 없이 needsConsent 로 돌아온다.
+async function nativeAuthToken(interactive: boolean): Promise<string | null> {
+  try {
+    const plugin = nativePlugin();
+    if (!plugin?.getAccessToken) { noteAuthFailure("native-plugin-missing"); return null; }
+    const r = await plugin.getAccessToken({ scope: SCOPE, interactive });
+    if (r.needsConsent) {
+      // 조용한 갱신에서 동의가 필요하다고 나오면, 사용자가 로그인 버튼을 눌러야 한다.
+      if (!interactive) noteAuthFailure("native-needs-consent");
+      return null;
+    }
+    if (!r.accessToken) { noteAuthFailure("native-no-token"); return null; }
+    clearAuthDiag();
+    saveToken(r.accessToken, r.expiresIn ?? 3600);
+    return r.accessToken;
+  } catch (e) {
+    noteAuthFailure("native-auth-throw", e);
+    return null;
+  }
+}
+
+// 앱 전용 갱신 타이머 — 만료 5분 전에 네이티브로 조용히 새 토큰을 받는다.
+function scheduleNativeRefresh(): void {
+  if (refreshTimer !== null) {
+    window.clearTimeout(refreshTimer);
+    refreshTimer = null;
+  }
+  if (!accessToken) return;
+  const delay = Math.max(0, tokenExpiresAt - Date.now() - SILENT_REFRESH_LEAD_MS);
+  refreshTimer = window.setTimeout(() => {
+    refreshTimer = null;
+    void nativeAuthToken(false);
+  }, delay);
+}
+
 // ─── 웹: 확장 경로 ────────────────────────────────────────────
 // GIS 로는 조용한 갱신이 안 된다 — prompt:"none" 이어도 팝업을 띄우는데, 만료 타이머에서
 //   부르면 사용자 제스처가 없어 브라우저가 즉시 닫는다(위 noteAuthFailure 주석 참고).
@@ -291,8 +384,15 @@ function scheduleSilentRefresh(): void {
     refreshTimer = null;
   }
   if (!accessToken) return;
+  // 앱이면 네이티브 인증이 되는 버전인지 확인해 그 경로로 조용히 갱신한다. 안 되는(구버전)
+  //   앱은 갱신 타이머를 안 건다 — 어차피 웹뷰의 GIS silent refresh 는 거의 항상 실패해서
+  //   8초 타임아웃만 반복하는 헛수고였다(이전 동작). signIn() 재클릭이 필요한 건 그대로.
+  if (isNativeApp()) {
+    void canUseNativeAuth().then((ok) => { if (ok) scheduleNativeRefresh(); });
+    return;
+  }
   // 확장이 있으면 팝업 없이 갱신되므로 타이머가 실제로 동작한다.
-  if (!isNativeApp() && isExtensionProxyReady()) { scheduleExtensionRefresh(); return; }
+  if (isExtensionProxyReady()) { scheduleExtensionRefresh(); return; }
   const delay = Math.max(0, tokenExpiresAt - Date.now() - SILENT_REFRESH_LEAD_MS);
   refreshTimer = window.setTimeout(() => {
     refreshTimer = null;
@@ -320,10 +420,12 @@ scheduleSilentRefresh();
 // 가끔 hidden iframe UI 가 잠깐 보이는 문제. 토큰 갱신은 SettingsDialog 진입 시
 // 또는 명시적 sync 액션(uploadToDrive 등) 시점에만 수행 (일관 정책).
 
-// 로그인 — 네이티브 앱은 시스템 브라우저로, 확장이 있으면 확장의 chrome.identity 로,
-//   그 외 웹은 전체 페이지 redirect 로.
-// 확장 경로는 Promise 를 실제로 반환한다(페이지 이동이 없어 그 자리에서 끝난다) — redirect/
-//   네이티브 경로는 이 시점 이후 코드가 이어지지 않으므로 호출측은 계속 fire-and-forget 로 쓴다.
+// 로그인 — 앱이고 네이티브 인증이 되는 버전이면 GoogleAuthPlugin 으로, 안 되면(구버전 앱)
+//   시스템 브라우저 레거시 릴레이로. 웹은 확장이 있으면 확장의 chrome.identity 로,
+//   그 외엔 전체 페이지 redirect 로.
+// 네이티브·확장 경로는 Promise 를 실제로 반환한다(페이지 이동이 없어 그 자리에서 끝난다) —
+//   레거시 릴레이/웹 redirect 경로는 이 시점 이후 코드가 이어지지 않으므로 호출측은
+//   계속 fire-and-forget 로 쓴다.
 export async function signIn(): Promise<void> {
   // 로그인 후 돌아갈 path 저장 (예: 모달 다시 열림 등)
   try {
@@ -331,6 +433,12 @@ export async function signIn(): Promise<void> {
   } catch { /* noop */ }
 
   if (isNativeApp()) {
+    if (await canUseNativeAuth()) {
+      // 사용자가 누른 로그인이므로 필요하면 동의 화면을 띄운다(interactive=true).
+      const t = await nativeAuthToken(true);
+      if (t) return;
+      // 플러그인이 없거나 실패하면 아래 레거시 릴레이로 떨어진다 — 로그인이 먹통되면 안 된다.
+    }
     const params = new URLSearchParams({
       client_id: CLIENT_ID,
       redirect_uri: WEB_RELAY_URI,
@@ -401,6 +509,7 @@ export function handleAuthRedirect(): boolean {
 
 // pfportfolio://oauth#access_token=... 딥링크 처리 — appUrlOpen 리스너에서 호출.
 // 시스템 브라우저가 handleAuthRedirect() 에서 릴레이해 준 토큰을 여기서 실제로 저장한다.
+// (레거시 릴레이 경로 전용 — 네이티브 인증 경로는 이 딥링크를 쓰지 않는다.)
 export function handleAppAuthUrl(url: string): boolean {
   const hashIdx = url.indexOf("#");
   if (hashIdx === -1) return false;
@@ -414,7 +523,8 @@ export function handleAppAuthUrl(url: string): boolean {
 }
 
 // 네이티브 앱에서만: 딥링크 복귀를 상시 구독하고, 토큰을 받으면 로그인에 썼던
-// 시스템 브라우저(Custom Tab)도 정리한다.
+// 시스템 브라우저(Custom Tab)도 정리한다. (레거시 릴레이 폴백 경로용 — 네이티브 인증이
+// 성공하는 한 이 리스너는 그냥 아무 일도 안 하고 대기만 한다.)
 if (isNativeApp()) {
   void CapApp.addListener("appUrlOpen", ({ url }: { url: string }) => {
     if (handleAppAuthUrl(url)) {
@@ -423,7 +533,7 @@ if (isNativeApp()) {
   });
 }
 
-// 토큰 가져오기 — 캐시 유효 시 즉시 반환, 만료/없음이면 silent refresh 시도
+// 토큰 가져오기 — 캐시 유효 시 즉시 반환, 만료/없음이면 상황에 맞는 조용한 갱신 시도
 export async function getAccessToken(): Promise<string | null> {
   if (accessToken && Date.now() < tokenExpiresAt - 30_000) {
     // 쓸 수 있는 토큰이 있다 = 인증이 지금 정상이다. 옛 실패 기록이 남아 있으면 지운다.
@@ -431,12 +541,19 @@ export async function getAccessToken(): Promise<string | null> {
     clearAuthDiag();
     return accessToken;
   }
-  // 확장이 있으면 확장으로 조용히 받는다 — 팝업이 없어 타이머에서도 성공한다.
-  if (!isNativeApp() && isExtensionProxyReady()) {
+  // 앱이고 네이티브 인증이 되는 버전이면 최우선 — 팝업 없이 새 토큰(1시간 로그아웃 해결 지점).
+  if (isNativeApp()) {
+    if (await canUseNativeAuth()) {
+      const t = await nativeAuthToken(false);
+      if (t) return t;
+    }
+  } else if (isExtensionProxyReady()) {
+    // 확장이 있으면 확장으로 조용히 받는다 — 팝업이 없어 타이머에서도 성공한다.
     const t = await extensionAuthToken(false);
     if (t) return t;
   }
-  // 이전에 로그인한 적 있으면 silent refresh 시도 (사용자 클릭 불필요)
+  // 이전에 로그인한 적 있으면 silent refresh 시도 (사용자 클릭 불필요) — 앱 웹뷰에서는
+  //   거의 항상 실패하지만(위 주석), 네이티브 인증이 안 되는 구버전 앱에는 유일한 시도라 남긴다.
   if (wasSignedIn()) {
     const refreshed = await requestSilentRefresh();
     if (refreshed) return refreshed;
@@ -444,23 +561,46 @@ export async function getAccessToken(): Promise<string | null> {
   return null;  // 사용자가 다시 signIn() 호출 필요
 }
 
-// 로그아웃 — token revoke + localStorage 삭제
+// 로그아웃 — 웹/확장은 token revoke, 앱(네이티브 인증)은 네이티브 캐시만 비움 + localStorage 삭제
 export async function signOut(): Promise<void> {
   const t = accessToken;
+  const useNative = isNativeApp() && (await canUseNativeAuth());
   clearToken();
-  if (t) {
-    // 확장도 토큰을 캐시한다 — 안 비우면 로그아웃 후에도 크롬이 같은(이제 revoke 된) 토큰을
-    //   계속 돌려준다(네이티브·확장 갱신 경로와 같은 함정).
-    if (!isNativeApp() && isExtensionProxyReady()) {
-      await clearGoogleTokenViaExtension(t);
-    }
-    try {
-      await fetch(`${REVOKE_URL}?token=${encodeURIComponent(t)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      });
-    } catch { /* network 실패 무시 */ }
+  if (!t) return;
+
+  if (useNative) {
+    // ★ 앱에서는 revoke 를 부르지 않는다.
+    //   revoke 는 서버 권한만 없애고, 플레이 서비스는 그 토큰을 캐시에서 계속 돌려준다.
+    //   그러면 재로그인 때 동의 창 없이 "로그인됨" 이 되고 API 호출만 401 로 죽는다(실측).
+    //   대신 네이티브 캐시를 비운다 — 다음 authorize() 가 새 토큰을 발급한다.
+    //   (권한 자체를 끊고 싶으면 구글 계정 설정에서 앱 연결을 해제하면 된다)
+    try { await nativePlugin()?.clearToken?.({ token: t }); } catch { /* noop */ }
+    return;
   }
+
+  // 확장도 토큰을 캐시한다 — 안 비우면 로그아웃 후에도 크롬이 같은(이제 revoke 된) 토큰을
+  //   계속 돌려준다(네이티브·확장 갱신 경로와 같은 함정).
+  if (!isNativeApp() && isExtensionProxyReady()) {
+    await clearGoogleTokenViaExtension(t);
+  }
+  try {
+    await fetch(`${REVOKE_URL}?token=${encodeURIComponent(t)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    });
+  } catch { /* network 실패 무시 */ }
+}
+
+// Drive 호출이 401 을 받았을 때 — 토큰이 무효(폐기·만료)라는 뜻이다. 앱(네이티브 인증)에서는
+//   플레이 서비스 캐시에 무효 토큰이 남아 있을 수 있어, 비우고 새로 받아야 한다. 비우지
+//   않으면 같은 죽은 토큰을 계속 돌려받아 "로그인됐는데 호출만 실패" 가 반복된다.
+//   (googleDrive.ts 의 driveFetch() 래퍼가 401 시 이 함수를 부른다.)
+export async function recoverFromUnauthorized(): Promise<string | null> {
+  const dead = accessToken;
+  clearToken();
+  if (!isNativeApp() || !(await canUseNativeAuth())) return null;
+  if (dead) { try { await nativePlugin()?.clearToken?.({ token: dead }); } catch { /* noop */ } }
+  return await nativeAuthToken(false);
 }
 
 // 이전 로그인 흔적 — UI 에서 "재로그인 가능" 힌트용
