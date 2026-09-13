@@ -16,7 +16,7 @@ import {
 } from "../lib/proxyConfig";
 import { getTodayProxyCalls, getRecentProxyCalls } from "../lib/usageCounter";
 import { resetProxyStats } from "../lib/proxyStatus";
-import { useExtensionProxyVersion, EXPECTED_EXTENSION_VERSION, compareVersion, EXTENSION_DOWNLOAD_URL } from "../lib/extensionProxy";
+import { useExtensionProxyVersion, EXPECTED_EXTENSION_VERSION, compareVersion } from "../lib/extensionProxy";
 
 const UPDATE_GUIDE_URL = "https://github.com/statclaude/portfolio-web/blob/main/workers/proxy/UPDATE-POST-SUPPORT.md";
 const LOCAL_GUIDE_URL = "https://github.com/statclaude/portfolio-web/blob/main/workers/local-proxy/README.md";
@@ -614,7 +614,7 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
                   ⚠️ <b>새 확장 버전 v{EXPECTED_EXTENSION_VERSION}</b> 이 나왔습니다
                   (현재 v{extVersion}). 개발자 모드 확장은 자동 업데이트가 없어
                   <b> 새 zip 을 받아 다시 등록</b>해야 합니다.&nbsp;
-                  <a href={EXTENSION_DOWNLOAD_URL} target="_blank" rel="noopener noreferrer"
+                  <a href={EXT_RELEASE_URL} target="_blank" rel="noopener noreferrer"
                      className="text-blue-600 underline">↓ 내려받기</a>
                 </div>
               )}
