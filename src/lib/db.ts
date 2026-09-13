@@ -5,9 +5,6 @@ import { getGroupFolders, setGroupFolders, type GroupFolder } from "./groupFolde
 import type { TabVisibility } from "./tabVisibility";
 import {
   getDimSleepingEnabled, setDimSleepingEnabled,
-  getPersonalProxyUrl, setPersonalProxyUrl,
-  getPersonalProxies, setPersonalProxies, type PersonalProxy,
-  getPersonalPollMs, setPersonalPollMs,
 } from "./proxyConfig";
 
 interface Peak { ticker: string; price: number; }
@@ -493,9 +490,8 @@ export interface ExportPayload {
     groupFolders?: GroupFolder[];        // 그룹 폴더 구성
     tabVisibility?: TabVisibility;       // 상단 탭 표시
     dimSleeping?: boolean;               // 장마감 흐림
-    personalProxyUrl?: string | null;    // 전용 프록시 URL (레거시 — 단일, 호환용)
-    personalProxies?: PersonalProxy[];   // 전용 프록시 목록 ({url, enabled})
-    personalPollMs?: number;             // 폴링 주기(ms)
+    // 전용 프록시(URL/목록/폴링주기)는 기기별 기술 설정 — Drive 동기화 대상에서 제외
+    //   (구버전 백업엔 personalProxyUrl 등 필드가 남아있을 수 있으나 무시한다)
   };
 }
 export async function exportAll(): Promise<ExportPayload> {
@@ -533,9 +529,7 @@ export async function exportAll(): Promise<ExportPayload> {
       groupFolders: getGroupFolders(),
       // tabVisibility 는 디바이스(모바일/PC) 별로 별도 저장 — 백업에 포함 안 함
       dimSleeping: getDimSleepingEnabled(),
-      personalProxyUrl: getPersonalProxyUrl(),   // 레거시 호환(구버전 앱 import용)
-      personalProxies: getPersonalProxies(),
-      personalPollMs: getPersonalPollMs(),
+      // 전용 프록시는 기기별 기술 설정 — Drive 백업에 포함 안 함 (기기 간 덮어쓰기 방지)
     },
   };
 }
@@ -556,10 +550,8 @@ export function applyImportedSettings(settings?: ExportPayload["settings"]): voi
   if (settings.groupFolders) setGroupFolders(settings.groupFolders);
   // tabVisibility 는 디바이스(모바일/PC) 별로 별도 관리 — 불러오기 적용 안 함
   if (typeof settings.dimSleeping === "boolean") setDimSleepingEnabled(settings.dimSleeping);
-  // 전용 프록시 — 신규 목록 우선, 없으면 레거시 단일 URL 호환
-  if (Array.isArray(settings.personalProxies)) setPersonalProxies(settings.personalProxies);
-  else if (settings.personalProxyUrl !== undefined) setPersonalProxyUrl(settings.personalProxyUrl);
-  if (typeof settings.personalPollMs === "number") setPersonalPollMs(settings.personalPollMs);
+  // 전용 프록시(URL/목록/폴링주기)는 기기별 기술 설정 — 불러오기로 덮어쓰지 않음
+  //   (구버전 백업에 personalProxyUrl 등 필드가 있어도 여기서 의도적으로 무시한다)
 }
 
 // 그룹 일괄 삭제 — 해당 그룹의 모든 holdings 삭제 (반환: 삭제 건수)

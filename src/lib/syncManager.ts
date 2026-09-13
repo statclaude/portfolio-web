@@ -147,9 +147,7 @@ function normalize(p: ExportPayload): string {
     groupFolders,
     tabVisibility: s.tabVisibility ?? null,
     dimSleeping: s.dimSleeping ?? null,
-    personalProxyUrl: s.personalProxyUrl ?? null,
-    personalProxies: s.personalProxies ?? null,
-    personalPollMs: s.personalPollMs ?? null,
+    // 전용 프록시(URL/목록/폴링주기)는 기기별 기술 설정 — Drive 동기화 비교 대상에서 제외
   };
   return JSON.stringify({ holdings, peaks, memos, trades, settings });
 }
