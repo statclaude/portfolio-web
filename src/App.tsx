@@ -813,20 +813,6 @@ function Dashboard() {
               사용법
             </button>
             <button
-              onClick={() => setFeedbackOpen(true)}
-              title="기능 요청 / 버그 신고 / 의견 (가입 없이 익명 작성)"
-              className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100
-                         text-emerald-700 rounded text-sm border border-emerald-200">
-              질문하기
-            </button>
-            <button
-              onClick={() => setDonateOpen(true)}
-              title="후원하기 (카카오페이)"
-              className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200
-                         text-gray-700 rounded text-sm">
-              후원하기
-            </button>
-            <button
               onClick={() => setSettingsOpen(true)}
               title="설정"
               className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200
