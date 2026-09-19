@@ -1,6 +1,10 @@
 {
   "tasks": {
     "dev": "deno run --allow-net main.ts",
-    "deploy": "deployctl deploy --project=epic-zebra-73 main.ts"
+    "deploy": "deno run -A jsr:@deno/deploy --prod"
+  },
+  "deploy": {
+    "org": "statclaude",
+    "app": "portfolio-deno-proxy"
   }
 }

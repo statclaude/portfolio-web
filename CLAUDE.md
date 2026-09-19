@@ -31,6 +31,9 @@
 - **cherry-pick 직후에는 반드시 `npx tsc -b`** — 충돌이 없어도 커밋이 upstream 전용 심볼(예: `isSyntheticProxyUrl`, `isNativeApp` import)에 기대면 조용히 타입 오류가 난다(batch2 때 `5dfbbdf`가 실제로 그랬다). 커밋마다 확인하지 않으면 어느 커밋이 깬 건지 못 찾는다.
 - **upstream이 여러 번 갈아엎은 기능은 커밋 순차 반영 금지** — 최종 진입점(예: `TicsSectorBoard`)에서 import 폐포만 계산해 가져온다(`git show upstream/main:<path>`로 재귀 추적). 중간 단계 파일(ThemeFlow 등)은 최종본에서 import 0개인 죽은 코드였다. upstream 커밋 중 코드만 바꾸고 테스트를 안 고친 것도 있으니 반영 후 `npx vitest run` 필수.
 - **`git cherry`는 충돌 해결로 patch-id가 달라진 cherry-pick을 '미반영(+)'으로 잘못 분류**한다 — 제목(subject) 대조를 병행할 것. `git merge-tree --write-tree --name-only main upstream/main`은 작업트리를 건드리지 않는 병합 시뮬레이션이다.
+- **프록시 워커는 `npm run deploy` 로 배포되지 않는다** — `workers/*` 의 화이트리스트를 고쳐도 배포된 워커는 옛 코드다(2026-09-19 `stock.naver.com` 을 안 올려 자금동향·매매동향·수급 차트가 전부 403). Cloudflare 는 `cd workers/proxy && npx wrangler deploy`(PowerShell 에선 `;`), Deno 는 `cd workers/deno-proxy; deno run -A jsr:@deno/deploy --prod`(**`--prod` 필수**, 없으면 프리뷰만 갱신). 호스트를 추가하는 커밋을 반영한 뒤엔 **배포된 워커 주소로 실제 요청을 보내 200 인지 확인**할 것(`Origin: https://statclaude.github.io` 헤더 필요, 없으면 "Forbidden origin").
+- **네이버 `stock.naver.com/api/domestic/market/trend/time` 은 최신 거래일 하루치만 준다** — `bizdate`(어떤 이름이든)는 무시되고 과거 페이지도 없다. 과거 날짜 시간별 수급은 현재 소스가 없다(옛 finance.naver 는 410). 일별(`trend/daily`)은 약 1년+ 제공. 그래서 요청일≠응답일이면 데이터를 버리고, 시간별 기본 날짜는 '최신 거래일'이다.
+- **토스 WTS 점검(HTTP 490 `unavailable.agency`)이 잦다** — 거래대금 카드·한·미 섹터 보드 등 토스 전용 카드는 점검 중 비게 된다(네이버 대체 없음). "데이터 없음"이 보이면 고장 전에 `curl` 로 토스가 490 인지부터 볼 것(점검 시각이 응답 `data.from/until` 에 있다).
 
 ## 현재 진행 상태 (2026-09 기준)
 
@@ -38,7 +41,7 @@
 - GitHub 인증(PAT), 시세 데이터 표시, 하드코딩 링크, EUR/JPY 환율 카드, Google Drive OAuth 프로덕션 게시, 프록시 이중화(Cloudflare+Deno), 광고 배너 일부 제거, Android APK(개인용) 빌드 및 appId 변경, ETF Sector Flow 기능 반영, Upstream 자동 동기화 알림 워크플로(이슈 방식, 현재 실패 상태 — 아래 참고), 크롬 확장 도메인 수정, APK 뒤로가기/종료/토스 외부링크 개선, **upstream-batch1-naver-fix 병합·배포 완료**(2026-09-13/14, 9개 upstream 커밋 반영), 구글 드라이브 인증 안정화(silent-refresh 타임아웃, 크롬 확장 토큰 갱신, 네이티브 Play Services 인증), 구글 드라이브 UI/데이터 정리(화살표 방향, 전용 프록시 Drive 동기화 제외)., **upstream-batch2 반영**(2026-09-19, 브랜치 `upstream-batch2` — main 병합·배포 전): 네이버 정책 변경 대응(자금동향 302→JSON, 투자자 순매수 410→JSON), 기업가치 일봉/등락 수정, 프록시 안정화(호스트·공급자 차단 기억, 공개 폴링 5분), 수급 팝업·KRX/NXT 분해·기업가치 버튼, 시간외/흐림 판정, 지수 순서, 한·미 섹터(토스 TICS), 기업가치 실적추이·가격대별 순매수, 자산추이 총자산 모드, upstream 알림 워크플로 재설계.
 
 ### ⚠️ 미해결 — 다음에 착수할 것
-0. **`upstream-batch2` 브랜치를 main에 병합 후 `npm run deploy`** — 아직 안 했다(배포는 별도 확인 후). 배포 뒤 아래를 확인: 증시 탭 '자금동향' 카드가 다시 보이는지, 수급(시간별·일별 투자자 순매수) 차트가 나오는지, '한·미 섹터' 보드가 뜨는지(토스 wts-info-api는 Cloudflare로 안 보내므로 확장/Deno 경로 필요).
+0. **batch2 배포 완료(2026-09-19, main `226ac2e`)** + Cloudflare·Deno 워커 재배포로 `stock.naver.com` 허용(자금동향·매매동향·수급 차트 복구, 두 프록시 모두 200 확인). 남은 확인: 한·미 섹터 보드는 토스 WTS 점검(9/20 11:00 종료) 뒤 화면에서 확인.
 1. **upstream 알림 워크플로 — 재설계 완료(커밋 코멘트 + Job Summary), 실전 미검증**: 배포(push) 후 Actions 탭에서 `workflow_dispatch`로 1회 수동 실행해 커밋 코멘트가 실제로 달리는지 확인. `.github/workflows/*.yml` push에는 PAT `workflow` 스코프 필요(위 함정 참고). 기준선(`.github/upstream-sync-state.txt`)은 2026-09-19 upstream/main(`9528194`)으로 맞춰 둠.
 2. **외국인·기관 매매동향 "1일" 탭 휴장일 폴백 — 재현 불가로 보류**: 토요일(2026-09-19)에 `trendForeignOrg?periodType=DAY`를 직접 호출하면 HTTP 200으로 직전 거래일(9/18) 데이터가 정상 반환된다(주말은 서버가 이미 폴백). upstream에도 폴백 코드는 없다. **평일 휴장일(추석 연휴 등)에 실제 에러가 나는지 재확인**한 뒤에만 구현할 것 — 추측으로 코드를 넣지 않는다. 참고: 반영된 `73013cf`로 컬럼마다 자기 기준일이 표시되므로 옛 날짜는 화면에서 구분된다.
 3. **upstream에서 의도적으로 반영 안 한 것** (2026-09-19 기준, 나중에 다시 묻지 말 것):
