@@ -28,19 +28,29 @@
 - **fork가 이전에 특정 upstream 커밋을 의도적으로 건너뛰었다면**, 후속 커밋이 그 건너뛴 커밋을 전제한 patch일 수 있다 — 존재하지 않는 앵커 대신 현재 fork 구조에 맞는 삽입 위치를 찾아 원래 의도를 동일하게 달성할 것.
 - **APK는 원격 로드 아키텍처**라 순수 JS/TS 변경은 `npm run deploy`만으로 웹·APK 양쪽에 반영된다(재빌드 불필요). `AndroidManifest.xml` 같은 네이티브 설정 변경만 예외적으로 `gradlew` 재빌드+재설치 필요.
 - **토스처럼 외부 서비스가 정책적으로 막아둔 것**(원자재 로그인 요구, 환율 페이지 모바일 UA 데이터 미제공 등)은 코드로 해결 불가 — 브라우저로 직접 재현해 "서비스 쪽 정책/제약"임을 먼저 확인 후 사용자에게 보류 여부 판단받을 것.
+- **cherry-pick 직후에는 반드시 `npx tsc -b`** — 충돌이 없어도 커밋이 upstream 전용 심볼(예: `isSyntheticProxyUrl`, `isNativeApp` import)에 기대면 조용히 타입 오류가 난다(batch2 때 `5dfbbdf`가 실제로 그랬다). 커밋마다 확인하지 않으면 어느 커밋이 깬 건지 못 찾는다.
+- **upstream이 여러 번 갈아엎은 기능은 커밋 순차 반영 금지** — 최종 진입점(예: `TicsSectorBoard`)에서 import 폐포만 계산해 가져온다(`git show upstream/main:<path>`로 재귀 추적). 중간 단계 파일(ThemeFlow 등)은 최종본에서 import 0개인 죽은 코드였다. upstream 커밋 중 코드만 바꾸고 테스트를 안 고친 것도 있으니 반영 후 `npx vitest run` 필수.
+- **`git cherry`는 충돌 해결로 patch-id가 달라진 cherry-pick을 '미반영(+)'으로 잘못 분류**한다 — 제목(subject) 대조를 병행할 것. `git merge-tree --write-tree --name-only main upstream/main`은 작업트리를 건드리지 않는 병합 시뮬레이션이다.
 
 ## 현재 진행 상태 (2026-09 기준)
 
 ### 완료
-- GitHub 인증(PAT), 시세 데이터 표시, 하드코딩 링크, EUR/JPY 환율 카드, Google Drive OAuth 프로덕션 게시, 프록시 이중화(Cloudflare+Deno), 광고 배너 일부 제거, Android APK(개인용) 빌드 및 appId 변경, ETF Sector Flow 기능 반영, Upstream 자동 동기화 알림 워크플로(이슈 방식, 현재 실패 상태 — 아래 참고), 크롬 확장 도메인 수정, APK 뒤로가기/종료/토스 외부링크 개선, **upstream-batch1-naver-fix 병합·배포 완료**(2026-09-13/14, 9개 upstream 커밋 반영), 구글 드라이브 인증 안정화(silent-refresh 타임아웃, 크롬 확장 토큰 갱신, 네이티브 Play Services 인증), 구글 드라이브 UI/데이터 정리(화살표 방향, 전용 프록시 Drive 동기화 제외).
+- GitHub 인증(PAT), 시세 데이터 표시, 하드코딩 링크, EUR/JPY 환율 카드, Google Drive OAuth 프로덕션 게시, 프록시 이중화(Cloudflare+Deno), 광고 배너 일부 제거, Android APK(개인용) 빌드 및 appId 변경, ETF Sector Flow 기능 반영, Upstream 자동 동기화 알림 워크플로(이슈 방식, 현재 실패 상태 — 아래 참고), 크롬 확장 도메인 수정, APK 뒤로가기/종료/토스 외부링크 개선, **upstream-batch1-naver-fix 병합·배포 완료**(2026-09-13/14, 9개 upstream 커밋 반영), 구글 드라이브 인증 안정화(silent-refresh 타임아웃, 크롬 확장 토큰 갱신, 네이티브 Play Services 인증), 구글 드라이브 UI/데이터 정리(화살표 방향, 전용 프록시 Drive 동기화 제외)., **upstream-batch2 반영**(2026-09-19, 브랜치 `upstream-batch2` — main 병합·배포 전): 네이버 정책 변경 대응(자금동향 302→JSON, 투자자 순매수 410→JSON), 기업가치 일봉/등락 수정, 프록시 안정화(호스트·공급자 차단 기억, 공개 폴링 5분), 수급 팝업·KRX/NXT 분해·기업가치 버튼, 시간외/흐림 판정, 지수 순서, 한·미 섹터(토스 TICS), 기업가치 실적추이·가격대별 순매수, 자산추이 총자산 모드, upstream 알림 워크플로 재설계.
 
 ### ⚠️ 미해결 — 다음에 착수할 것
-1. **Upstream 자동 동기화 알림 워크플로 고장 상태**: `.github/workflows/upstream-sync.yml`이 저장소 Issues 비활성화로 인해 매 실행마다 실패 중(`Issues has been disabled in this repository`). 사용자가 Issues는 계속 꺼두기로 결정했으므로, **이슈 생성이 아닌 다른 알림 방식**(커밋 코멘트, 상태 파일 diff 등)으로 재설계 필요.
-2. **외국인·기관 매매동향 "1일" 탭 — 휴장일 자동 폴백 미구현**: `InvestorFlowTab.tsx`/`api.ts`의 `fetchInvestorRankingsByMarket()`가 부르는 네이버 `trendForeignOrg` API는 날짜 파라미터가 없어 휴장일에 "1일"만 에러. 최종 목표는 다른 날짜-지정 차트들처럼 "휴장일 → 최근 거래일 자동 폴백"을 구현하는 것. **batch2의 `73013cf`("장중 외국인이 전부 0억") 등과 연관 가능성 높음 — batch2 착수 시 최우선 확인.**
-3. **upstream batch2 — 13개 신규 커밋 대기 중** (batch1과 무관, `git fetch upstream`으로 발견): ① 시간외/애프터마켓 흐름 판정 로직 4개(연속 수정, 최신본 `d3853e4` 채택 가능성 높음), ② 지수 표시 순서/위치 2개, ③ **수급(매매동향) 4개 — 위 2번 이슈와 직접 관련 가능성 높아 최우선 확인**, ④ 기업가치 차트 2개, ⑤ UI 통합 1개. 착수 전 작업폴더가 깨끗한 상태(커밋 안 된 변경사항 없음)인지 먼저 확인할 것.
-4. (보류, 사용자가 "지금 구현하지 않아도 좋음") KRX 지수 공지 카드 신규 기능 7개 커밋(`e5f020a`~`879c83d`) — 필요해지면 재검토.
-5. (선택) 사이트 접근 제한(본인/허용된 사람만) — 대안 논의만 하고 아직 결정 안 됨.
-6. (선택) 프록시 공급자 3번째 추가 검토 — 현재 Cloudflare+Deno 2개, 자주 동시 다운되면 고려.
+0. **`upstream-batch2` 브랜치를 main에 병합 후 `npm run deploy`** — 아직 안 했다(배포는 별도 확인 후). 배포 뒤 아래를 확인: 증시 탭 '자금동향' 카드가 다시 보이는지, 수급(시간별·일별 투자자 순매수) 차트가 나오는지, '한·미 섹터' 보드가 뜨는지(토스 wts-info-api는 Cloudflare로 안 보내므로 확장/Deno 경로 필요).
+1. **upstream 알림 워크플로 — 재설계 완료(커밋 코멘트 + Job Summary), 실전 미검증**: 배포(push) 후 Actions 탭에서 `workflow_dispatch`로 1회 수동 실행해 커밋 코멘트가 실제로 달리는지 확인. `.github/workflows/*.yml` push에는 PAT `workflow` 스코프 필요(위 함정 참고). 기준선(`.github/upstream-sync-state.txt`)은 2026-09-19 upstream/main(`9528194`)으로 맞춰 둠.
+2. **외국인·기관 매매동향 "1일" 탭 휴장일 폴백 — 재현 불가로 보류**: 토요일(2026-09-19)에 `trendForeignOrg?periodType=DAY`를 직접 호출하면 HTTP 200으로 직전 거래일(9/18) 데이터가 정상 반환된다(주말은 서버가 이미 폴백). upstream에도 폴백 코드는 없다. **평일 휴장일(추석 연휴 등)에 실제 에러가 나는지 재확인**한 뒤에만 구현할 것 — 추측으로 코드를 넣지 않는다. 참고: 반영된 `73013cf`로 컬럼마다 자기 기준일이 표시되므로 옛 날짜는 화면에서 구분된다.
+3. **upstream에서 의도적으로 반영 안 한 것** (2026-09-19 기준, 나중에 다시 묻지 말 것):
+   - APK/네이티브 앱 커밋 17개 + `android/` + `public/app/portfolio-app.apk`(5MB) — 작업 원칙 5번(APK 배포 금지)
+   - 안내 문구 3개(`d0e05ef` `7321e03` `20c49b6`, 확장·앱을 앞세움) · OnboardingDialog
+   - KRX 지수 공지 카드 7개(`e5f020a`~`879c83d`) — 보류
+   - `de07d47`(심플보기·팝업 카드 통일) — MobileSimpleView 충돌·포크 커스텀과 겹침, 이득 작음
+   - `e8537ed` `256cce6`(ThemeFlow 전용), `aba5f7d`(배너, 이미 제거됨), `09d8233`(EUC-KR nativeProxy — JSON 전환으로 해당 없음)
+   - `toss.ts`·`nativeProxy.ts`·`googleAuth.ts`·`SettingsDialog.tsx` 일부 — 포크 전용 커스텀(앱 딥링크, EUR 매핑, 우리가 다듬은 자동로그인 진단)이라 우리 쪽 유지
+   - 죽은 코드로 남음: `EtfSectorFlow.tsx`·`EtfSectorDialog.tsx`(UsMarketTab에서 더는 안 씀, ETF랭킹 탭 일부는 사용) — 정리는 선택
+4. (선택) 사이트 접근 제한(본인/허용된 사람만) — 대안 논의만 하고 아직 결정 안 됨.
+5. (선택) 프록시 공급자 3번째 추가 검토 — 현재 Cloudflare+Deno 2개. batch2로 '막힌 (호스트, 공급자) 조합 기억'이 들어와 한 공급자가 막혀도 덜 아프지만, 동시 다운이 잦으면 고려.
 
 ## 참고
 - 작업 이력과 트러블슈팅 전체 기록은 claude.ai의 "portfolio app modifier" 프로젝트 문서(`portfolio-web-status.md`, `upstream-batch1-naver-fix-handoff.md`, `upstream-batch2-candidates.md`)에 더 상세히 남아있음 — 이 파일은 그 요약본.
