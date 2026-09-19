@@ -2154,7 +2154,12 @@ export interface IntradayFlowPoint {
   financialInvestment: number; insurance: number; trust: number;
   bank: number; otherFinancial: number; pensionFund: number; otherCorp: number;
 }
-export interface IntradayFlow { unit: "억원" | "계약"; points: IntradayFlowPoint[]; }
+export interface IntradayFlow {
+  unit: "억원" | "계약";
+  points: IntradayFlowPoint[];
+  /** 서버가 실제로 내려준 거래일 "YYYY-MM-DD" (요청한 날짜와 다를 수 있다). */
+  servedDate?: string;
+}
 
 interface TrendRow { bizdate?: string; time?: string; netAmounts?: Array<{ investorGubun?: string; diffValue?: string }> }
 interface TrendResp { content?: TrendRow[]; last?: boolean }
@@ -2184,13 +2189,18 @@ function mapTrendRow(row: TrendRow, futures: boolean) {
   };
 }
 
-// bizdate(YYYYMMDD) 생략 시 오늘(KST). 과거 날짜도 조회 가능.
+// bizdate(YYYYMMDD) 생략 시 오늘(KST).
+//   ★ 이 API 는 **최신 거래일 하루치만** 준다 — bizdate 는 (어떤 이름으로 줘도) 무시되고 과거로 가는
+//     페이지도 없다(실측 2026-09-20: startIdx 3 부터 빈 응답). 옛 finance.naver 소스는 과거 날짜를
+//     받았지만 410 으로 폐쇄됐다. 그래서 요청한 날짜와 응답 날짜가 다르면 그 데이터를 **버린다** —
+//     안 그러면 9/18 값이 9/17 차트로 조용히 그려진다. 과거 흐름은 일별(fetchKrDailyInvestorFlow).
 export async function fetchKrIntradayInvestorFlow(market: IntradayMarket, bizdate?: string): Promise<IntradayFlow> {
   const mkt = TREND_MARKET[market];
   const futures = market === "futures";
   const bd = bizdate ?? new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10).replace(/-/g, "");
   const MAX_PAGES = 4;   // 200×4 = 800행 — 하루(435행)보다 넉넉하다
   const byTime = new Map<string, IntradayFlowPoint>();
+  let servedBd = "";
   for (let page = 0; page < MAX_PAGES; page++) {
     let data: TrendResp;
     try {
@@ -2205,13 +2215,29 @@ export async function fetchKrIntradayInvestorFlow(market: IntradayMarket, bizdat
     for (const r of rows) {
       const t = String(r.time ?? "");
       if (t.length < 4) continue;
+      if (r.bizdate && !servedBd) servedBd = r.bizdate;
+      if (r.bizdate && r.bizdate !== bd) continue;   // 다른 날 데이터는 쓰지 않는다
       const time = `${t.slice(0, 2)}:${t.slice(2, 4)}`;
       if (!byTime.has(time)) byTime.set(time, { time, ...mapTrendRow(r, futures) });
     }
     if (data.last) break;
   }
   const points = [...byTime.values()].sort((a, b) => a.time.localeCompare(b.time));
-  return { unit: futures ? "계약" : "억원", points };
+  const servedDate = /^\d{8}$/.test(servedBd)
+    ? `${servedBd.slice(0, 4)}-${servedBd.slice(4, 6)}-${servedBd.slice(6, 8)}` : undefined;
+  return { unit: futures ? "계약" : "억원", points, servedDate };
+}
+
+// 시간별 투자자 순매수가 실제로 제공되는 거래일("YYYY-MM-DD") — 1콜(1행).
+//   휴장일·개장 전엔 직전 거래일이 온다. 화면이 '오늘' 대신 이 날짜를 기본으로 쓴다.
+export async function fetchLatestFlowBizdate(): Promise<string | null> {
+  const resp = await fetchProxied(
+    "https://stock.naver.com/api/domestic/market/trend/time"
+    + "?tradeType=KRX&marketType=KOSPI&startIdx=0&pageSize=1");
+  if (!resp.ok) throw new Error(`flow bizdate HTTP ${resp.status}`);
+  const j = await resp.json() as TrendResp;
+  const bd = String(j.content?.[0]?.bizdate ?? "");
+  return /^\d{8}$/.test(bd) ? `${bd.slice(0, 4)}-${bd.slice(4, 6)}-${bd.slice(6, 8)}` : null;
 }
 
 // ─── 일별 투자자 순매수 (네이버 stock.naver 시장 매매동향, 기간별) ───────────

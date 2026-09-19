@@ -4,7 +4,7 @@
 
 import { useState, useMemo, useCallback, lazy, Suspense, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { fetchKrIntradayInvestorFlow, fetchKrDailyInvestorFlow, fetchYahooIntraday, fetchTossIndexIntraday, fetchYahooPriceHistory, fetchKrFuturesDaily, fetchLeverageDailyFlow, fetchKrPriceHistory, LEVERAGE_BASKETS } from "../lib/api";
+import { fetchKrIntradayInvestorFlow, fetchLatestFlowBizdate, fetchKrDailyInvestorFlow, fetchYahooIntraday, fetchTossIndexIntraday, fetchYahooPriceHistory, fetchKrFuturesDaily, fetchLeverageDailyFlow, fetchKrPriceHistory, LEVERAGE_BASKETS } from "../lib/api";
 import type { IntradayMarket, LeverageBasket } from "../lib/api";
 import { INTRADAY_SERIES, type IntradayKey } from "../lib/intradayInvestor";
 import { useCrosshairSync, type SyncRegistrar } from "../lib/useCrosshairSync";
@@ -74,9 +74,11 @@ function kstFromEpoch(sec: number): { date: string; t: UTCTimestamp } {
   };
 }
 
-function MarketBlock({ market, label, enabled, mode, days, bizdate, on, onReady, onToggle, refFirstT, refLastT }: {
+function MarketBlock({ market, label, enabled, mode, days, bizdate, intraOk = true, on, onReady, onToggle, refFirstT, refLastT }: {
   market: IntradayMarket; label: string; enabled: Record<string, boolean>;
   mode: "intraday" | "daily"; days: number; bizdate: string; on: boolean; onReady: SyncRegistrar;
+  /** false 면 시간별 투자자 조회를 건너뛴다(그 날짜는 서버가 데이터를 주지 않는다). */
+  intraOk?: boolean;
   onToggle: (k: IntradayKey) => void;
   refFirstT?: UTCTimestamp; refLastT?: UTCTimestamp;   // 기준 시간범위(코스피·코스닥)
 }) {
@@ -88,7 +90,7 @@ function MarketBlock({ market, label, enabled, mode, days, bizdate, on, onReady,
   const intra = useQuery({
     queryKey: ["market-flow-intraday", market, bizdate],
     queryFn: () => fetchKrIntradayInvestorFlow(market, bizdate.replace(/-/g, "")),
-    enabled: on && mode === "intraday",
+    enabled: on && mode === "intraday" && intraOk,
     refetchInterval: mode === "intraday" ? livePoll : false,
     staleTime: 60_000, refetchOnWindowFocus: false,
   });
@@ -357,8 +359,21 @@ export function IntradayInvestorSection() {
 
   const [mode, setMode] = useState<"intraday" | "daily">("intraday");
   const [days, setDays] = useState<number>(22);   // 일별 기간 (기본 1개월)
-  const [intraDate, setIntraDate] = useState<string>(todayKST());   // 당일 뷰 조회일
   const today = todayKST();
+  // 시간별 데이터는 서버가 '최신 거래일' 하루치만 준다 — 오늘이 휴장일·개장 전이면 그 직전 거래일이 기본이다.
+  //   사용자가 고른 날짜(pickedDate)가 있으면 그것을 존중하되, 데이터가 없는 날짜임을 화면에 알린다.
+  const [pickedDate, setPickedDate] = useState<string | null>(null);
+  const latestQ = useQuery({
+    queryKey: ["market-flow-latest-bizdate"],
+    queryFn: fetchLatestFlowBizdate,
+    enabled: open && mode === "intraday",
+    staleTime: 5 * 60_000, refetchInterval: 5 * 60_000, refetchOnWindowFocus: false,
+  });
+  const latest = latestQ.data ?? null;                       // 서버가 제공하는 최신 거래일
+  const defaultDate = latest && latest < today ? latest : today;
+  const intraDate = pickedDate ?? defaultDate;               // 당일 뷰 조회일
+  const maxDate = latest && latest < today ? latest : today; // 그 이후 날짜는 고를 수 없다
+  const intraOk = !latest || intraDate === latest;           // 이 날짜의 시간별 데이터가 제공되는가
 
   const [enabled, setEnabled] = useState<Record<string, boolean>>(() => {
     const init: Record<string, boolean> = {};
@@ -395,12 +410,12 @@ export function IntradayInvestorSection() {
   const refKospiIntra = useQuery({
     queryKey: ["market-flow-intraday", "kospi", intraDate],
     queryFn: () => fetchKrIntradayInvestorFlow("kospi", intraDate.replace(/-/g, "")),
-    enabled: open && mode === "intraday", staleTime: 60_000, refetchOnWindowFocus: false,
+    enabled: open && mode === "intraday" && intraOk, staleTime: 60_000, refetchOnWindowFocus: false,
   });
   const refKosdaqIntra = useQuery({
     queryKey: ["market-flow-intraday", "kosdaq", intraDate],
     queryFn: () => fetchKrIntradayInvestorFlow("kosdaq", intraDate.replace(/-/g, "")),
-    enabled: open && mode === "intraday", staleTime: 60_000, refetchOnWindowFocus: false,
+    enabled: open && mode === "intraday" && intraOk, staleTime: 60_000, refetchOnWindowFocus: false,
   });
   const refKospiDaily = useQuery({
     queryKey: ["market-flow-daily", "kospi", days],
@@ -463,17 +478,19 @@ export function IntradayInvestorSection() {
             )}
             {mode === "intraday" && (
               <div className="flex items-center gap-1 text-xs">
-                <button onClick={() => setIntraDate(d => shiftDate(d, -1))}
+                <button onClick={() => setPickedDate(shiftDate(intraDate, -1))}
                         title="이전 날" className="px-1.5 py-1 rounded border border-gray-300 hover:bg-gray-50 leading-none">‹</button>
-                <input type="date" value={intraDate} max={today}
-                       onChange={e => e.target.value && setIntraDate(e.target.value)}
+                <input type="date" value={intraDate} max={maxDate}
+                       onChange={e => e.target.value && setPickedDate(e.target.value)}
                        className="border border-gray-300 rounded px-1.5 py-0.5 text-xs" />
-                <button onClick={() => setIntraDate(d => (d < today ? shiftDate(d, 1) : d))}
-                        disabled={intraDate >= today} title="다음 날"
+                <button onClick={() => setPickedDate(intraDate < maxDate ? shiftDate(intraDate, 1) : intraDate)}
+                        disabled={intraDate >= maxDate} title="다음 날"
                         className="px-1.5 py-1 rounded border border-gray-300 hover:bg-gray-50 leading-none disabled:opacity-40">›</button>
-                {intraDate !== today && (
-                  <button onClick={() => setIntraDate(today)}
-                          className="px-2 py-1 rounded border border-gray-300 hover:bg-gray-50 font-medium">오늘</button>
+                {intraDate !== defaultDate && (
+                  <button onClick={() => setPickedDate(null)}
+                          className="px-2 py-1 rounded border border-gray-300 hover:bg-gray-50 font-medium">
+                    {defaultDate === today ? "오늘" : "최신일"}
+                  </button>
                 )}
               </div>
             )}
@@ -482,6 +499,23 @@ export function IntradayInvestorSection() {
             </span>
             <FuturesExpiryBadge />
           </div>
+
+          {mode === "intraday" && !intraOk && (
+            <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 rounded border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-800">
+              <span>
+                ⚠ 시간별 투자자 순매수는 <b>최신 거래일({latest})만</b> 제공됩니다(네이버 API 한계) —
+                {" "}{intraDate} 데이터는 받을 수 없습니다.
+              </span>
+              <button onClick={() => setPickedDate(null)}
+                      className="px-1.5 py-0.5 rounded border border-amber-400 bg-white font-medium hover:bg-amber-100">
+                {latest} 보기
+              </button>
+              <button onClick={() => setMode("daily")}
+                      className="px-1.5 py-0.5 rounded border border-amber-400 bg-white font-medium hover:bg-amber-100">
+                일별로 보기
+              </button>
+            </div>
+          )}
 
           {/* 공통 투자자 토글 (모든 차트 동시 제어) */}
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mb-1.5">
@@ -521,7 +555,7 @@ export function IntradayInvestorSection() {
                   // min-w-0 — grid 자식 기본 min-width:auto 로 선물(칩 많음) 셀이 안 줄고 나머지를 압축하는 것 방지.
                   <div key={m.key} className="min-w-0">
                     <MarketBlock market={m.key} label={m.label} enabled={enabled}
-                      mode={mode} days={days} bizdate={intraDate} on={open} onReady={registerSync} onToggle={toggleInvestor}
+                      mode={mode} days={days} bizdate={intraDate} intraOk={intraOk} on={open} onReady={registerSync} onToggle={toggleInvestor}
                       refFirstT={refRange?.from} refLastT={refRange?.to} />
                   </div>
                 ))}

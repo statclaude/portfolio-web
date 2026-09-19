@@ -11,6 +11,7 @@ import {
 import { useCrosshairSync } from "../lib/useCrosshairSync";
 import { fmtAmount, movingAvg, sessionProgress, MA_DAYS } from "../lib/marketTurnover";
 import { isMarketOpen } from "../lib/format";
+import { useTossMaintenance, fmtUntil } from "../lib/tossMaintenance";
 
 const MarketTurnoverChart = lazy(() => import("./MarketTurnoverChart"));
 
@@ -40,13 +41,18 @@ function MarketBlock({ market, label, days, onReady }: {
   market: MarketIndexKey; label: string; days: number;
   onReady: ReturnType<typeof useCrosshairSync>;
 }) {
-  const { data, isLoading } = useQuery<MarketTurnoverPoint[]>({
+  const { data, isLoading, isError, error } = useQuery<MarketTurnoverPoint[]>({
     queryKey: ["marketTurnover", market],
     queryFn: () => fetchKrMarketTurnover(market, TOSS_CANDLE_MAX),
     staleTime: 10 * 60 * 1000,
-    refetchInterval: 30 * 60 * 1000,
+    // 실패 중이면 1분마다 다시 — 토스 점검이 끝나면 30분을 기다리지 않고 스스로 돌아온다.
+    refetchInterval: (q) => (q.state.status === "error" ? 60 * 1000 : 30 * 60 * 1000),
     refetchOnWindowFocus: false,
   });
+  // 이 카드는 토스 일봉만 쓴다(네이버 대체 소스 없음) — 점검이면 '데이터 없음' 대신 점검이라고 알린다.
+  const maint = useTossMaintenance();
+  const maintUntil = maint.active ? maint.until : undefined;
+  const downByMaint = maint.active || (error instanceof Error && /HTTP 490/.test(error.message));
 
   // 장중 진행률용 10분봉(거래량). 장중에만 부른다 — 마감 뒤엔 보정이 필요 없다.
   const krOpen = isMarketOpen("KR");
@@ -76,7 +82,16 @@ function MarketBlock({ market, label, days, onReady }: {
     </div>
   );
   if (isLoading) return shell(<span>불러오는 중…</span>);
-  if (!built) return shell(<span>거래대금 데이터 없음</span>);
+  if (!built) {
+    if (downByMaint) {
+      return shell(<>
+        <span>토스증권 점검 중{maintUntil ? ` (~${fmtUntil(maintUntil)})` : ""}</span>
+        <span className="text-[10px]">끝나면 자동으로 다시 불러옵니다</span>
+      </>);
+    }
+    if (isError) return shell(<span>거래대금을 불러오지 못했습니다 — 잠시 후 자동 재시도</span>);
+    return shell(<span>거래대금 데이터 없음</span>);
+  }
 
   const { last, lastMa } = built;
   // 장중이면 '이 시각까지' 기준으로 비교한다 — 종일 평균과 그대로 나누면 개장 직후엔
