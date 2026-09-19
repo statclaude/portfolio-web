@@ -5,8 +5,9 @@ on:
     - cron: '0 0 * * *'   # 매일 UTC 00:00 (한국시간 09:00)
   workflow_dispatch:        # Actions 탭에서 수동 실행 버튼도 제공
 
+# 알림 방식: Issues 는 이 저장소에서 꺼져 있으므로(의도적) 쓰지 않는다.
+#   커밋 코멘트(저장소 소유자에게 이메일 알림) + Job Summary(Actions 실행 화면)로 알린다.
 permissions:
-  issues: write
   contents: write
 
 jobs:
@@ -54,23 +55,28 @@ jobs:
           git log "$LAST..upstream/main" --oneline --max-count=100 > /tmp/new-commits.txt
           cat /tmp/new-commits.txt
 
-      - name: 새 커밋 목록으로 이슈 생성
+      - name: 새 커밋 알림 (Job Summary + 커밋 코멘트)
         if: steps.check.outputs.has_new == 'true'
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
             const commits = fs.readFileSync('/tmp/new-commits.txt', 'utf8');
+            const count = commits.trim().split('\n').filter(Boolean).length;
             const today = new Date().toISOString().slice(0, 10);
-            await github.rest.issues.create({
+            const body =
+              `### [upstream-sync] 원저작자 저장소에 새 커밋 ${count}건 (${today})\n\n` +
+              "hanjungwoo3/portfolio-web 에 다음 새 커밋이 있습니다:\n\n" +
+              "```\n" + commits + "\n```\n\n" +
+              "필요한 것만 선별해서 직접 cherry-pick 하세요. upstream 브랜치에는 절대 push 하지 않습니다.";
+            // 1) Actions 실행 화면에 남긴다(항상 성공)
+            await core.summary.addRaw(body).write();
+            // 2) 커밋 코멘트 — Issues 와 무관하게 이메일 알림이 간다. 본문 상한(65536자) 방어.
+            await github.rest.repos.createCommitComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: `[upstream-sync] 원저작자 저장소에 새 커밋 (${today})`,
-              body:
-                "hanjungwoo3/portfolio-web 에 다음 새 커밋이 있습니다:\n\n" +
-                "```\n" + commits + "\n```\n\n" +
-                "필요한 것만 선별해서 직접 cherry-pick 하세요. upstream 브랜치에는 절대 push 하지 않습니다.",
-              labels: ["upstream-sync"],
+              commit_sha: context.sha,
+              body: body.length > 60000 ? body.slice(0, 60000) + "\n…(생략)" : body,
             });
 
       - name: 확인 시점(SHA) 갱신
