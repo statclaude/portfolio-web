@@ -15,7 +15,7 @@ export interface DashboardSection {
   render?: "sectorFlow";
 }
 
-// krClosed=true (한국 정규장 마감 → 카드 흐림) 이면 한국 관련 그룹(한국 시장·한국 섹터 ETF·반도체 TOP2+)을
+// krClosed=true (한국 정규장 마감 → 카드 흐림) 이면 한국 관련 그룹(한국 시장·한국 섹터·반도체 TOP2+)을
 //   맨 아래로 내림 — 마감 후엔 움직이는 미국/야간 지표를 위로.
 export function buildDashboardSections(nightSession: boolean, krClosed = false): DashboardSection[] {
   const krNightFut = nightSession ? ["^KS200N", "^KQ150N"] : [];
@@ -28,9 +28,11 @@ export function buildDashboardSections(nightSession: boolean, krClosed = false):
         : ["^KS11", "^KQ11", "^KS200N", "^KQ150N", "069500.KS", "229200.KS", "KVALUE", "VKOSPI"]],
     },
     {
-      id: "sector", short: "섹터ETF",
-      render: "sectorFlow",   // 고정 22종 대신 전수 랭킹 기반 섹터 흐름 (rows 는 폴백)
-      label: "🧩 한국 섹터 ETF",                       // 한국 대표 섹터 ETF 22종 — 오늘 등락률(%) 내림차순 정렬(UsMarketTab/MobileSimpleView), 섹터 순위 차트와 동일 종목
+      id: "sector", short: "섹터",
+      // 테마별 종목 바스켓(ThemeFlow)으로 그린다. rows 의 고정 22종 ETF 는 폴백 —
+      //   스냅샷이 없을 때(캐시 없음·조회 실패)만 쓰인다. ETF 가 아니라 종목이라 라벨에서 'ETF' 를 뺐다.
+      render: "sectorFlow",
+      label: "🌏 한·미 섹터",
       rows: [
         ["091160.KS", "0190C0.KS", "487240.KS", "445290.KS", "305720.KS", "300950.KS", "266360.KS"],             // 성장·AI·콘텐츠: 반도체·피지컬AI·AI전력설비·로봇·2차전지·게임·K콘텐츠
         ["091180.KS", "466920.KS", "117700.KS", "449450.KS", "117680.KS", "117460.KS", "433500.KS"],             // 경기민감·산업: 자동차·조선·건설·방산·철강·에너지화학·원자력
@@ -90,19 +92,28 @@ export function buildDashboardSections(nightSession: boolean, krClosed = false):
       ],
     },
   ];
+  // 섹터 블록은 한·미가 한 판이라 **보는 시간대 쪽에 붙여 둔다**.
+  //   낮(한국장) = 한국 시장 바로 아래 · 밤(한국장 마감) = 미국 지수 바로 아래.
+  //   한 자리에 고정하면 밤에는 한국 시장 그룹과 함께 맨 아래로 밀려 정작 움직이는 시간에 안 보인다.
+  const move = (list: DashboardSection[], id: string, afterId: string): DashboardSection[] => {
+    const item = list.find(s => s.id === id);
+    if (!item) return list;
+    const rest = list.filter(s => s.id !== id);
+    const at = rest.findIndex(s => s.id === afterId);
+    if (at < 0) return list;
+    return [...rest.slice(0, at + 1), item, ...rest.slice(at + 1)];
+  };
+
   if (krClosed) {
-    const krIds = new Set(["kr", "sector"]);   // 한국 관련 그룹 → 맨 아래(상대 순서 유지)
-    return [...sections.filter(s => !krIds.has(s.id)), ...sections.filter(s => krIds.has(s.id))];
+    // 밤 — 한국 시장만 맨 아래로 내리고, 섹터는 미국 지수 아래에 붙인다.
+    const kr = sections.find(s => s.id === "kr");
+    const rest = sections.filter(s => s.id !== "kr");
+    const ordered = move(rest, "sector", "macro");
+    return kr ? [...ordered, kr] : ordered;
   }
-  // 한국장 시간대 — 현물(금·구리·원유)을 한국 시장과 한국 섹터 사이로 끌어올린다.
-  //   장중엔 원자재가 국내 섹터(철강·화학·정유·조선)의 선행 신호라 그 둘을 붙여 놓고 봐야
-  //   읽힌다. 장이 닫히면 미국 시간대라 원래 자리(야간 선물 다음)로 돌아간다.
-  const spot = sections.find(s => s.id === "spot");
-  if (!spot) return sections;
-  const rest = sections.filter(s => s.id !== "spot");
-  const at = rest.findIndex(s => s.id === "sector");
-  if (at < 0) return sections;
-  return [...rest.slice(0, at), spot, ...rest.slice(at)];
+  // 한국장 시간대 — 섹터는 한국 시장 바로 아래(기본 순서). 현물(금·구리·원유)은 그 다음에 둔다.
+  //   장중엔 원자재가 국내 섹터(철강·화학·정유·조선)의 선행 신호라 둘을 붙여 놓고 봐야 읽힌다.
+  return move(sections, "spot", "sector");
 }
 
 // 색인 칩 네비게이션용 항목 — 이모지(라벨 첫 토큰) + 짧은 라벨 + 앵커 id

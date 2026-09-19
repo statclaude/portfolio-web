@@ -1,13 +1,14 @@
 import { describe, it, expect } from "vitest";
 import { buildDashboardSections } from "../dashboardGroups";
 describe("지수 탭 섹션 순서", () => {
-  it("한국장 시간대 — 한국 시장 → 현물 → 한국 섹터", () => {
+  it("한국장 시간대 — 한국 시장 → 섹터(한·미) → 현물", () => {
     const ids = buildDashboardSections(false, false).map(s => s.id);
-    expect(ids.slice(0, 3)).toEqual(["kr", "spot", "sector"]);
+    expect(ids.slice(0, 3)).toEqual(["kr", "sector", "spot"]);
   });
-  it("한국장 마감 — 한국 그룹은 맨 아래, 현물은 원래 자리", () => {
+  it("한국장 마감 — 한국 시장은 맨 아래, 섹터는 미국 지수 바로 아래, 현물은 원래 자리", () => {
     const ids = buildDashboardSections(false, true).map(s => s.id);
-    expect(ids.slice(-2)).toEqual(["kr", "sector"]);
+    expect(ids[ids.length - 1]).toBe("kr");
+    expect(ids.indexOf("sector")).toBe(ids.indexOf("macro") + 1);
     expect(ids.indexOf("spot")).toBeGreaterThan(ids.indexOf("night"));
   });
   it("섹션이 빠지거나 중복되지 않는다", () => {

@@ -870,7 +870,7 @@ function Dashboard() {
         {activeTab === MARKET_MONEY_TAB_KEY ? (
           <StockMarketTab onOpenValuation={(code, n2) => { setValuationName(n2); setValuationTicker(code); }} />
         ) : activeTab === US_MARKET_TAB_KEY ? (
-          <UsMarketTab navStickyTop={(headerCollapsed ? 0 : headerH) + tabsH}
+          <UsMarketTab onOpenValuation={(code, n2) => { setValuationName(n2); setValuationTicker(code); }} navStickyTop={(headerCollapsed ? 0 : headerH) + tabsH}
             onRequestSearch={(q) => {
             setSearchInitQuery(q);
             setSearchOpen(true);
