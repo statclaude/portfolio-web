@@ -14,6 +14,7 @@ import { Sparkline } from "./Sparkline";
 import { MarketFlowModal } from "./MarketFlowModal";
 import { EtfCompositionDialog } from "./EtfCompositionDialog";
 import { TicsSectorBoard } from "./TicsSectorBoard";
+import { EtfTopCards } from "./EtfTopCards";
 import { ValueupMiniCard } from "./ValueupCard";
 import { HlPerpCard } from "./HlPerpCard";
 import { TickArrow } from "./TickArrow";
@@ -214,7 +215,10 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
               {section.label}
             </span>
             {/* 한국 섹터 — 토스 TICS 분류. 미국 블록과 **같은 한글 분류**라 이름으로 맞출 수 있다. */}
-            {section.render === "sectorFlow" && (
+            {section.render === "etfTop" && (
+                  <EtfTopCards onOpenEtf={(code, name) => setEtfDialog({ ticker: code, name })} />
+                )}
+                {section.render === "sectorFlow" && (
               <TicsSectorBoard onOpenValuation={onOpenValuation}
                                krClosed={krSessionPhase() === "CLOSED"} />
             )}

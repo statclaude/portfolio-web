@@ -102,6 +102,7 @@ import { getTabVisibility, setTabVisibility, getMarketSplit, setMarketSplit, TAB
 import { splitByMarket, splitHeldAndMarket, type MarketSection } from "../lib/marketSplit";
 import { TicsSectorBoard } from "./TicsSectorBoard";
 import { ProxyStatusBadge } from "./ProxyStatusBadge";
+import { EtfTopCards } from "./EtfTopCards";
 import {
   getGroupFolders, setGroupFolders, type GroupFolder,
   folderAllKey, isFolderAllKey, folderNameOfAllKey, FOLDER_ALL_LABEL,
@@ -1603,8 +1604,11 @@ export function MobileSimpleView() {
                   <TicsSectorBoard onOpenValuation={setValuationTicker}
                                    krClosed={krSessionPhase() === "CLOSED"} />
                 )}
+                {section.render === "etfTop" && (
+                  <EtfTopCards onOpenEtf={(code, name) => setEtfDialog({ ticker: code, name })} />
+                )}
                 <div className="grid grid-cols-2 gap-x-2 gap-y-4">
-                  {(section.render === "sectorFlow" ? []
+                  {(section.render ? []
                     : section.id === "sector"
                     // 한국 섹터 ETF·반도체 TOP2+·소부장 — 오늘 등락률(%) 내림차순 정렬 (PC 동일)
                     ? section.rows.flat().sort((a, b) =>
