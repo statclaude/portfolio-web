@@ -77,6 +77,7 @@ import { HlPerpCard } from "./HlPerpCard";
 import { GOTO_HEATMAP_EVENT, requestHeatmap, CARD_HEATMAP_LINK } from "../lib/heatmapNav";
 import { TRADES_CHANGED_EVENT } from "../lib/tradeEvents";
 import { GOTO_TAB_EVENT } from "../lib/tabNav";
+import { OPEN_VALUATION_EVENT, type ValuationRequest } from "../lib/valuationNav";
 import { startAutoSync, SYNC_PULLED_EVENT } from "../lib/syncManager";
 import { SyncConflictBar } from "./SyncConflictBar";
 import { MyTradesTab } from "./MyTradesTab";
@@ -316,6 +317,16 @@ export function MobileSimpleView() {
     window.addEventListener(SYNC_PULLED_EVENT, h);
     return () => window.removeEventListener(SYNC_PULLED_EVENT, h);
   }, [queryClient]);
+
+  // 깊은 화면 → 기업가치 팝업 딥링크 (PC 와 같은 규칙).
+  useEffect(() => {
+    const h = (e: Event) => {
+      const d = (e as CustomEvent<ValuationRequest>).detail;
+      if (d?.ticker) setValuationTicker(d.ticker);
+    };
+    window.addEventListener(OPEN_VALUATION_EVENT, h);
+    return () => window.removeEventListener(OPEN_VALUATION_EVENT, h);
+  }, []);
 
   // 카드 → 임의 탭 딥링크 (PC 와 같은 규칙).
   useEffect(() => {
