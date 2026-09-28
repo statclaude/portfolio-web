@@ -535,7 +535,18 @@ if (isNativeApp()) {
 }
 
 // 토큰 가져오기 — 캐시 유효 시 즉시 반환, 만료/없음이면 상황에 맞는 조용한 갱신 시도
-export async function getAccessToken(): Promise<string | null> {
+/**
+ * @param opts.allowPopupRefresh 기본 true. **false 면 GIS silent refresh 를 건너뛴다.**
+ *   ⚠️ 웹의 GIS 는 prompt:"none" 이어도 팝업/iframe 을 띄운다. 사용자 제스처 없이(타이머에서)
+ *   부르면 브라우저가 즉시 닫아 **"팝업이 떴다 사라지는"** 깜빡임만 남기고 실패한다(실측).
+ *   그래서 자동 동기화처럼 **배경에서 도는 코드는 false** 로 부른다 — 살아 있는 토큰이면 쓰고,
+ *   만료됐으면 조용히 건너뛰었다가 사용자가 화면을 만질 때(설정 열기·수동 ↑↓) 갱신한다.
+ *   앱(네이티브)·확장은 팝업이 없어 이 제한과 무관하게 조용히 받는다.
+ */
+export async function getAccessToken(
+  opts: { allowPopupRefresh?: boolean } = {},
+): Promise<string | null> {
+  const allowPopupRefresh = opts.allowPopupRefresh !== false;
   if (accessToken && Date.now() < tokenExpiresAt - 30_000) {
     // 쓸 수 있는 토큰이 있다 = 인증이 지금 정상이다. 옛 실패 기록이 남아 있으면 지운다.
     //   안 지우면 "실패" 박스가 계속 떠서, 저장·가져오기가 되는데도 고장난 것처럼 보인다.
@@ -555,7 +566,8 @@ export async function getAccessToken(): Promise<string | null> {
   }
   // 이전에 로그인한 적 있으면 silent refresh 시도 (사용자 클릭 불필요) — 앱 웹뷰에서는
   //   거의 항상 실패하지만(위 주석), 네이티브 인증이 안 되는 구버전 앱에는 유일한 시도라 남긴다.
-  if (wasSignedIn()) {
+  //   단 배경 호출(allowPopupRefresh=false)은 여기서 멈춘다 — 위 주석 참조.
+  if (wasSignedIn() && allowPopupRefresh) {
     const refreshed = await requestSilentRefresh();
     if (refreshed) return refreshed;
   }
