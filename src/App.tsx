@@ -65,6 +65,7 @@ import { reportRefresh, useLastRefresh } from "./lib/lastRefresh";
 import { getEffectivePollMs, getPersonalProxyUrl } from "./lib/proxyConfig";
 import { GOTO_HEATMAP_EVENT } from "./lib/heatmapNav";
 import { isNativeApp } from "./lib/nativeProxy";
+import { TRADES_CHANGED_EVENT } from "./lib/tradeEvents";
 import { ValuationModal } from "./components/ValuationModal";
 import { MobileSimpleView } from "./components/MobileSimpleView";
 import { useExtensionProxyReady } from "./lib/extensionProxy";
@@ -284,6 +285,13 @@ function Dashboard() {
     const h = () => setActiveTab(HEATMAP_TAB_KEY);
     window.addEventListener(GOTO_HEATMAP_EVENT, h);
     return () => window.removeEventListener(GOTO_HEATMAP_EVENT, h);
+  }, []);
+
+  // 거래 기록이 바뀌면 오늘 손익을 다시 계산한다 — 거래 로그가 그 계산의 뿌리다.
+  useEffect(() => {
+    const h = () => setReloadKey(k => k + 1);
+    window.addEventListener(TRADES_CHANGED_EVENT, h);
+    return () => window.removeEventListener(TRADES_CHANGED_EVENT, h);
   }, []);
 
   const visible = useMemo(

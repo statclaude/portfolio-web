@@ -83,6 +83,7 @@ import { HeatmapTab } from "./HeatmapTab";
 import { ValueupMiniCard } from "./ValueupCard";
 import { HlPerpCard } from "./HlPerpCard";
 import { GOTO_HEATMAP_EVENT, requestHeatmap, CARD_HEATMAP_LINK } from "../lib/heatmapNav";
+import { TRADES_CHANGED_EVENT } from "../lib/tradeEvents";
 import { MyTradesTab } from "./MyTradesTab";
 import { AssetTrendTab } from "./AssetTrendTab";
 import { TickArrow } from "./TickArrow";
@@ -305,6 +306,16 @@ export function MobileSimpleView() {
     window.addEventListener(GOTO_HEATMAP_EVENT, h);
     return () => window.removeEventListener(GOTO_HEATMAP_EVENT, h);
   }, []);
+
+  // 거래 기록이 바뀌면 오늘 손익을 다시 계산한다 (PC 와 같은 규칙).
+  useEffect(() => {
+    const h = () => {
+      void queryClient.invalidateQueries({ queryKey: ["m-trades"] });
+      void queryClient.invalidateQueries({ queryKey: ["m-holdings"] });
+    };
+    window.addEventListener(TRADES_CHANGED_EVENT, h);
+    return () => window.removeEventListener(TRADES_CHANGED_EVENT, h);
+  }, [queryClient]);
 
   // PC 동일 자동 갱신 — 전용 프록시·확장 시 5/10/30/60초 / 공개 기본 60초(30초 선택 가능) + 다운/마감 시 자동 증가
   //   extReady 의존성 필수 — 확장 감지는 postMessage 핸드셰이크라 마운트 뒤에 켜질 수 있다.
