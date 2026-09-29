@@ -1416,7 +1416,8 @@ export function StockCard({
                        isTradingDay={!!price.high}
                        defaultOpen={!hasPosition}
                        etfTicker={isEtfByName(stock.name) ? stock.ticker : undefined}
-                       usTicker={isUsHolding && !isEtfByName(stock.name) ? stock.ticker : undefined} />
+                       usTicker={isUsHolding && !isEtfByName(stock.name) ? stock.ticker : undefined}
+                       volume={price.volume} />
 
         </div>
         )}
