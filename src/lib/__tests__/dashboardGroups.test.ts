@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { buildDashboardSections } from "../dashboardGroups";
+
+// 지수 탭 그룹 순서 — "지금 움직이는 것을 위로" 가 규칙이다.
+//   ⚠️ 기대값을 코드에 맞춰 베끼지 말 것. 아래 주석의 **의도**가 먼저다.
 describe("지수 탭 섹션 순서", () => {
   it("한국장 시간대 — 한국 시장 → 섹터(한·미) → 현물", () => {
     const ids = buildDashboardSections(false, false).map(s => s.id);
@@ -11,6 +14,7 @@ describe("지수 탭 섹션 순서", () => {
     expect(ids.indexOf("sector")).toBe(ids.indexOf("macro") + 1);
     expect(ids.indexOf("spot")).toBeGreaterThan(ids.indexOf("night"));
   });
+
   it("섹션이 빠지거나 중복되지 않는다", () => {
     for (const closed of [false, true]) {
       const ids = buildDashboardSections(false, closed).map(s => s.id);
