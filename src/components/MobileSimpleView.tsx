@@ -12,13 +12,13 @@ import {
 } from "../lib/usMarketData";
 import { Settings, Cpu, Menu, MoreVertical } from "lucide-react";
 import type { ReactNode } from "react";
-import { isSymbolSleeping, marketOfSymbol, fmtAgo, holdingYesterdayBaseSum, isUsExtendedTradingOpen, krFuturesName, krFuturesDesc, isKrNightSession, isQuoteStale, isUsRateSymbol, displayPctOf, isFxFuturesWeekendClosed } from "../lib/format";
+import { isSymbolSleeping, marketOfSymbol, fmtAgo, holdingYesterdayBaseSum, isUsExtendedTradingOpen, krFuturesName, krFuturesDesc, isKrNightSession, isQuoteStale, isKrHoldingClosed, isUsRateSymbol, displayPctOf, isFxFuturesWeekendClosed } from "../lib/format";
 import { getTodayProxyCalls, getRecentProxyCalls } from "../lib/usageCounter";
 import { getPersonalProxies, setPersonalProxies, type PersonalProxy, fetchProxyUsage, type ProxyUsage, getEffectivePollMs, getPersonalPollMs, setPersonalPollMs, POLL_OPTIONS, PUBLIC_MIN_POLL_MS, pollLabel, getDimSleepingEnabled, setDimSleepingEnabled, getPersonalProxyUrl } from "../lib/proxyConfig";
 import { useAdaptiveRefreshMs } from "../lib/proxyStatus";
 import { useTossMaintenance, fmtUntil, getTossMaintenance } from "../lib/tossMaintenance";
 import { getIndependentGroupsMode } from "../lib/groupMode";
-import { buildDashboardPage, defaultDashboardPage, dashboardGroupNav, dashboardTagTone, dashboardTagCard, DASHBOARD_PAGES, type DashboardPage } from "../lib/dashboardGroups";
+import { buildDashboardPage, defaultDashboardPage, dashboardGroupNav, dashboardTagTone, dashboardRowLabelTone, dashboardTagCard, leadRowOf, isLastLead, DASHBOARD_PAGES, sortedRows, loadLeaderSort, saveLeaderSort, type LeaderSort, type DashboardPage } from "../lib/dashboardGroups";
 import { GroupNavBar, type GroupNavItem } from "./GroupNavBar";
 import { StockMarketTab } from "./StockMarketTab";
 import { useExtensionProxyReady } from "../lib/extensionProxy";
@@ -65,10 +65,12 @@ import { TotalRow } from "./TotalRow";
 import { SemiCheckTab } from "./SemiCheckTab";
 import { SectorRankingTab } from "./SectorRankingTab";
 import { ConsensusTab, type ConsensusItem } from "./ConsensusTab";
-import { filterByTab, CONSENSUS_TAB_KEY as CONSENSUS_KEY, ETF_REVERSE_TAB_KEY as ETF_KEY, ETF_RANKING_TAB_KEY as ETF_RANK_KEY, ETF_COMPARE_TAB_KEY as ETF_COMPARE_KEY, HEATMAP_TAB_KEY as HEATMAP_KEY, SCREENER_TAB_KEY as SCREENER_KEY, INDEX_NIGHT_TAB_KEY as IDX_NIGHT_KEY, INDEX_SEMI_TAB_KEY as IDX_SEMI_KEY, VALUATION_TAB_KEY as VALUATION_KEY, MARKET_MONEY_TAB_KEY as MONEY_KEY } from "./Tabs";
+import { filterByTab, CONSENSUS_TAB_KEY as CONSENSUS_KEY, ETF_REVERSE_TAB_KEY as ETF_KEY, ETF_RANKING_TAB_KEY as ETF_RANK_KEY, ETF_COMPARE_TAB_KEY as ETF_COMPARE_KEY, HEATMAP_TAB_KEY as HEATMAP_KEY, SCREENER_TAB_KEY as SCREENER_KEY, CLOSE_BET_TAB_KEY as CLOSE_BET_KEY, ACCUM_TAB_KEY as ACCUM_KEY, INDEX_NIGHT_TAB_KEY as IDX_NIGHT_KEY, INDEX_SEMI_TAB_KEY as IDX_SEMI_KEY, INDEX_LEADERS_TAB_KEY as IDX_LEADERS_KEY, VALUATION_TAB_KEY as VALUATION_KEY, MARKET_MONEY_TAB_KEY as MONEY_KEY } from "./Tabs";
 import { EtfReverseTab } from "./EtfReverseTab";
 import { EtfRankingTab } from "./EtfRankingTab";
 import { ScreenerTab } from "./ScreenerTab";
+import { CloseBetTab } from "./CloseBetTab";
+import { AccumTab } from "./AccumTab";
 import { RotationTab } from "./RotationTab";
 import { EtfCompareTab } from "./EtfCompareTab";
 import { HeatmapTab } from "./HeatmapTab";
@@ -105,6 +107,7 @@ import type { Stock } from "../types";
 import { getTabVisibility, setTabVisibility, getMarketSplit, setMarketSplit, TAB_VIS_ITEMS } from "../lib/tabVisibility";
 import { splitByMarket, splitHeldAndMarket, type MarketSection } from "../lib/marketSplit";
 import { TicsSectorBoard } from "./TicsSectorBoard";
+import { RealRateNote } from "./RealRateNote";
 import { ProxyStatusBadge } from "./ProxyStatusBadge";
 import { EtfTopCards } from "./EtfTopCards";
 import {
@@ -125,12 +128,12 @@ const ASSET_TREND_KEY = "__asset-trend__";  // 자산추이 — 일별 총자산
 //   새 시스템 탭은 여기에만 넣으면 된다. (탭 자체를 만드는 곳 — groupTabs 의 push — 은 별도)
 const SYS_DROPDOWN_KEYS = new Set<string>([    // '투자도구' 드롭다운에 묶이는 탭
   SECTOR_KEY, SEMI_KEY, CONSENSUS_KEY, ETF_KEY, ETF_RANK_KEY, ETF_COMPARE_KEY,
-  HEATMAP_KEY, SCREENER_KEY, VALUATION_KEY,
+  HEATMAP_KEY, SCREENER_KEY, CLOSE_BET_KEY, ACCUM_KEY, VALUATION_KEY,
 ]);
 const MY_GROUP_KEYS_M = new Set<string>([MY_KEY, MY_TRADES_KEY, ASSET_TREND_KEY]);   // '내자산' 드롭다운
 // '지수' 드롭다운 — 주간(옛 지수 키 KR_KEY 를 그대로 써서 저장된 마지막 탭이 이어진다)·야간·반도체
-const INDEX_KEYS_M = new Set<string>([KR_KEY, IDX_NIGHT_KEY, IDX_SEMI_KEY]);
-const indexPageOfM = (k: string): DashboardPage => k === IDX_NIGHT_KEY ? "night" : k === IDX_SEMI_KEY ? "semi" : "day";
+const INDEX_KEYS_M = new Set<string>([KR_KEY, IDX_NIGHT_KEY, IDX_SEMI_KEY, IDX_LEADERS_KEY]);
+const indexPageOfM = (k: string): DashboardPage => k === IDX_NIGHT_KEY ? "night" : k === IDX_SEMI_KEY ? "semi" : k === IDX_LEADERS_KEY ? "leaders" : "day";
 const SYS_ALL_KEYS = new Set<string>([MONEY_KEY, ...INDEX_KEYS_M, ...SYS_DROPDOWN_KEYS, ...MY_GROUP_KEYS_M]);
 // 일부 심볼 sparkline 은 Yahoo 가 historical 안 줌 → 가까운 현물 차트로 폴백 (차트 목록 계산에도 쓴다)
 const SPARKLINE_FALLBACK_M: Record<string, string> = { "SOX=F": "^SOX" };
@@ -142,7 +145,7 @@ const TAB_KEY = "portfolio-mobile-active-tab";  // 마지막 활성 탭 기억
 // 자동 갱신 X — 새로고침 버튼만. 자기 주식/그룹/검색 등 모든 추가 기능 없음.
 
 function fmtPrice(symbol: string, price: number): string {
-  if (symbol === "^TNX" || symbol === "^TYX" || symbol === "^VIX" || symbol === "VKOSPI") return price.toFixed(2);
+  if (symbol === "^TIPS10" || symbol === "^MOVE" || symbol === "^TNX" || symbol === "^TYX" || symbol === "^VIX" || symbol === "VKOSPI") return price.toFixed(2);
   // 원엔은 한국 관행대로 100엔 기준 표기 (Yahoo 는 1엔당 원 = 8.6원 꼴)
   if (symbol === "JPYKRW=X") return (price * 100).toFixed(2);
   if (symbol.includes("KRW")) return price.toFixed(2);
@@ -153,6 +156,7 @@ function fmtPrice(symbol: string, price: number): string {
 export function MobileSimpleView() {
   const queryClient = useQueryClient();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [leaderSort, setLeaderSort] = useState<LeaderSort>(loadLeaderSort);   // 대장주 줄 정렬(등락률순 기본, PC 와 같은 키)
   // 로그인 redirect 복귀 — 저장/불러오기 대기 동작이 있으면 설정 자동 오픈 → 자동 재개
   useEffect(() => {
     if (!peekPendingSyncAction()) return;
@@ -187,7 +191,8 @@ export function MobileSimpleView() {
   }, []);
   // 폴더 sub바 높이 — 시장분리 점프바를 폴더바 아래에 겹치지 않게 고정시키기 위함 (없으면 0)
   const [folderBarH, setFolderBarH] = useState(0);
-  const folderBarRef = useCallback((el: HTMLDivElement | null) => setFolderBarH(el ? el.offsetHeight : 0), []);
+  const folderBarEl = useRef<HTMLDivElement | null>(null);
+  const folderBarRef = useCallback((el: HTMLDivElement | null) => { folderBarEl.current = el; setFolderBarH(el ? el.offsetHeight : 0); }, []);
   // 폴더 sub바 칩 — 그룹 이름변경/삭제 (tabMenu 와 동일 로직, 인라인 아이콘용)
   const renameGroupInline = async (g: string) => {
     const next = window.prompt(`"${g}" → 새 이름:`, g);
@@ -250,7 +255,7 @@ export function MobileSimpleView() {
   const touchStart = useRef<{ x: number; y: number; sy: number; t: number } | null>(null);
   // 당겨서 놓기 — 옆으로 끄는 동안 가장자리에 '다음/이전 페이지' 표시가 자라고, 끝까지 당긴 채 놓으면 이동
   const [pull, setPull] = useState<{ dir: -1 | 1; p: number; label: string } | null>(null);
-  const PULL_PX = 90;   // 이만큼 당기면 '놓으면 이동' 
+  const PULL_PX = 80;   // 이만큼 당기면 '놓으면 이동' 
   // 파란 '놓으면 이동' 알약이 **화면에 뜬 상태**인가 — 이게 true 일 때 놓아야만 이동한다(보이는 것 = 동작).
   const pullReady = useRef(false);
   const pullTimer = useRef<number | null>(null);
@@ -434,12 +439,18 @@ export function MobileSimpleView() {
     }
     if (vis.usMarket) {
       // 지수 — 주간·야간·반도체 세 탭('지수' 드롭다운). 라벨은 PC 와 같은 한 벌(DASHBOARD_PAGES).
-      const keyOf: Record<DashboardPage, string> = { day: KR_KEY, night: IDX_NIGHT_KEY, semi: IDX_SEMI_KEY };
+      const keyOf: Record<DashboardPage, string> = { day: KR_KEY, night: IDX_NIGHT_KEY, semi: IDX_SEMI_KEY, leaders: IDX_LEADERS_KEY };
       for (const p of DASHBOARD_PAGES) tabs.push({ key: keyOf[p.key], label: `${p.emoji}${p.tab}`, count: 0 });
     }
     // 눌림목 — 시스템 묶음 첫 자리(섹터 위, PC buildTabs 와 같은 순서).
     if (vis.screener) {
       tabs.push({ key: SCREENER_KEY, label: "🔎종목찾기(눌림목)", count: 0 });
+    }
+    if (vis.closeBet) {
+      tabs.push({ key: CLOSE_BET_KEY, label: "🌙종가배팅", count: 0 });
+    }
+    if (vis.accum) {
+      tabs.push({ key: ACCUM_KEY, label: "🧲수급 매집", count: 0 });
     }
     if (vis.sectorRank) {
       tabs.push({ key: SECTOR_KEY, label: "🧩섹터별등락", count: 0 });
@@ -523,6 +534,21 @@ export function MobileSimpleView() {
   // 화면에 보이는 탭바와 '동일 순서'로 스와이프 이동 키 구성.
   //  시각 순서: 지수 → (섹터·반도체·컨센서스·ETF 묶음) → (내주식·내거래 묶음) → 사용자그룹 → 폴더
   //  (groupTabs 원순서는 내거래가 컨센서스/ETF 앞이라 ETF에서 스와이프 시 내거래를 건너뛰던 문제 수정)
+  // 탭이 바뀌면(스와이프·드롭다운) 상단 탭 바·폴더 칩 바에서 **켜진 탭을 가로 가운데로** — 스와이프로 넘기면
+  //   페이지만 바뀌고 탭 바는 그대로라 켜진 탭이 화면 밖에 있곤 했다. 켜진 칸 = bg-blue-600(탭·드롭다운·칩 공통).
+  //   scrollIntoView 는 세로 스크롤까지 건드려서 쓰지 않고 바 자체의 scrollLeft 만 옮긴다.
+  useEffect(() => {
+    const id = requestAnimationFrame(() => {
+      for (const bar of [navRef.current, folderBarEl.current]) {
+        if (!bar) continue;
+        const on = [...bar.querySelectorAll<HTMLElement>(".bg-blue-600")].find(el => el.parentElement === bar);
+        if (!on) continue;
+        const left = on.offsetLeft - (bar.clientWidth - on.offsetWidth) / 2;
+        bar.scrollTo({ left: Math.max(0, left), behavior: "smooth" });
+      }
+    });
+    return () => cancelAnimationFrame(id);
+  }, [activeTab]);
   const navKeys = useMemo(() => {
     const has = (k: string) => groupTabs.some(t => t.key === k);
     const keys: string[] = [];
@@ -945,12 +971,12 @@ export function MobileSimpleView() {
     if (!touchStart.current) return;
     const dx = e.touches[0].clientX - touchStart.current.x;
     const dy = e.touches[0].clientY - touchStart.current.y;
-    const tg = Math.abs(dx) >= 20 ? pullTarget(dx, dy) : null;
+    const tg = Math.abs(dx) >= 10 ? pullTarget(dx, dy) : null;   // 옆으로 조금만 끌어도 바로 표시
     if (!tg) { clearPullTimer(); pullReady.current = false; if (pull) setPull(null); return; }
     const label = groupTabs.find(t => t.key === tg.to)?.label ?? "";
     const far = Math.abs(dx) >= PULL_PX;
-    // 빠르게 휙 민 손짓은 제외 — 손 댄 지 0.3초가 지나야 '준비' 가 된다. 멈춰 있어도 넘어가게 남은 시간 뒤 타이머로 켠다.
-    const wait = 300 - (Date.now() - touchStart.current.t);
+    // 스치듯 휙 민 손짓은 제외 — 손 댄 지 0.12초가 지나야 '준비'(0.3초는 느렸다). 멈춰 있어도 남은 시간 뒤 타이머로 켠다.
+    const wait = 120 - (Date.now() - touchStart.current.t);
     if (!far) { clearPullTimer(); pullReady.current = false; }
     else if (wait <= 0) { clearPullTimer(); pullReady.current = true; }
     else if (!pullTimer.current) {
@@ -961,7 +987,7 @@ export function MobileSimpleView() {
         setPull(pv => (pv ? { ...pv, p: 1 } : pv));
       }, wait);
     }
-    setPull({ dir: tg.dir, p: pullReady.current ? 1 : Math.min(0.95, (Math.abs(dx) - 20) / (PULL_PX - 20)), label });
+    setPull({ dir: tg.dir, p: pullReady.current ? 1 : Math.min(0.95, (Math.abs(dx) - 10) / (PULL_PX - 10)), label });
   };
   const endPull = () => {
     clearPullTimer();
@@ -1078,18 +1104,20 @@ export function MobileSimpleView() {
          onTouchMove={handleTouchMove}
          onTouchEnd={handleTouchEnd}
          onTouchCancel={() => { pullReady.current = false; endPull(); }}>
-      {/* 당겨서 놓기 표시 — 끄는 쪽 반대편 가장자리에서 자라 나온다. 다 차면 진해지며 '놓으면 이동' */}
+      {/* 당겨서 놓기 표시 — 옆으로 끌기 시작하면 **바로** 가장자리에 뜬다. 아래 막대가 차오르고,
+          다 차면 파랗게 '놓으면 이동'. 이동은 손을 놓을 때만. */}
       {pull && (
-        <div className={`fixed top-1/2 z-[900] -translate-y-1/2 pointer-events-none flex items-center gap-1
-                         px-3 py-2 rounded-full shadow-lg text-[12px] font-bold whitespace-nowrap transition-colors
-                         ${pull.p >= 1 ? "bg-blue-600 text-white" : "bg-white/95 text-gray-600 border border-gray-200"}`}
-             style={{
-               [pull.dir === 1 ? "right" : "left"]: -120 + pull.p * 132,
-               opacity: 0.4 + pull.p * 0.6,
-             }}>
+        <div className={`fixed top-1/2 z-[900] -translate-y-1/2 pointer-events-none overflow-hidden
+                         flex items-center gap-1 px-3 py-2 rounded-full shadow-lg text-[12px] font-bold whitespace-nowrap
+                         ${pull.p >= 1 ? "bg-blue-600 text-white" : "bg-white text-gray-700 border border-gray-200"}`}
+             style={{ [pull.dir === 1 ? "right" : "left"]: 12 }}>
           {pull.dir === -1 && <span>◀</span>}
           <span>{pull.p >= 1 ? "놓으면 " : ""}{pull.label}</span>
           {pull.dir === 1 && <span>▶</span>}
+          {pull.p < 1 && (
+            <span className={`absolute bottom-0 h-0.5 bg-blue-500 ${pull.dir === 1 ? "right-0" : "left-0"}`}
+                  style={{ width: `${pull.p * 100}%` }} />
+          )}
         </div>
       )}
       <NewVersionToast />
@@ -1745,6 +1773,16 @@ export function MobileSimpleView() {
             <ScreenerTab onOpenValuation={setValuationTicker} />
           </div>;
         }
+        if (activeTab === ACCUM_KEY) {
+          return <div className="px-2 py-2 pb-32">
+            <AccumTab onOpenValuation={(code, n) => { setValuationName(n ?? null); setValuationTicker(code); }} />
+          </div>;
+        }
+        if (activeTab === CLOSE_BET_KEY) {
+          return <div className="px-2 py-2 pb-32">
+            <CloseBetTab onOpenValuation={(code, n) => { setValuationName(n ?? null); setValuationTicker(code); }} />
+          </div>;
+        }
         if (activeTab === HEATMAP_KEY) {
           return <div className="px-1 py-2 pb-32"><HeatmapTab /></div>;
         }
@@ -1780,11 +1818,23 @@ export function MobileSimpleView() {
                       자세히 →
                     </button>
                   )}
+                  {/* 정렬 버튼은 페이지에 하나 — 첫 정렬 그룹 제목에만(누르면 페이지 전체가 바뀐다) */}
+{section.sortable && section.id === sections.find(x => x.sortable)?.id && (
+                    <span className="ml-1.5 inline-flex rounded border border-gray-300 overflow-hidden align-middle text-[10px] font-bold">
+                      {(["pct", "value"] as const).map(v => (
+                        <button key={v} onClick={() => { setLeaderSort(v); saveLeaderSort(v); }}
+                                className={`px-1 py-0 ${leaderSort === v ? "bg-indigo-600 text-white" : "bg-white text-gray-500"}`}>
+                          {v === "pct" ? "등락률순" : "거래대금순"}
+                        </button>
+                      ))}
+                    </span>
+                  )}
                 </span>
                 {section.render === "etfTop" && (
                   <EtfTopCards onOpenEtf={(code, name) => setEtfDialog({ ticker: code, name })} />
                 )}
                 {section.note && <div className="text-[10px] text-gray-500 leading-snug">{section.note}</div>}
+                {section.id === "krfx" && <RealRateNote usMap={usMap} small />}
                 {section.render === "rotation" && (
                   <RotationTab embedded extrasOnly onOpenValuation={t => setValuationTicker(t)} />
                 )}
@@ -1813,15 +1863,39 @@ export function MobileSimpleView() {
                     : section.rowLabels
                     // 줄 이름이 있으면 줄마다 책갈피 머리('__row__:i')를 앞에 끼운다 — 모바일은 한 그리드라
                     //   줄을 상자로 감쌀 수 없어서, 머리가 새 줄에서 시작하며 위에 구분선을 긋는다.
-                    ? section.rows.flatMap((row, ri) => [`__row__:${ri}`, ...row])
+                    //   카드 1장짜리 줄이 연달아 오면(설계·파운드리 등) 두 줄을 한 줄에 — 머리도 좌우 둘('__pair__:i' = i·i+1 줄).
+                    ? (() => {
+                        const out: string[] = [];
+                        const rows = sortedRows(section, leaderSort, sym => displayPctOf(sym, usMap.get(sym)));
+                        for (let ri = 0; ri < rows.length; ri++) {
+                          const row = rows[ri], next = rows[ri + 1];
+                          if (row.length === 1 && next?.length === 1) { out.push(`__pair__:${ri}`, row[0], next[0]); ri++; continue; }
+                          out.push(`__row__:${ri}`, ...row);
+                        }
+                        return out;
+                      })()
                     : section.rows.flat()
                   ).map(symbol => {
+              if (symbol.startsWith("__pair__:")) {
+                const ri = Number(symbol.slice(9));
+                return (
+                  <div key={symbol} className={`col-span-2 grid grid-cols-2 gap-x-2 ${ri > 0 ? "border-t border-gray-200 pt-2" : ""} -mb-2`}>
+                    {[ri, ri + 1].map(i => (
+                      <span key={i}>
+                        <span className={`inline-block px-1.5 py-0.5 rounded-md border text-[11px] font-bold ${dashboardRowLabelTone(section, section.rowLabels?.[i] ?? "")}`}>
+                          {section.rowLabels?.[i]}
+                        </span>
+                      </span>
+                    ))}
+                  </div>
+                );
+              }
               if (symbol.startsWith("__row__:")) {
                 const ri = Number(symbol.slice(8));
                 const lbl = section.rowLabels?.[ri] ?? "";
                 return (
                   <div key={symbol} className={`col-span-2 ${ri > 0 ? "border-t border-gray-200 pt-2" : ""} -mb-2`}>
-                    <span className={`inline-block px-1.5 py-0.5 rounded-md border text-[11px] font-bold ${dashboardTagTone(lbl)}`}>
+                    <span className={`inline-block px-1.5 py-0.5 rounded-md border text-[11px] font-bold ${dashboardRowLabelTone(section, lbl)}`}>
                       {lbl}
                     </span>
                   </div>
@@ -1838,7 +1912,12 @@ export function MobileSimpleView() {
                 ? { ...rawP, name: krFuturesName(rawP.symbol), desc: krFuturesDesc() }
                 : rawP;
               const q = usMap?.get(p.symbol);
-              const sleeping = isSymbolSleeping(p.symbol);
+              // 한국 종목·ETF(.KS) — **보유 종목 카드와 같은 규칙**(isKrHoldingClosed): 프리(08:00~)·애프터(~20:00)에
+              //   실제 체결이 들어오면 열림, 단일가 진행 중이면 열림, ETF·ETN 은 15:30 이후 바로 마감.
+              //   (정규장 09:00~15:30 만 보던 때는 08시 NXT 프리장에 시세가 움직이는데도 흐렸다)
+              const sleeping = /^[\dA-Za-z]{6}\.KS$/.test(p.symbol)
+                ? isKrHoldingClosed(undefined, undefined, q?.singlePrice, q?.freshTime ?? 0, !p.krStock)   // 체결 시각 없으면(개장 전 ETF) 시간외엔 마감
+                : isSymbolSleeping(p.symbol);
               // 메인 가격/변동률 (PC UsMarketTab 동일 로직) — 한국 입장 누적 변동률:
               // REGULAR → regularPct, 시간외 → postPrice + 어제 종가 대비 합산
               const offHoursStates = ["PRE", "POST", "POSTPOST", "PREPRE", "CLOSED"];
@@ -1956,13 +2035,13 @@ export function MobileSimpleView() {
                   )}
                   <div className={`relative overflow-hidden h-full flex flex-col gap-0.5
                                   rounded-lg border px-3 py-1.5
-                                  ${section.lead && section.rows.some(r => r[0] === p.symbol) ? dashboardTagCard(section.rowLabels?.[section.rows.findIndex(r => r[0] === p.symbol)]) : bg}`}>
+                                  ${leadRowOf(section, p.symbol) >= 0 ? dashboardTagCard(section.rowLabels?.[leadRowOf(section, p.symbol)]) : bg}`}>
                   <Sparkline data={chartArr}
                              width={300} height={70}
                              color={sparkColor}
                              className={`absolute inset-0 w-full h-full opacity-50
                                         pointer-events-none ${dimCls}`} />
-                  <div className={`relative flex items-baseline gap-1.5 ${dimCls}`}>
+                  <div className={`relative flex items-baseline gap-1.5 h-5 overflow-hidden ${dimCls}`}>
                     {sleeping && !inSession && (
                       <span className="text-[11px] text-gray-400">zZ</span>
                     )}
@@ -1990,11 +2069,10 @@ export function MobileSimpleView() {
                   </div>
                   <div className={`relative flex items-end mt-auto ${dimCls}`}>
                     <span className={`flex-1 text-left tabular-nums ${sign}`}>
-                      {q?.currency === "KRW" && q?.priceUsd != null && (
-                        <span className="block text-[9px] font-normal leading-tight text-gray-900">
-                          ${q.priceUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}
-                        </span>
-                      )}
+                      {/* 달러 보조 줄 — 없는 카드도 같은 높이를 비워 둔다(미국 종목 카드만 한 줄 더 높아 그룹마다 카드 높이가 달랐다) */}
+                      <span className={`block text-[9px] font-normal leading-tight text-gray-900 ${q?.currency === "KRW" && q?.priceUsd != null ? "" : "invisible"}`}>
+                        {q?.currency === "KRW" && q?.priceUsd != null ? `$${q.priceUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : "$"}
+                      </span>
                       <span className="text-sm">{effPrice != null ? fmtPrice(p.symbol, effPrice) : "—"}</span>
                     </span>
                     <span className={`flex-1 text-right text-base font-bold tabular-nums ${sign}`}>
@@ -2008,7 +2086,7 @@ export function MobileSimpleView() {
                   </div>
                   {/* lead — 첫 카드(간밤 미국 대장주)가 '원인'. 카드 사이 틈 가운데에 큰 ➜ (원 없이). 틈은 다른 그룹과 같게 둬 카드 크기를 맞춘다.
                       강조는 테두리가 아니라 **카드 배경색**(그 줄 단계 색) — 오르내림은 글자·차트 색이 알려 준다. */}
-                  {section.lead && section.rows.some(r => r[0] === p.symbol) && (
+                  {section.lead === 1 && isLastLead(section, p.symbol) && (
                     <div className="absolute top-1/2 left-full ml-1 -translate-x-1/2 -translate-y-1/2 z-30
                                     text-4xl font-black text-gray-400 opacity-20 leading-none pointer-events-none">➜</div>
                   )}

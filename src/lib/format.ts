@@ -98,7 +98,7 @@ export function isEarlyMorningKst(): boolean {
 // ─────────── 시장 시간 판정 (데스크톱 v1/v2 동일 로직) ───────────
 
 // 심볼 → 시장 분류
-export type Market = "KR" | "KR_NIGHT" | "US" | "US_INDEX" | "JP" | "OTHER";
+export type Market = "KR" | "KR_NIGHT" | "US" | "US_INDEX" | "JP" | "TW" | "OTHER";
 
 export function marketOfSymbol(symbol: string): Market {
   if (!symbol) return "OTHER";
@@ -110,13 +110,15 @@ export function marketOfSymbol(symbol: string): Market {
       || symbol === "^KQ11"
       || symbol === "^KQ100"
       || symbol === "VKOSPI") return "KR";
-  if (symbol === "^N225") return "JP";
+  // 아시아 — 도쿄(.T)·대만(.TW) 본주와 지수. 한국과 같은 시간대라 흐림도 그 시장 시간으로.
+  if (symbol === "^N225" || symbol.endsWith(".T")) return "JP";
+  if (symbol === "^TWII" || symbol.endsWith(".TW")) return "TW";
   // 환율/선물/암호화폐/지수 — 24h
   if (symbol.includes("=") || symbol === "DX-Y.NYB" || symbol.includes("-")) return "OTHER";
   // VIX / 미국 국채금리 — Yahoo 가 확장시간(04:00-20:00 ET)까지 갱신 → US 분류
   //   ^VIX = 변동성지수, ^TNX/^FVX/^TYX/^IRX = 미 국채 만기별 yield
   if (symbol === "^VIX" || symbol === "^TNX" || symbol === "^FVX"
-      || symbol === "^TYX" || symbol === "^IRX" || symbol === "^US2Y") return "US";
+      || symbol === "^TYX" || symbol === "^IRX" || symbol === "^US2Y" || symbol === "^TIPS10") return "US";
   // 한국 야간선물 (yasun.gg) — 18:00~05:00 KST 거래 시간만 활성, 그 외 흐림.
   if (symbol === "^KS200N" || symbol === "^KQ150N") return "KR_NIGHT";
   // 한국 국고채 금리(토스 KR1BENCH*) — 미국이 아니라 **한국 장** 시간에 움직인다.
@@ -131,7 +133,7 @@ export function marketOfSymbol(symbol: string): Market {
 // 문제를 막기 위해 24h 지표처럼 취급(흐림·마감 책갈피 제외). 2Y/10Y 표현 통일용.
 export function isUsRateSymbol(symbol: string): boolean {
   return symbol === "^US2Y" || symbol === "^TNX" || symbol === "^FVX"
-      || symbol === "^TYX" || symbol === "^IRX";
+      || symbol === "^TYX" || symbol === "^IRX" || symbol === "^TIPS10";
 }
 
 // 특정 IANA timezone 의 현재 시각 (Intl 사용 — DST 자동 처리)
@@ -179,7 +181,7 @@ function dateStrInTz(tz: string): string {
 export function isMarketOpen(market: Market): boolean {
   const TZ_MAP: Record<Market, string | null> = {
     KR: "Asia/Seoul", KR_NIGHT: "Asia/Seoul", US: "America/New_York",
-    US_INDEX: "America/New_York", JP: "Asia/Tokyo", OTHER: null,
+    US_INDEX: "America/New_York", JP: "Asia/Tokyo", TW: "Asia/Taipei", OTHER: null,
   };
   const tz = TZ_MAP[market];
   if (!tz) return true;
@@ -206,6 +208,7 @@ export function isMarketOpen(market: Market): boolean {
     // 지수(^SOX/^GSPC 등) — 프리마켓엔 갱신 안 됨 → 정규장(09:30-16:00)만 live.
     case "US_INDEX":return 9*60 + 30  <= hhmm && hhmm < 16*60;
     case "JP":      return 8*60 + 30  <= hhmm && hhmm < 15*60 + 30;
+    case "TW":      return 9*60       <= hhmm && hhmm < 13*60 + 30;   // 대만 09:00-13:30
     default:        return true;
   }
 }

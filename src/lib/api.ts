@@ -2634,6 +2634,7 @@ export interface UsIndex {
   price: number;
   prev: number;            // "어제대비" 표시용 (비거래일엔 price 와 동일 = 0)
   prevClose: number;       // 직전 거래일 종가 — 색상용 (비거래일 보정 영향 없음)
+  singlePrice?: boolean;   // 한국(.KS) — 토스 시간외 단일가 진행 중(보유 종목 카드 흐림 규칙과 같은 신호)
   diff: number;
   pct: number;
   currency?: string;
@@ -3162,6 +3163,26 @@ const TOSS_US_STOCK_CODE: Record<string, string> = {
   "ASML": "US19950315001",
   // AI 인프라 주도주 — 전력·광통신·AI 클라우드 (토스 검색으로 확인, 2026-09-30)
   "BE":   "US20180724003",   // 블룸 에너지 (NYSE) — 데이터센터 현장 발전(연료전지)
+  "RTX":  "US20200403004",   // RTX(레이시온) (NYSE)
+  "MRVL": "US20000627001",   // 마벨 (NASDAQ)
+  "ARM":  "NAS0230914001",   // ARM 홀딩스 ADR (NASDAQ)
+  "CDNS": "US19900326003",   // 케이던스 (NASDAQ)
+  "DELL": "US20181228002",   // 델 테크놀로지스 (NYSE)
+  "CRWV": "NAS0250328002",   // 코어위브 (NASDAQ)
+  "CRM":  "US20040623001",   // 세일즈포스 (NYSE)
+  "NOW":  "US20120629001",   // 서비스나우 (NYSE)
+  "PLTR": "US20200930014",   // 팔란티어 (NASDAQ)
+  "NFLX": "US20020523001",   // 넷플릭스 (NASDAQ)
+  "WDC":  "US19910131001",   // 웨스턴 디지털 (NASDAQ)
+  "COHR": "US19871002001",   // 코히런트 (NYSE) — 광통신
+  "CIEN": "US20131223002",   // 시에나 (NYSE) — 광통신 장비
+  "KLAC": "US19801008001",   // KLA (NASDAQ) — 검사·계측
+  "TER":  "US20181127001",   // 테라다인 (NASDAQ) — 협동로봇(UR)·반도체 테스트
+  "AMKR": "US19980501001",   // 앰코 (NASDAQ) — 후공정·첨단 패키징
+  "MPWR": "US20041119001",   // MPS (NASDAQ) — AI 서버 전원 칩
+  "GEV":  "NYS0240402001",   // GE 버노바 (NYSE)
+  "OKLO": "US20210701009",   // 오클로 (NYSE) — SMR
+  "FSLR": "US20061117001",   // 퍼스트 솔라 (NASDAQ)
   "LITE": "US20150805002",   // 루멘텀 홀딩스 (NASDAQ) — 광트랜시버·레이저
   "NBIS": "US20110524001",   // 네비우스 (NASDAQ) — GPU 클라우드(네오클라우드)
   // AI 순환매 대장주 — 한국 각 단계의 다음 날 수익률과 가장 붙는 미국 종목(2026-09-30 실측)
@@ -3187,6 +3208,11 @@ const TOSS_US_STOCK_CODE: Record<string, string> = {
   //   야후 폴백으로 빠진다 → 원화 병기가 없고 24h 시세가 아니라 마감 상태로 와서 **혼자 흐려진다**
   //   (SCHD 실측: 옆의 VTI 는 멀쩡한데 이것만 흐렸다). 둘은 항상 같이 넣는다.
   "SCHD": "US20111020005",
+  "TLT":  "US20020726001",
+  "SOXX": "US20010713001",
+  "TQQQ": "US20100211003",
+  "SOXL": "US20100311002",
+  "JEPQ": "US20220504002",
   "SMH":  "US20191211007",
   "PAVE": "US20170308001",
   "LIT":  "US20100723002",
@@ -3433,6 +3459,8 @@ export async function fetchTickerUsStockExtras(symbols: string[]): Promise<Map<s
 // CNBC 는 두 엔드포인트 모두 ACAO: * 라 프록시 없이 브라우저가 직접 호출한다(프록시 호출수 절약).
 const CNBC_SYMBOL: Record<string, string> = {
   "VKOSPI": ".KSVKOSPI",   // 코스피200 변동성지수 (한국 공포지수)
+  // 미국 10년 실질금리(TIPS) — FRED DFII10 과 같은 지표의 시장 호가. FRED 는 하루 늦고 키 없는 경로가 불안정해 CNBC 실시간으로
+  "^TIPS10": "US10YTIP",
 };
 export function isCnbcIndex(symbol: string): boolean {
   return symbol in CNBC_SYMBOL;
@@ -3617,6 +3645,8 @@ export async function fetchYahooBatch(
                 price: tp.price, prev: tp.base, prevClose: tp.prevClose,
                 diff, pct, currency: "KRW",
                 tradeDate: tp.trade_date, freshTime: isoToUnixSec(tp.trade_dt),
+                regularMarketTime: isoToUnixSec(tp.trade_dt),
+                singlePrice: tp.singlePrice,
                 marketState: "",
               });
             }
@@ -3659,11 +3689,23 @@ export async function fetchYahooBatch(
       regularPriceUsd: t.regularPriceUsd ?? y.regularPriceUsd,
       tradeDate: t.tradeDate || y.tradeDate,
       freshTime: t.freshTime ?? y.freshTime,   // 토스가 메인값 → 토스 체결시각이 실제 갱신 기준
+      singlePrice: t.singlePrice,
       marketState: "",             // 빈값 → 카드가 토스 현재가를 메인으로 표시
       sparkline: t.sparkline ?? y.sparkline,   // 토스 mini-chart 시계열 (^US2Y sparkline 폴백)
     });
   };
-  for (const [sym, t] of ksMap) applyToss(sym, t);
+  // 한국(.KS) — 야후가 **옛날** 값을 주면(코스닥 종목을 .KS 로 물으면 옛 상장 기록이 온다 — 로보티즈 '807일 전 마감'·
+  //   책갈피 22,400원 사고) 야후의 마감가·마감 시각을 버리고 토스만 쓴다. 같은 날이면 예전처럼 마감 책갈피용으로 유지.
+  for (const [sym, t] of ksMap) {
+    const y = merged.get(sym);
+    // '다른 날' = **일주일 넘게** 차이(옛 상장 기록). 개장 전엔 야후가 하루 전 값인 게 정상이라 그걸 버리면
+    //   마감 등락률이 사라진다(08:30 ETF·무체결 종목 % 공란 — 2026-10-06 실측).
+    const daysApart = (a?: string, b?: string) => a && b ? Math.abs(Date.parse(a) - Date.parse(b)) / 86_400_000 : 0;
+    if (y && t.tradeDate && (!y.tradeDate || daysApart(y.tradeDate, t.tradeDate) > 7)) {
+      merged.set(sym, { ...y, regularPrice: undefined, regularPct: undefined, postPrice: undefined, regularMarketTime: t.regularMarketTime });
+    }
+    applyToss(sym, t);
+  }
   for (const [sym, t] of overviewMap) applyToss(sym, t);   // 지수/환율/금리/원자재/BTC (overview 1콜)
   for (const [sym, t] of usMap) applyToss(sym, t);
   for (const r of investResults) { if (r) applyToss(r.symbol, r); }

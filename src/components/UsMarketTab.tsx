@@ -2,9 +2,9 @@ import { useEffect, useState } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { fetchYahooBatch, fetchDashboardChart, fetchYasunNightFutures, fetchTossUsStockCandles, fetchKrBondYieldSeries } from "../lib/api";
 import type { UsIndex, MarketIndexKey } from "../lib/api";
-import { isSymbolSleeping, marketOfSymbol, fmtAgo, isUsExtendedTradingOpen, krFuturesName, krFuturesDesc, isKrNightSession, isQuoteStale, isUsRateSymbol, displayPctOf, isFxFuturesWeekendClosed } from "../lib/format";
+import { isSymbolSleeping, marketOfSymbol, fmtAgo, isUsExtendedTradingOpen, krFuturesName, krFuturesDesc, isKrNightSession, isQuoteStale, isKrHoldingClosed, isUsRateSymbol, displayPctOf, isFxFuturesWeekendClosed } from "../lib/format";
 import { getDimSleepingEnabled, checkPersonalProxyYasunSupport } from "../lib/proxyConfig";
-import { buildDashboardPage, dashboardGroupNav, dashboardTagTone, dashboardTagCard, type DashboardPage } from "../lib/dashboardGroups";
+import { buildDashboardPage, dashboardGroupNav, dashboardTagTone, dashboardRowLabelTone, dashboardTagCard, leadRowOf, isLastLead, rowLead, sortedRows, loadLeaderSort, saveLeaderSort, type LeaderSort, type DashboardPage } from "../lib/dashboardGroups";
 import { RotationTab } from "./RotationTab";
 import { requestTab, isTabVisible } from "../lib/tabNav";
 import { GroupNavBar } from "./GroupNavBar";
@@ -16,6 +16,7 @@ import { Sparkline } from "./Sparkline";
 import { MarketFlowModal } from "./MarketFlowModal";
 import { EtfCompositionDialog } from "./EtfCompositionDialog";
 import { TicsSectorBoard } from "./TicsSectorBoard";
+import { RealRateNote } from "./RealRateNote";
 import { EtfTopCards } from "./EtfTopCards";
 import { ValueupMiniCard } from "./ValueupCard";
 import { HlPerpCard } from "./HlPerpCard";
@@ -37,7 +38,7 @@ function fmtPrice(symbol: string, price: number): string {
   // 원엔은 한국 관행대로 100엔 기준 표기 (Yahoo 는 1엔당 원 = 8.6원 꼴)
   if (symbol === "JPYKRW=X") return (price * 100).toFixed(2);
   if (symbol.includes("KRW")) return price.toFixed(2);
-  if (symbol === "^VIX" || symbol === "^TNX" || symbol === "^TYX" || symbol === "^US2Y") return price.toFixed(2);
+  if (symbol === "^TIPS10" || symbol === "^MOVE" || symbol === "^VIX" || symbol === "^TNX" || symbol === "^TYX" || symbol === "^US2Y") return price.toFixed(2);
   if (price >= 1000) return Math.round(price).toLocaleString();
   return price.toFixed(2);
 }
@@ -198,6 +199,7 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
 
   const dimEnabled = getDimSleepingEnabled();
   const [marketFlowFor, setMarketFlowFor] = useState<MarketIndexKey | null>(null);
+  const [leaderSort, setLeaderSort] = useState<LeaderSort>(loadLeaderSort);   // 대장주 줄 정렬(등락률순 기본)
   const [etfDialog, setEtfDialog] = useState<{ ticker: string; name: string } | null>(null);
   // 야간선물(yasun.gg)은 프록시를 타므로 구버전 개인 워커면 값이 빈다 → 그때만 업데이트 안내.
   //   "값이 없다"만으로 워커를 탓하면 업스트림 차단(예: investing.com Cloudflare 챌린지)까지
@@ -216,8 +218,8 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
       <GroupNavBar items={navItems} idPrefix="usidx-"
                    stickyTop={navStickyTop} scrollMarginTop={idxScrollMargin} />
       {/* ─── Tier 0 — 한국시장 영향 관계 기준 그룹 (라벨 헤더 + 한 화면 표시) ─── */}
-      {/* lg 이상 6열 그리드 + 75% 폭 — 8열 대비 카드 크기 동일하게 유지하면서 전체 폭만 축소 */}
-      <div className="space-y-4 lg:max-w-[75%]">
+      {/* 다른 탭과 같은 전체 폭 — 예전엔 lg 에서 75% 로 줄여 PC 에서만 좁아 보였다 */}
+      <div className="space-y-4">
         {T0_SECTIONS.map((section) => (
           <div key={section.label} id={`usidx-${section.id}`}
                style={{ scrollMarginTop: idxScrollMargin }}
@@ -232,12 +234,24 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
                   자세히 →
                 </button>
               )}
+              {/* 정렬 버튼은 페이지에 하나 — 첫 정렬 그룹 제목에만(누르면 페이지 전체가 바뀐다) */}
+{section.sortable && section.id === T0_SECTIONS.find(x => x.sortable)?.id && (
+                <span className="ml-2 inline-flex rounded border border-gray-300 overflow-hidden align-middle text-[11px] font-bold">
+                  {(["pct", "value"] as const).map(v => (
+                    <button key={v} onClick={() => { setLeaderSort(v); saveLeaderSort(v); }}
+                            className={`px-1.5 py-0 ${leaderSort === v ? "bg-indigo-600 text-white" : "bg-white text-gray-500 hover:bg-gray-100"}`}>
+                      {v === "pct" ? "등락률순" : "거래대금순"}
+                    </button>
+                  ))}
+                </span>
+              )}
             </span>
             {/* 한국 섹터 — 토스 TICS 분류. 미국 블록과 **같은 한글 분류**라 이름으로 맞출 수 있다. */}
             {section.render === "etfTop" && (
                   <EtfTopCards onOpenEtf={(code, name) => setEtfDialog({ ticker: code, name })} />
                 )}
                 {section.note && <div className="text-[11px] text-gray-500 leading-snug">{section.note}</div>}
+                {section.id === "krfx" && <RealRateNote usMap={usMap} />}
                 {section.render === "rotation" && (
               <RotationTab embedded extrasOnly onOpenValuation={(t, n) => onOpenValuation?.(t, n ?? "")} />
             )}
@@ -245,27 +259,54 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
               <TicsSectorBoard onOpenValuation={onOpenValuation}
                                 krClosed={page === "night"} />
             )}
-            {(section.render ? []
+            {(arr => !section.pairRows ? arr : (
+              // 짝 줄 — 상자 둘을 좌우로 **붙여서**. 상자 폭은 카드 수에 비례(flex-grow), 남는 자리는 오른쪽 빈칸(한 줄 8장 기준)
+              <div className="space-y-0">
+                {(() => {
+                  // 줄마다 상자 묶음 — boxLines([2,3]) 가 있으면 그대로, 없으면 boxesPerLine(기본 2)씩
+                  const per = section.boxesPerLine ?? 2;
+                  const sizes = section.boxLines ?? Array.from({ length: Math.ceil(arr.length / per) }, () => per);
+                  let at = 0;
+                  return sizes.map(n => { const idx = Array.from({ length: n }, (_, j) => at + j).filter(i => i < arr.length); at += n; return idx; });
+                })().map((idx, k, lines) => {
+                  // 상자 폭 = 카드 n장 + 카드 사이 틈 + 상자 안쪽 여백(왼쪽 책갈피 36 + 오른쪽 8 + 테두리 2).
+                  //   카드 한 장 = 전체 폭 8칸 카드((100% - 7×8px)/8)와 같게 맞춘다 — 상자가 몇 개든 카드 크기가 다른 그룹과 같다.
+                  //   단, 상자 여백 때문에 한 줄에 다 안 들어가는 줄이 있으면 **그룹 전체** 카드 폭을 그 줄에 맞춰 줄인다
+                  //   (줄마다 따로 눌리면 상자가 하나뿐인 줄만 카드가 커 보인다). 줄 하나(C장·B상자) 필요 폭 = C·w + 8C + 46B − 8.
+                  const fits = lines.map(l => {
+                    const c = l.reduce((s, i) => s + section.rows[i].length, 0);
+                    return `(100% - ${8 * c + 46 * l.length - 8}px) / ${c}`;
+                  });
+                  const card = `min((100% - 56px) / 8, ${fits.join(", ")})`;
+                  const boxW = (n: number) => `calc(${n} * ${card} + ${(n - 1) * 8}px + 46px)`;
+                  return (
+                    <div key={k} className="flex gap-2">
+                      {idx.map(i => <div key={i} className="min-w-0" style={{ flex: `0 1 ${boxW(section.rows[i].length)}` }}>{arr[i]}</div>)}
+                    </div>
+                  );
+                })}
+              </div>
+            ))((section.render ? []
               : section.id === "sector"
               ? chunk(
                   section.rows.flat().sort((a, b) =>
                     (displayPctOf(b, usMap.get(b)) ?? -Infinity) - (displayPctOf(a, usMap.get(a)) ?? -Infinity)),
                   6)
-              : section.rows
+              : sortedRows(section, leaderSort, sym => displayPctOf(sym, usMap.get(sym)))
             ).map((group, gi) => (
-              // 6열 그리드 — 컨테이너(space-y-4)를 lg 75% 폭으로 줄여 카드 크기는 8열 때와 동일하게 유지
-              <div key={gi} className={section.rowLabels ? "relative -mr-[9px] rounded-lg border border-gray-200 bg-gray-50/50 pl-9 pr-2 pb-2 pt-4 mt-2" : ""}>
+              // 6열 그리드 — 화면은 전체 폭이지만 카드 줄만 lg 75% 로 묶어 카드 크기는 예전 그대로(왼쪽 정렬)
+              <div key={gi} className={section.rowLabels ? `relative ${section.pairRows ? "" : "-mr-[9px]"} rounded-lg border border-gray-200 bg-gray-50/50 pl-9 pr-2 pb-2 pt-4 mt-2` : ""}>
                 {/* 줄 책갈피 — 이 줄이 어느 단계인지(반도체·전공정…). 위에 얹으면 카드 위 가격 띠와 겹쳐
                     안 보여서, 상자 **왼쪽에 세로 띠**로 따로 뺐다(글자는 위→아래로 세워 쓴다). */}
                 {section.rowLabels?.[gi] && (
                   <span className={`absolute left-0 inset-y-0 w-7 flex items-center justify-center border-0 border-r rounded-l-lg
                                     text-xs font-bold tracking-widest [writing-mode:vertical-rl] [text-orientation:upright]
-                                    ${dashboardTagTone(section.rowLabels[gi])}`}>
+                                    ${dashboardRowLabelTone(section, section.rowLabels[gi])}`}>
                     {section.rowLabels[gi]}
                   </span>
                 )}
-              <div className={`grid grid-cols-3 sm:grid-cols-4 gap-y-4 gap-x-2 ${section.lead ? "lg:grid-cols-[minmax(0,1fr)_1.75rem_repeat(5,minmax(0,1fr))]" : "lg:grid-cols-6"}`}>
-                {group.map(symbol => {
+              {(() => {
+                const cards = group.map(symbol => {
               // 코리아 밸류업 — 네이버 KVALUE 전용 카드(Yahoo 미제공). 다른 지수 카드와 동일 크기 셀.
               if (symbol === "KVALUE") return <ValueupMiniCard key="KVALUE" />;
               if (symbol === "SKHY-PERP") return <HlPerpCard key="SKHY-PERP" coin="SKHY" name="SK하이닉스 24h" />;
@@ -277,7 +318,12 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
                 ? { ...rawP, name: krFuturesName(rawP.symbol), desc: krFuturesDesc() }
                 : rawP;
               const q = usMap?.get(p.symbol);
-              const sleeping = isSymbolSleeping(p.symbol);
+              // 한국 종목·ETF(.KS) — **보유 종목 카드와 같은 규칙**(isKrHoldingClosed): 프리(08:00~)·애프터(~20:00)에
+              //   실제 체결이 들어오면 열림, 단일가 진행 중이면 열림, ETF·ETN 은 15:30 이후 바로 마감.
+              //   (정규장 09:00~15:30 만 보던 때는 08시 NXT 프리장에 시세가 움직이는데도 흐렸다)
+              const sleeping = /^[\dA-Za-z]{6}\.KS$/.test(p.symbol)
+                ? isKrHoldingClosed(undefined, undefined, q?.singlePrice, q?.freshTime ?? 0, !p.krStock)   // 체결 시각 없으면(개장 전 ETF) 시간외엔 마감
+                : isSymbolSleeping(p.symbol);
               // 메인 가격/변동률 — 한국 입장(미국장 마감 후 아침에 확인):
               // · REGULAR: regularPct (어제 종가 대비)
               // · 시간외(PRE/POST/POSTPOST/PREPRE/CLOSED): postPrice + 어제 종가(prevClose) 대비
@@ -366,7 +412,7 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
               // 마감 책갈피는 노란 배경 + 흐림 제외 → dim 은 콘텐츠 자식에만 적용
               const dimCls = dimNow ? "opacity-60" : "";
               return (
-                <div key={p.symbol} className={`relative h-full ${section.lead && group[1] === p.symbol ? "lg:col-start-3" : ""}`}>
+                <div key={p.symbol} className={`relative h-full`}>
                   {/* ETF 책갈피 — KR ETF (예: 069500.KS) 만. 왼쪽 위. 클릭 시 구성종목 모달 */}
                   {(() => {
                     const etfTk = p.krStock ? null : krEtfTicker(p.symbol);   // 한국 개별주는 ETF 가 아니다
@@ -404,13 +450,13 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
                   )}
                   <div className={`relative overflow-hidden h-full flex flex-col gap-0.5
                                   rounded-lg border px-3 py-1.5
-                                  ${section.lead && section.rows.some(r => r[0] === p.symbol) ? dashboardTagCard(section.rowLabels?.[section.rows.findIndex(r => r[0] === p.symbol)]) : bg}`}>
+                                  ${leadRowOf(section, p.symbol) >= 0 ? dashboardTagCard(section.rowLabels?.[leadRowOf(section, p.symbol)]) : bg}`}>
                   <Sparkline data={chartArr}
                              width={400} height={80}
                              color={sparkColor}
                              className={`absolute inset-0 w-full h-full opacity-50
                                         pointer-events-none ${dimCls}`} />
-                  <div className={`relative z-10 flex items-baseline gap-1.5 ${dimCls}`}>
+                  <div className={`relative z-10 flex items-baseline gap-1.5 h-5 overflow-hidden ${dimCls}`}>
                     {sleeping && !inSession && (
                       <span className="text-[11px] text-gray-400">zZ</span>
                     )}
@@ -450,11 +496,10 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
                   ) : (
                   <div className={`relative z-10 flex items-end mt-auto ${dimCls}`}>
                     <span className={`flex-1 text-left tabular-nums ${sign}`}>
-                      {q?.currency === "KRW" && q?.priceUsd != null && (
-                        <span className="block text-[10px] font-normal leading-tight text-gray-900">
-                          ${q.priceUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}
-                        </span>
-                      )}
+                      {/* 달러 보조 줄 — 없는 카드도 같은 높이를 비워 둔다(미국 종목 카드만 한 줄 더 높아 그룹마다 카드 높이가 달랐다) */}
+                      <span className={`block text-[10px] font-normal leading-tight text-gray-900 ${q?.currency === "KRW" && q?.priceUsd != null ? "" : "invisible"}`}>
+                        {q?.currency === "KRW" && q?.priceUsd != null ? `$${q.priceUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : "$"}
+                      </span>
                       <span className="text-sm">{effPrice != null ? fmtPrice(p.symbol, effPrice) : "—"}</span>
                     </span>
                     <span className={`flex-1 text-right text-xl font-bold tabular-nums ${sign}`}>
@@ -469,7 +514,7 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
                   </div>
                   {/* lead — 첫 카드(간밤 미국 대장주)가 '원인'. 카드 사이 틈 가운데에 큰 ➜ (원 없이). 틈은 다른 그룹과 같게 둬 카드 크기를 맞춘다.
                       강조는 테두리가 아니라 **카드 배경색**(그 줄 단계 색) — 오르내림은 글자·차트 색이 알려 준다. */}
-                  {section.lead && section.rows.some(r => r[0] === p.symbol) && (
+                  {isLastLead(section, p.symbol) && (
                     <div className="absolute top-1/2 left-full ml-1 lg:ml-[22px] -translate-x-1/2 -translate-y-1/2 z-30
                                     text-4xl font-black text-gray-400 opacity-20 leading-none pointer-events-none">➜</div>
                   )}
@@ -517,10 +562,45 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
                   )}
                 </div>
               );
-                })}
+                });
+                if (!section.extras) return (
+                  <div style={section.pairRows ? { gridTemplateColumns: `repeat(${group.length}, minmax(0, 1fr))` } : undefined}
+                       className={`grid grid-cols-3 sm:grid-cols-4 gap-y-4 gap-x-2 ${section.pairRows ? "" : section.wide ? "lg:grid-cols-8" : `lg:max-w-[75%] ${section.lead ? "lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_1.75rem_repeat(4,minmax(0,1fr))]" : "lg:grid-cols-6"}`}`}>
+                    {cards}
+                  </div>
+                );
+                // 순환매 줄 — 블록 셋: [미국 대장주] ➜ [한국] [국내 상장 미국 ETF(참고, 따로 상자)].
+                //   블록 폭을 카드 수에 비례(flex-grow)하게 주고 나머지는 빈칸으로 채워, 줄마다 카드 크기가 같다(한 줄 8장 기준).
+                const n = rowLead(section, gi);
+                const exAt = group.findIndex(x => section.extras!.includes(x));
+                const krEnd = exAt < 0 ? group.length : exAt;
+                const lead = cards.slice(0, n), kr = cards.slice(n, krEnd), ex = exAt < 0 ? [] : cards.slice(exAt);
+                // 한국 쪽 최대 장 수(모든 줄 기준) — 한국 틀을 이 칸 수로 고정해 참고 상자가 줄마다 같은 자리에서 시작한다
+                const krMax = Math.max(...section.rows.map((r, ri) => r.slice(rowLead(section, ri)).filter(x => !section.extras!.includes(x)).length));
+                const col = (k: number) => ({ flex: `${k} 1 0`, gridTemplateColumns: `repeat(${k}, minmax(0, 1fr))` });
+                return (
+                  <div className="flex items-stretch gap-2">
+                    {/* 앞 칸이 없는 줄(맞는 ETF 가 없는 섹터)도 한 칸 비워 다른 줄과 자리를 맞춘다 */}
+                    {lead.length > 0
+                      ? <div className="grid gap-x-2" style={col(lead.length)}>{lead}</div>
+                      : <div style={{ flex: "1 1 0" }} />}
+                    <div className="w-7 shrink-0" />
+                    {/* 한국 쪽은 늘 krMax 칸짜리 보이지 않는 틀 — 카드가 적으면 왼쪽부터 채우고 나머지는 빈칸 */}
+                    <div className="grid gap-x-2" style={col(krMax)}>{kr}</div>
+                    {ex.length > 0 && (
+                      <div className="relative grid gap-x-2 rounded-lg border border-sky-200 bg-sky-50/60 px-1.5 pb-1.5 pt-3 -mt-[13px] -mb-[7px]" style={col(ex.length)}
+                           title={`${section.extraTag?.[group[exAt]] ?? "🇺🇸 미국"} ETF — 참고용(통계엔 안 들어간다)`}>
+                        {/* 상자 여백(위 12+1·아래 6+1)은 음수 마진으로 **바깥으로** 뺀다 — 상자가 줄 높이를 키우면 같은 줄 카드가
+                            전부 늘어나(items-stretch) 순환매 카드만 다른 그룹보다 키가 컸다 */}
+                        {ex}
+                      </div>
+                    )}
+                    {8 - Math.max(n, 1) - krMax - ex.length > 0 && <div style={{ flex: `${8 - Math.max(n, 1) - krMax - ex.length} 1 0` }} />}
+                  </div>
+                );
+              })()}
               </div>
-              </div>
-            ))}
+            )))}
           </div>
         ))}
       </div>

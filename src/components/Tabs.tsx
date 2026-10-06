@@ -4,7 +4,7 @@ import { createPortal } from "react-dom";
 import type { Stock } from "../types";
 import { normalizeAccount } from "../lib/account";
 import { getIndependentGroupsMode } from "../lib/groupMode";
-import { DASHBOARD_PAGES, INDEX_GROUP_KEYS, type DashboardPage } from "../lib/dashboardGroups";
+import { DASHBOARD_PAGES, INDEX_GROUP_KEYS, defaultDashboardPage, type DashboardPage } from "../lib/dashboardGroups";
 import type { TabVisibility } from "../lib/tabVisibility";
 import type { GroupFolder } from "../lib/groupFolders";
 import {
@@ -64,7 +64,8 @@ export function Tabs({ tabs, activeKey, onChange, onRename, onDelete, folders, l
   // menuTitle = 목록 맨 위에 붙는 **선택 불가 제목**(optgroup). 이게 없으면 열었을 때
   //   현재 탭(= 첫 항목)이 커서 바로 아래에 겹쳐서, 누르려던 게 이미 선택된 항목이라
   //   아무 일도 안 일어난다. 제목 한 줄을 끼워 목록을 한 칸 내린다.
-  const renderGroupDropdown = (groupTabs: typeof tabs, fallbackEmoji: string, menuTitle: string) => {
+  // clickKey = 탭 자체를 눌렀을 때 갈 곳(없으면 지금 보이는 탭). 메뉴는 마우스를 올리면 열린다.
+  const renderGroupDropdown = (groupTabs: typeof tabs, fallbackEmoji: string, menuTitle: string, clickKey?: string) => {
     if (groupTabs.length === 0) return null;
     // 묶을 항목이 1개뿐이면 드롭다운 대신 일반 탭 버튼으로 바로 노출
     if (groupTabs.length === 1) {
@@ -95,6 +96,7 @@ export function Tabs({ tabs, activeKey, onChange, onRename, onDelete, folders, l
     const curTab = groupTabs.find(t => t.key === current);
     return (
       <HoverMenu key={menuTitle} title={menuTitle} on={!!activeOne}
+                 onTriggerClick={() => onChange(clickKey && groupTabs.some(t => t.key === clickKey) ? clickKey : current)}
                  trigger={<>
                    {curTab?.icon
                      ? <span className="inline-flex align-middle">{curTab.icon}</span>
@@ -117,7 +119,8 @@ export function Tabs({ tabs, activeKey, onChange, onRename, onDelete, folders, l
                     border-b border-gray-200 mb-3 px-1 pt-1">
       {leading && <span className="shrink-0">{leading}</span>}
       {/* 섹터~ETF 드롭다운 → 내자산 묶음(내주식·내거래) → 지수 순서 */}
-      {renderGroupDropdown(sysTabs, "📊", "투자도구(분석)")}
+      {/* 투자도구 탭을 누르면 종목찾기(눌림목)로 바로 — 다른 도구는 마우스를 올려 메뉴에서 */}
+      {renderGroupDropdown(sysTabs, "📊", "투자도구(분석)", SCREENER_TAB_KEY)}
       {renderGroupDropdown(myTabs, "📦", "내자산")}
       {/* 증시 — 지수 왼쪽 별도 탭 */}
       {marketMoneyTab && (
@@ -131,7 +134,9 @@ export function Tabs({ tabs, activeKey, onChange, onRename, onDelete, folders, l
       )}
       {/* 지수 — 별도 탭 */}
       {/* 지수 — 주간·야간·반도체 드롭다운(투자도구·내자산과 같은 모양) */}
-      {renderGroupDropdown(indexTabs, "📈", "지수")}
+      {/* 지수 탭을 누르면 시간에 맞는 페이지로 — 한국 낮(07~18시)은 주간, 그 외는 야간 */}
+      {renderGroupDropdown(indexTabs, "📈", "지수",
+        defaultDashboardPage() === "day" ? US_MARKET_TAB_KEY : INDEX_NIGHT_TAB_KEY)}
       {tabs.map(t => {
         const active = t.key === activeKey;
         const editable = !RESERVED.has(t.key);
@@ -312,6 +317,7 @@ export const US_MARKET_TAB_KEY = "__us-market__";   // 지수(주간) — 옛 '�
 // 지수(야간)·지수(반도체) — 메뉴의 '📈 지수' 드롭다운에 주간과 같이 묶인다
 export const INDEX_NIGHT_TAB_KEY = "__idx-night__";
 export const INDEX_SEMI_TAB_KEY = "__idx-semi__";
+export const INDEX_LEADERS_TAB_KEY = "__idx-leaders__";   // 지수(대장주) — 섹터 ETF ➜ 대장주
 // 묶음·페이지 매핑(INDEX_GROUP_KEYS·indexPageOf)은 lib/dashboardGroups — 컴포넌트 파일에서 Set·함수를
 //   export 하면 HMR(fast refresh)이 이 파일을 통째로 다시 그린다.
 export const SEMI_CHECK_TAB_KEY = "__semi-check__";
@@ -325,6 +331,10 @@ export const MY_TRADES_TAB_KEY = "__my-trades__";
 export const CONSENSUS_TAB_KEY = "__consensus__";
 // 눌림목 — RSI·볼린저·200일선·흑자·유동성 조건으로 코스피·코스닥 전 종목 스크리닝 (+ 백테스트)
 export const SCREENER_TAB_KEY = "__screener__";
+// 종가배팅 — 오늘 종가에 사서 다음 날 시가에 파는 후보(lib/closeBet)
+export const CLOSE_BET_TAB_KEY = "__close-bet__";
+// 수급 매집 — 외국인·기관·연기금 누적 순매수(크롤러 JSON, lib/investorFlows)
+export const ACCUM_TAB_KEY = "__accum__";
 // ETF 역검색 — 다중 종목으로 ETF 찾기
 export const ETF_REVERSE_TAB_KEY = "__etf-reverse__";
 // ETF 랭킹 — 전체 ETF 등락률 순위 (새로고침 눌러야 조회, 17콜)
@@ -339,17 +349,17 @@ export const ASSET_TREND_TAB_KEY = "__asset-trend__";
 
 // 시스템 reserved — 이름 변경/삭제 불가
 const RESERVED = new Set<string>([
-  "관심ETF", MARKET_MONEY_TAB_KEY, US_MARKET_TAB_KEY, INDEX_NIGHT_TAB_KEY, INDEX_SEMI_TAB_KEY, SEMI_CHECK_TAB_KEY,
+  "관심ETF", MARKET_MONEY_TAB_KEY, US_MARKET_TAB_KEY, INDEX_NIGHT_TAB_KEY, INDEX_SEMI_TAB_KEY, INDEX_LEADERS_TAB_KEY, SEMI_CHECK_TAB_KEY,
   SECTOR_RANK_TAB_KEY, MY_STOCKS_TAB_KEY, MY_TRADES_TAB_KEY, CONSENSUS_TAB_KEY,
   ETF_REVERSE_TAB_KEY, ETF_RANKING_TAB_KEY, ETF_COMPARE_TAB_KEY, HEATMAP_TAB_KEY,
-  SCREENER_TAB_KEY, VALUATION_TAB_KEY,
+  SCREENER_TAB_KEY, CLOSE_BET_TAB_KEY, ACCUM_TAB_KEY, VALUATION_TAB_KEY,
 ]);
 
 // 묶기 대상 시스템 탭 — 드롭다운 하나로 합침. (증시·지수는 자주 써서 별도 고정 탭)
 export const SYSTEM_TAB_KEYS = new Set<string>([
   MARKET_MONEY_TAB_KEY, US_MARKET_TAB_KEY, SECTOR_RANK_TAB_KEY, SEMI_CHECK_TAB_KEY,
   CONSENSUS_TAB_KEY, ETF_REVERSE_TAB_KEY, ETF_RANKING_TAB_KEY, ETF_COMPARE_TAB_KEY, HEATMAP_TAB_KEY,
-  SCREENER_TAB_KEY, VALUATION_TAB_KEY,
+  SCREENER_TAB_KEY, CLOSE_BET_TAB_KEY, ACCUM_TAB_KEY, VALUATION_TAB_KEY,
 ]);
 
 // 내자산 묶음 — 내주식 + 내거래를 별도 드롭다운 하나로 (지수 묶음과 동일 방식).
@@ -378,12 +388,18 @@ export function buildTabs(holdings: Stock[], visibility?: TabVisibility, tradeCo
   if (visibility?.stockMarket ?? true) tabs.push({ key: MARKET_MONEY_TAB_KEY, label: "증시", emoji: "💰", count: 0 });
   // 지수 — 주간·야간·반도체 세 탭(메뉴의 '📈 지수' 드롭다운). 라벨은 lib 한 벌(DASHBOARD_PAGES).
   if (showUs) {
-    const keyOf: Record<DashboardPage, string> = { day: US_MARKET_TAB_KEY, night: INDEX_NIGHT_TAB_KEY, semi: INDEX_SEMI_TAB_KEY };
+    const keyOf: Record<DashboardPage, string> = { day: US_MARKET_TAB_KEY, night: INDEX_NIGHT_TAB_KEY, semi: INDEX_SEMI_TAB_KEY, leaders: INDEX_LEADERS_TAB_KEY };
     for (const p of DASHBOARD_PAGES) tabs.push({ key: keyOf[p.key], label: p.tab, emoji: p.emoji, count: 0 });
   }
   // 눌림목 — 시스템 묶음의 첫 자리(섹터 위). 전 종목 스크리닝이라 관심종목과 무관하게 항상 노출.
   if (visibility?.screener ?? true) {
     tabs.push({ key: SCREENER_TAB_KEY, label: "종목찾기(눌림목)", emoji: "🔎", count: 0 });
+  }
+  if (visibility?.closeBet ?? true) {
+    tabs.push({ key: CLOSE_BET_TAB_KEY, label: "종가배팅", emoji: "🌙", count: 0 });
+  }
+  if (visibility?.accum ?? true) {
+    tabs.push({ key: ACCUM_TAB_KEY, label: "수급 매집", emoji: "🧲", count: 0 });
   }
   // 섹터 (KODEX ETF 기반 4기간 ranking + 토스 핫 테마). 반도체는 지수 대시보드 그룹으로 통합됨.
   if (showSector) tabs.push({ key: SECTOR_RANK_TAB_KEY, label: "섹터별등락", emoji: "🧩", count: 0 });
@@ -576,13 +592,14 @@ function aggregateHoldings(holdings: Stock[]): Stock[] {
 // 상단 묶음 탭(투자도구·내자산·지수) — **마우스를 올리면 펼쳐지는** 메뉴.
 //   기본 <select> 는 호버로 못 연다. 탭 줄(nav)이 overflow-x-auto 라 absolute 메뉴는 잘리므로
 //   body 에 포털로 띄우고 탭 위치(getBoundingClientRect)에 fixed 로 붙인다.
-//   터치 기기는 호버가 없으니 누르면 열고/닫는다.
-function HoverMenu({ title, on, trigger, items, onPick }: {
+//   탭 자체를 누르면 메뉴 대신 바로 이동한다(지수 = 시간에 맞는 페이지).
+function HoverMenu({ title, on, trigger, items, onPick, onTriggerClick }: {
   title: string;
   on: boolean;
   trigger: ReactNode;
   items: { key: string; label: ReactNode; active: boolean }[];
   onPick: (key: string) => void;
+  onTriggerClick: () => void;   // 탭 자체를 누르면 — 메뉴를 여닫지 않고 바로 이동
 }) {
   const btnRef = useRef<HTMLButtonElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
@@ -607,7 +624,7 @@ function HoverMenu({ title, on, trigger, items, onPick }: {
     <>
       <button ref={btnRef}
               onMouseEnter={open} onMouseLeave={closeSoon}
-              onClick={() => (pos ? setPos(null) : open())}
+              onClick={() => { setPos(null); onTriggerClick(); }}
               className={`shrink-0 inline-flex items-center gap-1 pl-2 pr-1.5 py-2 text-sm font-medium rounded-t-md border-b-2 -mb-px
                           ${on ? "border-blue-500 bg-blue-50 text-blue-700" : "border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-100"}`}>
         {trigger}
