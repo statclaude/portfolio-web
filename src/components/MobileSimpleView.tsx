@@ -18,6 +18,9 @@ import { getPersonalProxies, setPersonalProxies, type PersonalProxy, fetchProxyU
 import { useAdaptiveRefreshMs } from "../lib/proxyStatus";
 import { useTossMaintenance, fmtUntil, getTossMaintenance } from "../lib/tossMaintenance";
 import { getIndependentGroupsMode } from "../lib/groupMode";
+import { useChartRange, pickCardChart } from "../lib/chartRange";
+import { ChartRangeToggle } from "./ChartRangeToggle";
+import { useIntradayCharts } from "../lib/useIntradayCharts";
 import { buildDashboardPage, defaultDashboardPage, dashboardGroupNav, dashboardTagTone, dashboardRowLabelTone, dashboardTagCard, leadRowOf, isLastLead, DASHBOARD_PAGES, sortedRows, loadLeaderSort, saveLeaderSort, type LeaderSort, type DashboardPage } from "../lib/dashboardGroups";
 import { GroupNavBar, type GroupNavItem } from "./GroupNavBar";
 import { StockMarketTab } from "./StockMarketTab";
@@ -132,8 +135,8 @@ const SYS_DROPDOWN_KEYS = new Set<string>([    // '투자도구' 드롭다운에
 ]);
 const MY_GROUP_KEYS_M = new Set<string>([MY_KEY, MY_TRADES_KEY, ASSET_TREND_KEY]);   // '내자산' 드롭다운
 // '지수' 드롭다운 — 주간(옛 지수 키 KR_KEY 를 그대로 써서 저장된 마지막 탭이 이어진다)·야간·반도체
-const INDEX_KEYS_M = new Set<string>([KR_KEY, IDX_NIGHT_KEY, IDX_SEMI_KEY, IDX_LEADERS_KEY]);
-const indexPageOfM = (k: string): DashboardPage => k === IDX_NIGHT_KEY ? "night" : k === IDX_SEMI_KEY ? "semi" : k === IDX_LEADERS_KEY ? "leaders" : "day";
+const INDEX_KEYS_M = new Set<string>([KR_KEY, IDX_NIGHT_KEY]);
+const indexPageOfM = (k: string): DashboardPage => k === IDX_NIGHT_KEY ? "night" : "day";
 const SYS_ALL_KEYS = new Set<string>([MONEY_KEY, ...INDEX_KEYS_M, ...SYS_DROPDOWN_KEYS, ...MY_GROUP_KEYS_M]);
 // 일부 심볼 sparkline 은 Yahoo 가 historical 안 줌 → 가까운 현물 차트로 폴백 (차트 목록 계산에도 쓴다)
 const SPARKLINE_FALLBACK_M: Record<string, string> = { "SOX=F": "^SOX" };
@@ -157,6 +160,7 @@ export function MobileSimpleView() {
   const queryClient = useQueryClient();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [leaderSort, setLeaderSort] = useState<LeaderSort>(loadLeaderSort);   // 대장주 줄 정렬(등락률순 기본, PC 와 같은 키)
+  const chartRange = useChartRange();   // 카드 배경 차트 3개월 | 24시간 — 앱 전체 설정
   // 로그인 redirect 복귀 — 저장/불러오기 대기 동작이 있으면 설정 자동 오픈 → 자동 재개
   useEffect(() => {
     if (!peekPendingSyncAction()) return;
@@ -248,18 +252,23 @@ export function MobileSimpleView() {
   const [activeTab, setActiveTab] = useState<string>(() => {
     const byTime = defaultDashboardPage() === "night" ? IDX_NIGHT_KEY : KR_KEY;   // 처음이면 시간으로
     if (typeof localStorage === "undefined") return byTime;
-    return localStorage.getItem(TAB_KEY) ?? byTime;
+    const saved = localStorage.getItem(TAB_KEY);
+    // 옛 '지수(반도체)' 는 야간에(2026-10-07), '지수(대장주)' 는 주간에(2026-10-08) 합쳤다 — 저장돼 있으면 합친 쪽으로
+    if (saved === IDX_SEMI_KEY) return IDX_NIGHT_KEY;
+    if (saved === IDX_LEADERS_KEY) return KR_KEY;
+    return saved ?? byTime;
   });
   // 내주식(MY_KEY)만 뺀다 — 시스템 탭이지만 종목 카드 목록을 그리는 탭이라 그 경로를 탄다.
   const isSystemTab = SYS_ALL_KEYS.has(activeTab) && activeTab !== MY_KEY;
   const touchStart = useRef<{ x: number; y: number; sy: number; t: number } | null>(null);
   // 당겨서 놓기 — 옆으로 끄는 동안 가장자리에 '다음/이전 페이지' 표시가 자라고, 끝까지 당긴 채 놓으면 이동
   const [pull, setPull] = useState<{ dir: -1 | 1; p: number; label: string } | null>(null);
-  const PULL_PX = 80;   // 이만큼 당기면 '놓으면 이동' 
+  const PULL_PX = 50;   // 이만큼 당기면 '놓으면 이동' (80은 둔했다)
+  const PULL_SHOW_PX = 4;   // 옆으로 이만큼만 끌어도 표시가 뜬다
   // 파란 '놓으면 이동' 알약이 **화면에 뜬 상태**인가 — 이게 true 일 때 놓아야만 이동한다(보이는 것 = 동작).
   const pullReady = useRef(false);
-  const pullTimer = useRef<number | null>(null);
-  const clearPullTimer = () => { if (pullTimer.current) { clearTimeout(pullTimer.current); pullTimer.current = null; } };
+  // 마지막 touchmove 위치 — 놓을 때 이걸로 판정(touchend 좌표는 브라우저가 보정해 표시와 어긋날 수 있다)
+  const lastTouch = useRef<{ x: number; y: number } | null>(null);
   // 스와이프 시작이 가로 스크롤 영역(data-noswipe) 안이면 그 시작 scrollLeft 기억 — 실제 스크롤됐는지 판정용
   const swipeScroll = useRef<{ el: HTMLElement; left: number } | null>(null);
 
@@ -438,11 +447,14 @@ export function MobileSimpleView() {
       tabs.push({ key: MONEY_KEY, label: "💰증시", count: 0 });
     }
     if (vis.usMarket) {
-      // 지수 — 주간·야간·반도체 세 탭('지수' 드롭다운). 라벨은 PC 와 같은 한 벌(DASHBOARD_PAGES).
-      const keyOf: Record<DashboardPage, string> = { day: KR_KEY, night: IDX_NIGHT_KEY, semi: IDX_SEMI_KEY, leaders: IDX_LEADERS_KEY };
+      // 지수 — 주간·야간 두 탭('지수' 드롭다운). 라벨은 PC 와 같은 한 벌(DASHBOARD_PAGES).
+      const keyOf: Record<DashboardPage, string> = { day: KR_KEY, night: IDX_NIGHT_KEY };
       for (const p of DASHBOARD_PAGES) tabs.push({ key: keyOf[p.key], label: `${p.emoji}${p.tab}`, count: 0 });
     }
     // 눌림목 — 시스템 묶음 첫 자리(섹터 위, PC buildTabs 와 같은 순서).
+    if (vis.valuation) {   // 종목찾기(섹터별) — 종목찾기 묶음 맨 위
+      tabs.push({ key: VALUATION_KEY, label: "📊종목찾기(섹터별)", count: 0 });
+    }
     if (vis.screener) {
       tabs.push({ key: SCREENER_KEY, label: "🔎종목찾기(눌림목)", count: 0 });
     }
@@ -485,9 +497,6 @@ export function MobileSimpleView() {
     }
     if (vis.heatmap) {
       tabs.push({ key: HEATMAP_KEY, label: "🗺️히트맵", count: 0 });
-    }
-    if (vis.valuation) {
-      tabs.push({ key: VALUATION_KEY, label: "📊성적표(종목별)", count: 0 });
     }
     // "보유" 도 일반 사용자 그룹과 동일하게 취급 — 별도 분기 없음
     const userGroups = Array.from(counts.keys())
@@ -802,6 +811,8 @@ export function MobileSimpleView() {
     )
   );
   usGroupChartQs.forEach((q, i) => groupChartMap.set(usGroupTickers[i], (q.data ?? []).map(p => p.close)));
+  // 배경 그래프 '24시간' — PC 와 같은 훅·쿼리키. 화면에 들어온 종목만, 설정이 24시간일 때만.
+  const groupIntradayMap = useIntradayCharts([...groupTickers, ...usGroupTickers].filter(t => activeTickers.has(t)), !isSystemTab);
 
   // 정렬 옵션 — 7가지 + asc/desc 토글 (PC 와 동일 localStorage 공유)
   const [sortKey, setSortKey] = useState<SortKey>(loadSortKey);
@@ -943,7 +954,8 @@ export function MobileSimpleView() {
   //  data-noswipe 를 안 단 표도 잡도록 조상 중 **실제로 가로로 넘치는 overflow-x 요소**를 자동으로 찾는다.
   const handleTouchStart = (e: React.TouchEvent) => {
     touchStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY, sy: window.scrollY, t: Date.now() };
-    pullReady.current = false; clearPullTimer();
+    pullReady.current = false;
+    lastTouch.current = null;
     let el = e.target as HTMLElement | null;
     let found: HTMLElement | null = null;
     while (el && el !== e.currentTarget) {
@@ -971,34 +983,24 @@ export function MobileSimpleView() {
     if (!touchStart.current) return;
     const dx = e.touches[0].clientX - touchStart.current.x;
     const dy = e.touches[0].clientY - touchStart.current.y;
-    const tg = Math.abs(dx) >= 10 ? pullTarget(dx, dy) : null;   // 옆으로 조금만 끌어도 바로 표시
-    if (!tg) { clearPullTimer(); pullReady.current = false; if (pull) setPull(null); return; }
+    lastTouch.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    const tg = Math.abs(dx) >= PULL_SHOW_PX ? pullTarget(dx, dy) : null;   // 옆으로 조금만 끌어도 바로 표시
+    if (!tg) { pullReady.current = false; if (pull) setPull(null); return; }
     const label = groupTabs.find(t => t.key === tg.to)?.label ?? "";
-    const far = Math.abs(dx) >= PULL_PX;
-    // 스치듯 휙 민 손짓은 제외 — 손 댄 지 0.12초가 지나야 '준비'(0.3초는 느렸다). 멈춰 있어도 남은 시간 뒤 타이머로 켠다.
-    const wait = 120 - (Date.now() - touchStart.current.t);
-    if (!far) { clearPullTimer(); pullReady.current = false; }
-    else if (wait <= 0) { clearPullTimer(); pullReady.current = true; }
-    else if (!pullTimer.current) {
-      pullTimer.current = window.setTimeout(() => {
-        pullTimer.current = null;
-        if (!touchStart.current) return;
-        pullReady.current = true;
-        setPull(pv => (pv ? { ...pv, p: 1 } : pv));
-      }, wait);
-    }
-    setPull({ dir: tg.dir, p: pullReady.current ? 1 : Math.min(0.95, (Math.abs(dx) - 10) / (PULL_PX - 10)), label });
+    // 거리만 채우면 즉시 '준비' — 예전 0.12초 대기는 늦게 뜨는 것처럼 보였다.
+    pullReady.current = Math.abs(dx) >= PULL_PX;
+    setPull({ dir: tg.dir, p: pullReady.current ? 1 : Math.min(0.95, (Math.abs(dx) - PULL_SHOW_PX) / (PULL_PX - PULL_SHOW_PX)), label });
   };
   const endPull = () => {
-    clearPullTimer();
     touchStart.current = null;
     swipeScroll.current = null;
     setPull(null);
   };
   const handleTouchEnd = (e: React.TouchEvent) => {
     if (!touchStart.current) return;
-    const dx = e.changedTouches[0].clientX - touchStart.current.x;
-    const dy = e.changedTouches[0].clientY - touchStart.current.y;
+    const end = lastTouch.current ?? { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY };
+    const dx = end.x - touchStart.current.x;
+    const dy = end.y - touchStart.current.y;
     // 파란 '놓으면 이동' 알약이 떠 있을 때 놓은 경우에만 이동
     const tg = pullReady.current && Math.abs(dx) >= PULL_PX ? pullTarget(dx, dy) : null;
     pullReady.current = false;
@@ -1484,6 +1486,9 @@ export function MobileSimpleView() {
           {/* 정렬 옵션 + 보기 모드 */}
           {groupHoldings.length > 0 && (
             <div className="flex items-center justify-end gap-2 px-2 pt-2">
+              <span className="inline-flex items-center gap-1 text-[11px] text-gray-500">
+                그래프 <ChartRangeToggle small />
+              </span>
               <SortSelector sortKey={sortKey} sortDir={sortDir}
                             onChangeKey={sortHandlers.onChangeKey}
                             onToggleDir={sortHandlers.onToggleDir} />
@@ -1512,6 +1517,7 @@ export function MobileSimpleView() {
                                market={krMarketMap.get(s.ticker)}
                                warning={warningMap.get(s.ticker) || undefined}
                                chart={groupChartMap.get(s.ticker)}
+                               dayChart={groupIntradayMap.get(s.ticker)}
                                investorHistory={investorHistoryMap.get(s.ticker)}
                                onVisible={() => activateTicker(s.ticker)}
                                consensus={naverInfos.data?.get(s.ticker)?.consensus}
@@ -1788,7 +1794,7 @@ export function MobileSimpleView() {
         }
         if (activeTab === VALUATION_KEY) {
           return <div className="px-1 py-2 pb-32">
-            <ValuationTableTab items={consensusItems} onOpenValuation={setValuationTicker} />
+            <ValuationTableTab items={consensusItems} onOpenValuation={(code, n) => { setValuationName(n ?? null); setValuationTicker(code); }} />
           </div>;
         }
         // 지수 — PC(UsMarketTab)와 동일한 공용 그룹 정의를 그룹 헤더 + 2열 카드로 렌더 (단일 통합 뷰)
@@ -1828,6 +1834,10 @@ export function MobileSimpleView() {
                         </button>
                       ))}
                     </span>
+                  )}
+                  {/* 배경 차트 기간 — 페이지에 하나, 첫 그룹 제목에 */}
+                  {section.id === sections[0]?.id && (
+                    <ChartRangeToggle small className="ml-1.5" />
                   )}
                 </span>
                 {section.render === "etfTop" && (
@@ -1971,7 +1981,7 @@ export function MobileSimpleView() {
               const isInverse = p.direction === "inverse";
               const effUp = isInverse ? (mainPct != null && mainPct < 0) : (mainPct != null && mainPct > 0);
               const effDn = isInverse ? (mainPct != null && mainPct > 0) : (mainPct != null && mainPct < 0);
-              const chartArr = t0ChartMap.get(p.symbol) ?? [];
+              const chartArr = pickCardChart(chartRange, t0ChartMap.get(p.symbol) ?? [], nightClosesMap.get(p.symbol) ?? usMap?.get(p.symbol)?.sparkline);
               const sparkColor = dimNow ? "#94a3b8"
                 : (isInverse && chartArr.length > 1)
                   ? (chartArr[chartArr.length - 1] > chartArr[0] ? "#2563eb" : "#dc2626")
@@ -2169,6 +2179,19 @@ export function MobileSimpleView() {
       {/* 후원 — PC 와 동일한 모달 (설명 + QR + 직접 열기) */}
       <DonateDialog isOpen={donateOpen} onClose={() => setDonateOpen(false)} />
 
+      {etfReverseDialog && (
+        <EtfReverseDialog ticker={etfReverseDialog.ticker} name={etfReverseDialog.name}
+                          onClose={() => setEtfReverseDialog(null)}
+                          onOpenEtfComposition={(code, n) => {
+                            // 목록은 닫지 않는다 — 구성 창을 닫으면 보던 목록으로 돌아온다(구성 창이 아래에 그려져 위로 뜬다)
+                            setEtfDialog({ ticker: code, name: n });
+                          }}
+                          onRequestAdd={q => {
+                            setEtfReverseDialog(null);
+                            setSearchInitQuery(q); setSearchOpen(true);
+                          }} />
+      )}
+
       {etfDialog && (
         <EtfCompositionDialog isOpen={true}
                               ticker={etfDialog.ticker} etfName={etfDialog.name}
@@ -2178,19 +2201,6 @@ export function MobileSimpleView() {
                                 setSearchInitQuery(q);
                                 setSearchOpen(true);
                               }} />
-      )}
-
-      {etfReverseDialog && (
-        <EtfReverseDialog ticker={etfReverseDialog.ticker} name={etfReverseDialog.name}
-                          onClose={() => setEtfReverseDialog(null)}
-                          onOpenEtfComposition={(code, n) => {
-                            setEtfReverseDialog(null);
-                            setEtfDialog({ ticker: code, name: n });
-                          }}
-                          onRequestAdd={q => {
-                            setEtfReverseDialog(null);
-                            setSearchInitQuery(q); setSearchOpen(true);
-                          }} />
       )}
 
       {/* 보유 편집 (매수 / 매도 / 직접수정 / 삭제) */}

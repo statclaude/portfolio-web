@@ -85,6 +85,7 @@ const TAG_TONE: Record<string, string> = {
   원자력:   "text-orange-700 bg-orange-50 border-orange-300/70",
   친환경:   "text-emerald-700 bg-emerald-50 border-emerald-300/70",
   방산:     "text-teal-700 bg-teal-50 border-teal-300/70",
+  "2차전지": "text-cyan-700 bg-cyan-50 border-cyan-300/70",
   로봇:     "text-rose-700 bg-rose-50 border-rose-300/70",
 };
 // 순환매 줄 첫 카드(미국 대장주) 배경 — 그 줄 단계 색의 옅은 판. 책갈피와 같은 계열.
@@ -92,7 +93,7 @@ const TAG_CARD: Record<string, string> = {
   반도체: "bg-indigo-50 border-indigo-300", 전공정: "bg-violet-50 border-violet-300",
   후공정: "bg-sky-50 border-sky-300", "CPU·기판": "bg-fuchsia-50 border-fuchsia-300", 광통신: "bg-lime-50 border-lime-300", 전력기기: "bg-amber-50 border-amber-300",
   원자력: "bg-orange-50 border-orange-300", 친환경: "bg-emerald-50 border-emerald-300",
-  방산: "bg-teal-50 border-teal-300", 로봇: "bg-rose-50 border-rose-300",
+  방산: "bg-teal-50 border-teal-300", "2차전지": "bg-cyan-50 border-cyan-300", 로봇: "bg-rose-50 border-rose-300",
 };
 export function dashboardTagCard(tag: string | undefined): string {
   return (tag && TAG_CARD[tag]) || "bg-amber-50 border-amber-300";
@@ -166,15 +167,38 @@ function sectionMap(): Record<string, DashboardSection> {
     //   한 줄 8칸을 다 채운다(ETF 1 + 대장주 7, 바이오는 ETF 2 + 6) — 후보가 모자란 섹터(조선·건설·증권·인터넷)만 빈칸.
     //   ETF 거래대금이 10억 미만인 섹터(철강·에너지화학·필수소비재·게임·엔터)도 섹터 기준선으로 둔다.
     {
+      id: "ldtech", short: "반도체", label: "💾 반도체·2차전지",
+      sortable: true,
+      lead: 1, extras: [],
+      rowLabels: ["반도체", "반도체 소부장", "2차전지"],
+      rows: [
+        ["091160.KS", "000660.KS", "005930.KS", "009150.KS", "011070.KS", "353200.KS", "222800.KS", "007660.KS"],
+        ["455850.KS", "036930.KS", "042700.KS", "240810.KS", "403870.KS", "095610.KS", "067310.KS", "319660.KS"],
+        ["305720.KS", "006400.KS", "373220.KS", "086520.KS", "003670.KS", "066970.KS", "247540.KS", "348370.KS"],
+      ],
+    },
+    {
+      id: "ldpower", short: "전력·에너지", label: "⚡ 전력·에너지",
+      sortable: true,
+      lead: 1, extras: [],
+      rowLabels: ["전력기기", "원자력", "친환경"],
+      rows: [
+        ["487240.KS", "010120.KS", "298040.KS", "267260.KS", "001440.KS", "062040.KS", "006260.KS", "103590.KS"],
+        ["433500.KS", "034020.KS", "015760.KS", "032820.KS", "052690.KS", "083650.KS", "006910.KS", "051600.KS"],
+        ["377990.KS", "475150.KS", "009830.KS", "010060.KS", "322000.KS", "112610.KS", "389260.KS", "018000.KS"],
+      ],
+    },
+    {
       id: "ldind", short: "산업재", label: "🏭 산업재",
       sortable: true,
       lead: 1, extras: [],
-      rowLabels: ["2차전지", "자동차", "조선", "건설", "철강·소재", "에너지화학"],
+      rowLabels: ["자동차", "조선", "건설", "방산", "로봇", "철강·소재", "에너지화학"],
       rows: [
-        ["305720.KS", "006400.KS", "373220.KS", "086520.KS", "003670.KS", "066970.KS", "247540.KS", "348370.KS"],
         ["091180.KS", "005380.KS", "012330.KS", "000270.KS", "307950.KS", "204320.KS", "018880.KS", "011210.KS"],
         ["466920.KS", "329180.KS", "042660.KS", "010140.KS", "009540.KS", "082740.KS", "443060.KS"],
         ["117700.KS", "047040.KS", "028050.KS", "006360.KS", "000720.KS", "375500.KS", "294870.KS"],
+        ["449450.KS", "012450.KS", "079550.KS", "064350.KS", "047810.KS", "272210.KS", "099320.KS"],
+        ["0148J0.KS", "108490.KS", "058610.KS", "277810.KS", "454910.KS", "090360.KS", "466100.KS", "388720.KS"],
         ["117680.KS", "005490.KS", "010130.KS", "004020.KS", "103140.KS", "001430.KS", "000670.KS", "460860.KS"],
         ["117460.KS", "096770.KS", "010950.KS", "051910.KS", "011790.KS", "011780.KS", "011170.KS", "298020.KS"],
       ],
@@ -326,8 +350,8 @@ function sectionMap(): Record<string, DashboardSection> {
       note: "간밤 🇺🇸 미국 대장주(굵은 카드)가 움직이면 → 오늘 🇰🇷 같은 분야 한국 종목도 같은 방향으로 가는 경향이 있어요. 예측은 아닙니다.",
       lead: 2,
       // 반도체(하이닉스 ADR)·전공정(ASML)·CPU·기판(마벨)·광통신(코히런트)만 3번째 대장주 — 3번째도 연동이 강한 줄만(데이터 우선)
-      leadByRow: [3, 3, 3, 3, 3, 2, 2, 2, 2, 2],
-      rowLabels: ["반도체", "전공정", "후공정", "CPU·기판", "광통신", "전력기기", "원자력", "친환경", "방산", "로봇"],
+      leadByRow: [3, 3, 3, 3, 3, 2, 2, 2, 1, 2, 2],
+      rowLabels: ["반도체", "전공정", "후공정", "CPU·기판", "광통신", "전력기기", "원자력", "친환경", "2차전지", "방산", "로봇"],
       // 줄 = [미국 대장주 2개, 한국 섹터 ETF(모자라면 주도주)…, (국내 상장 해외 테마 ETF)].
       //   앞 두 칸 + 한국 쪽은 lib/rotation STAGES 와 같아야 한다(테스트가 대조). 맨 뒤 extras 는 참고용 —
       //   해외 ETF 라 통계엔 안 넣는다(미국 것은 하루 시차로 간밤 미국을 따라간다). 전공정·후공정은 일본 소부장 ETF.
@@ -340,12 +364,13 @@ function sectionMap(): Record<string, DashboardSection> {
         ["PWR", "GEV", "487240.KS", "267260.KS", "0117V0.KS", "0209Z0.KS", "487230.KS", "491010.KS"],
         ["CCJ", "OKLO", "433500.KS", "0098F0.KS", "0091P0.KS", "034020.KS", "0051G0.KS", "0132H0.KS"],
         ["BE", "FSLR", "377990.KS", "009830.KS", "112610.KS", "457990.KS", "419420.KS", "419650.KS"],
+        ["LIT", "305720.KS", "006400.KS", "373220.KS", "086520.KS", "394670.KS", "371460.KS"],   // 2차전지 — 미국은 LIT 하나만 끈다
         ["ITA", "RTX", "449450.KS", "0080G0.KS", "463250.KS", "012450.KS", "494840.KS", "0167Z0.KS"],   // 방산 — AI 밖이지만 미국이 끌고 온다
         ["BOTZ", "TER", "0148J0.KS", "445290.KS", "108490.KS", "277810.KS", "0038A0.KS"],   // 로봇 — 미국 로봇 ETF 가 끈다(개별주는 약함)
       ],
       // 소부장(전공정·후공정)은 맞는 미국 ETF 가 없어 일본 반도체 소부장 ETF — 일본장은 한국과 같은 시간이라 하루 시차가 없다
       extraTag: { "464920.KS": "🇯🇵 일본", "465660.KS": "🇯🇵 일본" },
-      extras: ["0173Y0.KS", "464920.KS", "465660.KS", "419650.KS", "381180.KS", "0225V0.KS", "487230.KS", "491010.KS", "0051G0.KS", "0132H0.KS", "419420.KS", "494840.KS", "0167Z0.KS", "0038A0.KS"],
+      extras: ["0173Y0.KS", "464920.KS", "465660.KS", "419650.KS", "381180.KS", "0225V0.KS", "487230.KS", "491010.KS", "0051G0.KS", "0132H0.KS", "419420.KS", "494840.KS", "0167Z0.KS", "0038A0.KS", "394670.KS", "371460.KS"],
     },
     {
       // AI 순환매 부가 정보 — 지금 강한 곳 · 다음 후보 · 흐름 · 통계(RotationTab, 접힘).
@@ -413,31 +438,29 @@ function sectionMap(): Record<string, DashboardSection> {
   return Object.fromEntries(sections.map(s => [s.id, s]));
 }
 
-export type DashboardPage = "day" | "night" | "semi" | "leaders";
+export type DashboardPage = "day" | "night";
 // 지수 탭 셋 — 메뉴의 '📈 지수' 드롭다운에 들어간다. PC·모바일이 이 라벨 한 벌을 쓴다.
 export const DASHBOARD_PAGES: { key: DashboardPage; emoji: string; tab: string; hint: string }[] = [
-  { key: "day",   emoji: "🌞", tab: "지수(주간)",   hint: "한국장 + 미국 야간선물" },
-  { key: "night", emoji: "🌙", tab: "지수(야간)",   hint: "미국장 + 한국 야간선물·24h" },
-  { key: "semi",  emoji: "🔧", tab: "지수(반도체)", hint: "반도체 · 소부장 · AI 인프라 · 순환매" },
-  { key: "leaders", emoji: "👑", tab: "지수(대장주)", hint: "섹터 ETF ➜ 대장주 — 산업재·금융·소비·헬스·콘텐츠" },
+  { key: "day",   emoji: "🌞", tab: "지수(주간)",   hint: "한국장 · 섹터 대장주 + 미국 야간선물" },
+  { key: "night", emoji: "🌙", tab: "지수(야간)",   hint: "미국장 · 반도체 · 순환매 + 한국 야간선물·24h" },
 ];
 
 // 페이지별 구성 — **그 시간에 필요한 걸 다**. 중복 허용(한 페이지만 봐도 되게).
 export const PAGE_IDS: Record<DashboardPage, string[]> = {
-  // 주간·야간 모두 **맨 아래는 같은 한 세트** — 한·미 섹터 → 환율·금리·투심 → 선물 → 현물(원자재).
-  //   밤낮으로 보는 것들이라 어느 페이지에서든 같은 자리에서 찾게 한다.
-  day:   ["kr", "etftop", "sector", "krfx", "dayfut", "spot"],
-  // 미국 지수 → 빅테크·ETF → 공통 세트(섹터·환율·선물·현물).
-  //   반도체·소부장·AI 인프라·AI 단계별은 **반도체 페이지에 따로 있어** 여기선 뺀다(야간이 너무 길어졌다).
-  night: ["macro", "bigtech", "usetf", "sector", "krfx", "krnight", "spot"],
+  // 주간·야간 모두 **지수 바로 아래는 같은 한 세트** — 환율·금리·투심 → 선물 → 현물(원자재).
+  //   밤낮으로 보는 것들이라 어느 페이지에서든 같은 자리(지수 아래)에서 찾게 한다(사용자 결정 2026-10-08, 예전엔 맨 아래).
+  // 주간 시장 → 공통 세트 → 섹터 ETF ➜ 대장주(모든 섹터) → ETF TOP → 한·미 섹터.
+  //   옛 '지수(대장주)' 페이지를 여기로 합쳤다(2026-10-08).
+  //   반도체·2차전지·전력도 넣는다(야간의 반도체 묶음과 겹쳐도 — 섹터 전체를 한 페이지에서 보게, 2026-10-06).
+  day:   ["kr", "krfx", "dayfut", "spot", "ldtech", "ldpower", "ldind", "ldfin", "ldlife", "ldcont", "etftop", "sector"],
+  // 미국 지수 → 공통 세트 → 반도체(반도체·일본·순환매) → 빅테크·ETF → 한·미 섹터.
+  //   옛 '지수(반도체)' 페이지를 여기로 합쳤다 — 반도체는 빅테크 위(사용자 결정 2026-10-07).
+  night: ["macro", "krfx", "krnight", "spot", "semi", "jpsemi", "rotflow", "bigtech", "usetf", "sector"],
+  // (아래 넷은 옛 반도체 페이지 메모 — 이제 야간의 반도체 묶음에 해당)
   // AI 단계별 미국 대장주(aiflow)는 뺐다 — 바로 아래 순환매 블록 줄마다 첫 카드가 같은 대장주다.
   // 소부장(semieq)은 뺐다 — 순환매 블록이 전공정·소재·부품·후공정 줄로 같은 미국 장비주를 한국 종목과 이어 보여준다.
   // AI 인프라 주도주(aiinfra)는 뺐다 — 블룸에너지·루멘텀이 순환매 친환경·광통신 줄에 대장주로 있다.
   // 순환매 부가정보(rotation — 강세 묶음·다음 후보·과거 성적·일별 등락)는 뺐다. 카드 블록(rotflow)만 남긴다.
-  // 반도체도 맨 아래에 공통 세트(환율·금리·투심 → 선물 → 현물). 선물은 시간 따라 주간/야간 그룹으로 바뀐다(buildDashboardPage).
-  semi:  ["semi", "jpsemi", "rotflow", "krfx", "dayfut", "spot"],
-  // 반도체 페이지에 없는 섹터 — 섹터 ETF ➜ 대장주. 맨 아래 공통 세트는 반도체 페이지와 같다.
-  leaders: ["ldind", "ldfin", "ldlife", "ldcont", "krfx", "dayfut", "spot"],
 };
 
 // 한국 선물 가상심볼 — 같은 카드가 시간 따라 주간선물(09:00~15:45)·야간선물(18:00~05:00)이 된다.
@@ -446,9 +469,7 @@ const KR_FUT = new Set(["^KS200N", "^KQ150N"]);
 /** `krNight` = 지금 한국 야간 세션인가(18:00~09:00 KST). 기본은 현재 시각 — 테스트는 직접 넘긴다. */
 export function buildDashboardPage(page: DashboardPage, krNight = isKrNightNow()): DashboardSection[] {
   const m = sectionMap();
-  // 반도체 페이지의 선물 자리 — 한국 밤엔 야간 그룹('밤의 한국' 선물)으로 바꿔 끼운다(이름이 시간과 맞게).
-  const ids = (page === "semi" || page === "leaders") && krNight ? PAGE_IDS[page].map(id => id === "dayfut" ? "krnight" : id) : PAGE_IDS[page];
-  const secs = ids.map(id => m[id]).filter((s): s is DashboardSection => !!s);
+  const secs = PAGE_IDS[page].map(id => m[id]).filter((s): s is DashboardSection => !!s);
   // 주간 페이지엔 **주간선물만**(밤엔 뺀다), 야간 페이지엔 **야간선물만**(낮엔 뺀다).
   const dropIn = page === "day" && krNight ? "dayfut" : page === "night" && !krNight ? "krnight" : null;
   if (!dropIn) return secs;
@@ -461,14 +482,15 @@ function isKrNightNow(): boolean {
   return hm >= 18 * 60 || hm < 9 * 60;
 }
 
-// PC 지수 탭 키 — Tabs.tsx 의 US_MARKET_TAB_KEY · INDEX_NIGHT_TAB_KEY · INDEX_SEMI_TAB_KEY 와 **같은 문자열**.
+// PC 지수 탭 키 — Tabs.tsx 의 US_MARKET_TAB_KEY · INDEX_NIGHT_TAB_KEY 와 **같은 문자열**.
 //   (lib 이 컴포넌트를 import 하지 않게 문자열로 둔다 — 어긋나지 않게 테스트가 대조한다)
-export const INDEX_GROUP_KEYS = new Set<string>(["__us-market__", "__idx-night__", "__idx-semi__", "__idx-leaders__"]);
+//   폐지된 탭(반도체 → 야간, 대장주 → 주간)은 합쳐진 페이지로 보낸다.
+export const INDEX_GROUP_KEYS = new Set<string>(["__us-market__", "__idx-night__"]);
 export function indexPageOf(key: string): DashboardPage {
-  return key === "__idx-night__" ? "night" : key === "__idx-semi__" ? "semi" : key === "__idx-leaders__" ? "leaders" : "day";
+  return key === "__idx-night__" || key === "__idx-semi__" ? "night" : "day";
 }
 
-// 처음 열 때 페이지 — 시간으로. 한국 07~18시는 주간, 그 외는 야간. (반도체는 직접 고른다)
+// 처음 열 때 페이지 — 시간으로. 한국 07~18시는 주간, 그 외는 야간.
 export function defaultDashboardPage(): DashboardPage {
   const h = new Date(Date.now() + 9 * 3600_000).getUTCHours();
   return h >= 7 && h < 18 ? "day" : "night";

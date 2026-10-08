@@ -41,6 +41,8 @@ import { FeedbackDialog } from "./components/FeedbackDialog";
 import { DonateDialog } from "./components/DonateDialog";
 import { EtfCompositionDialog } from "./components/EtfCompositionDialog";
 import { EtfReverseDialog } from "./components/EtfReverseDialog";
+import { useIntradayCharts } from "./lib/useIntradayCharts";
+import { ChartRangeToggle } from "./components/ChartRangeToggle";
 import { OnboardingDialog } from "./components/OnboardingDialog";
 import { enterDemo, exitDemo, isDemoActive, DEMO_GROUP } from "./lib/demoMode";
 import { AssetTrendTab } from "./components/AssetTrendTab";
@@ -552,6 +554,9 @@ function Dashboard() {
     })),
   });
 
+  // 배경 그래프 '24시간' — 화면에 들어온 종목만(활성), 설정이 24시간일 때만 받는다.
+  const intradayMap = useIntradayCharts([...krxTickers, ...usTickers].filter(t => activeTickers.has(t)));
+
   const priceMap = useMemo(() => {
     const m = new Map((prices ?? []).map(p => [p.ticker, p]));
     for (const p of usPrices ?? []) m.set(p.ticker, p);   // 미국 종목 가격 병합
@@ -998,7 +1003,7 @@ function Dashboard() {
         ) : activeTab === ASSET_TREND_TAB_KEY ? (
           <AssetTrendTab trades={allTrades} holdings={holdings} />
         ) : activeTab === VALUATION_TAB_KEY ? (
-          <ValuationTableTab items={consensusItems} onOpenValuation={setValuationTicker} />
+          <ValuationTableTab items={consensusItems} onOpenValuation={(code, n) => { setValuationName(n ?? null); setValuationTicker(code); }} />
         ) : visible.length === 0 ? (
           holdings.length === 0 ? (
             <div className="text-center py-16 text-gray-500">
@@ -1085,6 +1090,9 @@ function Dashboard() {
                                  bg-white text-gray-600 border-gray-300 hover:bg-gray-50">
                 {codesCopied ? "✓ 복사됨" : "📋 코드 복사"}
               </button>
+              <span className="inline-flex items-center gap-1 text-xs text-gray-500">
+                그래프 <ChartRangeToggle />
+              </span>
               <SortSelector sortKey={sortKey} sortDir={sortDir}
                             onChangeKey={sortHandlers.onChangeKey}
                             onToggleDir={sortHandlers.onToggleDir} />
@@ -1110,6 +1118,7 @@ function Dashboard() {
                   market={krMarketMap.get(stock.ticker)}
                   consensus={naverMap.get(stock.ticker)?.consensus ?? null}
                   chart={chartMap.get(stock.ticker)}
+                  dayChart={intradayMap.get(stock.ticker)}
                   priceHistory={priceHistoryMap.get(stock.ticker)}
                   longHistory={longHistoryMap.get(stock.ticker)}
                   onNeedLongHistory={() => primeLongHistory(stock.ticker)}
@@ -1367,6 +1376,19 @@ function Dashboard() {
                        stocks={sortedVisible} priceMap={priceMap} chartMap={chartMap}
                        targetMap={new Map(krxTickers.map(t => [t, naverMap.get(t)?.consensus?.target]))} />
 
+      {etfReverseDialog && (
+        <EtfReverseDialog ticker={etfReverseDialog.ticker} name={etfReverseDialog.name}
+                          onClose={() => setEtfReverseDialog(null)}
+                          onOpenEtfComposition={(code, n) => {
+                            // 목록은 닫지 않는다 — 구성 창을 닫으면 보던 목록으로 돌아온다(구성 창이 아래에 그려져 위로 뜬다)
+                            setEtfDialog({ ticker: code, name: n });
+                          }}
+                          onRequestAdd={q => {
+                            setEtfReverseDialog(null);
+                            setSearchInitQuery(q); setSearchOpen(true);
+                          }} />
+      )}
+
       {etfDialog && (
         <EtfCompositionDialog isOpen={true}
                               ticker={etfDialog.ticker} etfName={etfDialog.name}
@@ -1376,19 +1398,6 @@ function Dashboard() {
                                 setSearchInitQuery(q);
                                 setSearchOpen(true);
                               }} />
-      )}
-
-      {etfReverseDialog && (
-        <EtfReverseDialog ticker={etfReverseDialog.ticker} name={etfReverseDialog.name}
-                          onClose={() => setEtfReverseDialog(null)}
-                          onOpenEtfComposition={(code, n) => {
-                            setEtfReverseDialog(null);
-                            setEtfDialog({ ticker: code, name: n });
-                          }}
-                          onRequestAdd={q => {
-                            setEtfReverseDialog(null);
-                            setSearchInitQuery(q); setSearchOpen(true);
-                          }} />
       )}
 
       {valuationTicker && (() => {

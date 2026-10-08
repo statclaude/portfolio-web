@@ -154,6 +154,7 @@ function _cleanWs(s: string | null | undefined): string {
 // ─────────── Naver 메인 페이지 ───────────
 export interface FundamentalData {
   name?: string;
+  market?: "KOSPI" | "KOSDAQ";   // 네이버 상세 sosok
   price?: number;
   description?: string[];   // 기업개요 — 상세 API 의 comment1~3 (출처: 에프앤가이드)
   market_cap_text?: string;
@@ -188,6 +189,7 @@ export interface FundamentalData {
 //   컨센서스(목표주가·투자의견)만 여기 없어서 integration 을 따로 본다 — 팝업에서만 쓴다.
 interface NaverDetailRaw {
   itemname?: string;
+  sosok?: string;            // "0" 코스피 / "1" 코스닥
   nowPrice?: string;
   marketSum?: string;        // 원 단위
   per?: string; pbr?: string; eps?: string; bps?: string;
@@ -223,6 +225,8 @@ export async function fetchNaverDetail(ticker: string): Promise<FundamentalData>
   const n = (v?: string) => { const x = f(v); return x == null ? undefined : Math.trunc(x); };
 
   if (d.itemname) out.name = d.itemname;
+  if (d.sosok === "0") out.market = "KOSPI";
+  else if (d.sosok === "1") out.market = "KOSDAQ";
   out.price = n(d.nowPrice);
   out.market_cap_text = formatMarketSum(Number(d.marketSum));
   out.per = f(d.per);
@@ -244,7 +248,7 @@ export async function fetchNaverDetail(ticker: string): Promise<FundamentalData>
 interface NaverIntegrationConsensus {
   consensusInfo?: { recommMean?: string; priceTargetMean?: string };
 }
-async function fetchNaverConsensusFields(ticker: string): Promise<Partial<FundamentalData>> {
+export async function fetchNaverConsensusFields(ticker: string): Promise<Partial<FundamentalData>> {
   const out: Partial<FundamentalData> = {};
   try {
     const resp = await fetchProxied(`https://m.stock.naver.com/api/stock/${ticker}/integration`);
@@ -694,6 +698,9 @@ export async function fetchValuationRow(ticker: string): Promise<ValuationRow> {
       fetchNaverDetail(ticker),
       fetchWisereport(ticker),
     ]);
+    // 네이버 상세가 통째로 비면(한꺼번에 수십 종목 조회할 때 일시 실패) **던진다** — 빈 결과가 6시간
+    //   캐시에 굳으면 시총·PER·이름이 그 동안 비어 있다(2026-10-06 대덕전자·심텍 등 실측). 던지면 재시도된다.
+    if (!naver.name && naver.price == null) throw new Error(`네이버 상세 비어 있음: ${ticker}`);
     const merged: ValuationRow = { ...naver, ...wise, ticker };
     merged.market_cap = marketCapEok(merged.market_cap_text) ?? undefined;
     return merged;
