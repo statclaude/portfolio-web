@@ -529,6 +529,11 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
                   마지막 동기화: {new Date(lastSyncedAt).toLocaleString("ko-KR")}
                 </div>
               )}
+              {/* 앱 전용 숨김 폴더(drive.appdata)라 드라이브 파일 목록엔 안 나온다 — "저장했는데 파일이 없다" 문의(2026-10-12) */}
+              <div className="text-[10px] text-gray-400 leading-snug">
+                ℹ️ 드라이브의 <b className="text-gray-500">숨겨진 앱 전용 공간</b>에 저장돼 드라이브 파일 목록엔 보이지 않습니다.
+                확인: 구글 드라이브 → ⚙️ 설정 → <b className="text-gray-500">앱 관리</b> → 이 앱의 &lsquo;숨겨진 앱 데이터&rsquo;.
+              </div>
               {!signedIn && (
                 <div className="text-[11px] text-amber-700">
                   🔐 로그인 안 됨 — 저장/가져오기를 누르면 Google 로그인 후 그대로 실행됩니다.
