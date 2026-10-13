@@ -3241,6 +3241,56 @@ const TOSS_US_STOCK_CODE: Record<string, string> = {
   "BOTZ": "US20160913001",
   "EWY":  "US20000512001",   // MSCI Korea — 외국인 투심 (Blue Ocean 24h 오버나잇)
   "KORU": "US20130410003",   // Direxion 3x 한국 불 — 원화 시세용
+  // 지수(미국순환) 페이지 종목 — 토스 검색으로 확인(2026-10-12)
+  "ALB": "US20100510001",   // 2차전지 줄
+  "SQM": "US19930921001",   // 2차전지 줄
+  "QS": "US20201127007",   // 2차전지 줄
+  "FLNC": "US20211027012",   // 2차전지 줄
+  "EOSE": "US20201117002",   // 2차전지 줄
+  "VRT": "US20200210005",
+  "ETN": "US19481201001",
+  "CEG": "US20220202001",
+  "ANET": "US20140606002",
+  "CRDO": "US20220126002",
+  "EQIX": "US20000811002",
+  "DLR": "US20041029001",
+  "SMR": "US20201208006",
+  "BWXT": "US20150702003",
+  "CRWD": "US20190611002",
+  "PANW": "US20120720001",
+  "ZS": "US20180315001",
+  "FTNT": "US20091118001",
+  "NET": "US20190912003",
+  "SNOW": "US20200915015",
+  "DDOG": "US20190918001",
+  "MDB": "US20171018002",
+  "SHOP": "US20150527004",
+  "ISRG": "US20000613001",
+  "SYM": "US20220608002",
+  "RKLB": "US20210825002",
+  "ASTS": "US20210407001",
+  "LUNR": "NAS0230214003",
+  "IONQ": "US20211001008",
+  "RGTI": "US20210422015",
+  "QBTS": "US20220808006",
+  "KO": "US19240926001",
+  "PEP": "US20171220003",
+  "PG": "US19500322001",
+  "VZ": "US19831121001",
+  "LLY": "US19700709001",
+  "UNH": "US19911010002",
+  "JNJ": "US19440925001",
+  "ABBV": "US20121210001",
+  "JPM": "US19690401002",
+  "BAC": "US19730102001",
+  "GS": "US19990504001",
+  "V": "US20080319001",
+  "XOM": "US19200325001",
+  "CVX": "US19210624001",
+  "COP": "US19720630003",
+  "LMT": "US19950316001",
+  "NOC": "US19850619001",
+  "GD": "US19520425001",
 };
 
 // 토스 US 종목 가격(기존 fetchTossUsPrices) → UsIndex 변환. 현재가 = close, 기준 = base.
@@ -4261,10 +4311,66 @@ export interface HeatmapItem {
   volume: number;    // 거래량(1일)
   valueTraded: number; // 거래대금(가격×거래량)
   marketCap: number; // 시가총액(원)
+  aum: number;       // ETF 순자산총액(원·달러) — 종목은 0, ETF 는 시가총액 대신 이걸 쓴다
   perfW: number; perf1M: number; perf3M: number; perf6M: number; perfYTD: number; perfY: number; // 기간 수익률 %
   premarketPct: number;  // 프리장 등락률 %(미국만, 한국은 0)
   postmarketPct: number; // 애프터장 등락률 %(미국만)
   sector: string;    // 섹터(영문)
+}
+// scanner 응답 행 → HeatmapItem. 히트맵 탭(fetchKrHeatmap)·심플 보기 히트맵(fetchHeatmapForTickers)이 같이 쓴다.
+const HEAT_COLUMNS = ["name", "description", "logoid", "change", "close", "volume", "Value.Traded",
+  "market_cap_basic", "Perf.W", "Perf.1M", "Perf.3M", "Perf.6M", "Perf.YTD", "Perf.Y", "sector",
+  "premarket_change", "postmarket_change", "aum"];   // aum = ETF 순자산총액(ETF 는 시가총액이 비어 있다) — 맨 끝에 둬 앞 순서를 안 건드린다
+function mapHeatRows(rows: { s: string; d: unknown[] }[]): HeatmapItem[] {
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  return rows
+    .map(r => {
+      const d = r.d;
+      return {
+        code: String(d[0] ?? ""),
+        name: typeof d[1] === "string" && d[1] ? d[1] : String(d[0] ?? ""),
+        logoid: typeof d[2] === "string" ? d[2] : "",
+        changePct: num(d[3]),
+        close: num(d[4]),
+        volume: num(d[5]),
+        valueTraded: num(d[6]),
+        marketCap: num(d[7]),
+        perfW: num(d[8]), perf1M: num(d[9]), perf3M: num(d[10]),
+        perf6M: num(d[11]), perfYTD: num(d[12]), perfY: num(d[13]),
+        sector: typeof d[14] === "string" && d[14] ? d[14] : "기타",
+        premarketPct: num(d[15]), postmarketPct: num(d[16]),
+        aum: num(d[17]),
+      };
+    })
+    .filter(x => x.code && (x.marketCap > 0 || x.volume > 0));
+}
+
+/** 지정 종목들의 히트맵 지표 — 심플 보기 히트맵용(2026-10-13). 한국 = KRX:코드, 미국 = 거래소 후보 셋.
+ *  키 = 우리 티커(한국 6자리 / 미국 심볼). 미국 값(시총·거래대금)은 **달러** 그대로 — 호출측이 환산한다. */
+export async function fetchHeatmapForTickers(tickers: string[]): Promise<Map<string, HeatmapItem>> {
+  const kr = tickers.filter(t => /^[\dA-Za-z]{6}$/.test(t) && /\d/.test(t));
+  const us = tickers.filter(t => /^[A-Z][A-Z.]{0,6}$/.test(t));
+  const scan = async (endpoint: "korea" | "america", syms: string[]) => {
+    if (syms.length === 0) return [] as HeatmapItem[];
+    const resp = await fetchProxied(`https://scanner.tradingview.com/${endpoint}/scan`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ symbols: { tickers: syms }, columns: HEAT_COLUMNS }),
+    });
+    const j = await resp.json() as { error?: string; data?: { s: string; d: unknown[] }[] };
+    if (typeof j.error === "string") {
+      if (/host not allowed/i.test(j.error)) throw new ProxyHostError(j.error);
+      throw new Error(j.error);
+    }
+    return mapHeatRows(Array.isArray(j.data) ? j.data : []);
+  };
+  const [k, u] = await Promise.all([
+    scan("korea", kr.map(t => `KRX:${t}`)),
+    scan("america", us.flatMap(t => [`NASDAQ:${t}`, `NYSE:${t}`, `AMEX:${t}`])),
+  ]);
+  const out = new Map<string, HeatmapItem>();
+  for (const it of [...k, ...u]) if (!out.has(it.code)) out.set(it.code, it);
+  if (out.size === 0) throw new Error("히트맵 지표 0건");   // 일시 실패를 빈 결과로 캐시하지 않게
+  return out;
 }
 // TradingView 심볼 로고 URL. img src 직접 로드(이미지라 프록시 불필요). 없으면 빈 문자열.
 export function heatmapLogoUrl(logoid: string): string {
@@ -4315,9 +4421,7 @@ export async function fetchKrHeatmap(source: HeatmapSource, limit = 500): Promis
     ...(tickers && tickers.length ? { symbols: { tickers } }
       : meta.symbolset ? { symbols: { symbolset: [meta.symbolset] } } : {}),
     ...(meta.sectorFilter ? { filter: [{ left: "sector", operation: "equal", right: meta.sectorFilter }] } : {}),
-    columns: ["name", "description", "logoid", "change", "close", "volume", "Value.Traded",
-      "market_cap_basic", "Perf.W", "Perf.1M", "Perf.3M", "Perf.6M", "Perf.YTD", "Perf.Y", "sector",
-      "premarket_change", "postmarket_change"],
+    columns: HEAT_COLUMNS,
     sort: { sortBy: "market_cap_basic", sortOrder: "desc" },
     range: [0, limit],
   };
@@ -4332,26 +4436,7 @@ export async function fetchKrHeatmap(source: HeatmapSource, limit = 500): Promis
     throw new Error(j.error);
   }
   const rows = Array.isArray(j.data) ? j.data : [];
-  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
-  return rows
-    .map(r => {
-      const d = r.d;
-      return {
-        code: String(d[0] ?? ""),
-        name: typeof d[1] === "string" && d[1] ? d[1] : String(d[0] ?? ""),
-        logoid: typeof d[2] === "string" ? d[2] : "",
-        changePct: num(d[3]),
-        close: num(d[4]),
-        volume: num(d[5]),
-        valueTraded: num(d[6]),
-        marketCap: num(d[7]),
-        perfW: num(d[8]), perf1M: num(d[9]), perf3M: num(d[10]),
-        perf6M: num(d[11]), perfYTD: num(d[12]), perfY: num(d[13]),
-        sector: typeof d[14] === "string" && d[14] ? d[14] : "기타",
-        premarketPct: num(d[15]), postmarketPct: num(d[16]),
-      };
-    })
-    .filter(x => x.code && (x.marketCap > 0 || x.volume > 0));
+  return mapHeatRows(rows);
 }
 
 // ─── 코리아 밸류업 지수 (네이버 KVALUE) ─── 지수탭 카드용. Yahoo 미제공 → 네이버 m.stock 무인증.

@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
+import { useMarketAlerts } from "../lib/marketAlerts";
+import { IndexWarnTag } from "./IndexWarnTag";
 import { fetchYahooBatch, fetchDashboardChart, fetchYasunNightFutures, fetchTossUsStockCandles, fetchKrBondYieldSeries } from "../lib/api";
 import type { UsIndex, MarketIndexKey } from "../lib/api";
-import { isSymbolSleeping, marketOfSymbol, fmtAgo, isUsExtendedTradingOpen, krFuturesName, krFuturesDesc, isKrNightSession, isQuoteStale, isKrHoldingClosed, isUsRateSymbol, displayPctOf, isFxFuturesWeekendClosed } from "../lib/format";
+import { isSymbolSleeping, isMarketOpen, marketOfSymbol, fmtAgo, isUsExtendedTradingOpen, krFuturesName, krFuturesDesc, isKrNightSession, isQuoteStale, isKrHoldingClosed, isUsRateSymbol, displayPctOf, isFxFuturesWeekendClosed } from "../lib/format";
 import { getDimSleepingEnabled, checkPersonalProxyYasunSupport } from "../lib/proxyConfig";
 import { useChartRange, pickCardChart } from "../lib/chartRange";
 import { ChartRangeToggle } from "./ChartRangeToggle";
@@ -204,6 +206,7 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
   const [leaderSort, setLeaderSort] = useState<LeaderSort>(loadLeaderSort);   // 대장주 줄 정렬(등락률순 기본)
   const chartRange = useChartRange();   // 카드 배경 차트 3개월 | 24시간 — 앱 전체 설정
   const [etfDialog, setEtfDialog] = useState<{ ticker: string; name: string } | null>(null);
+  const marketAlerts = useMarketAlerts();   // 종목코드 → 투자주의·경고·위험
   // 야간선물(yasun.gg)은 프록시를 타므로 구버전 개인 워커면 값이 빈다 → 그때만 업데이트 안내.
   //   "값이 없다"만으로 워커를 탓하면 업스트림 차단(예: investing.com Cloudflare 챌린지)까지
   //   워커 탓으로 오진한다. 반드시 실제 화이트리스트 검사 결과("outdated")로만 띄운다.
@@ -264,7 +267,7 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
             )}
                 {section.render === "sectorFlow" && (
               <TicsSectorBoard onOpenValuation={onOpenValuation}
-                                krClosed={page === "night"} />
+                                krClosed={page === "night" || page === "rot"} />
             )}
             {(arr => !section.pairRows ? arr : (
               // 짝 줄 — 상자 둘을 좌우로 **붙여서**. 상자 폭은 카드 수에 비례(flex-grow), 남는 자리는 오른쪽 빈칸(한 줄 8장 기준)
@@ -403,19 +406,25 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
                 effUp ? "text-rose-600"
                 : effDn ? "text-blue-600"
                 : "text-gray-900";
-              const nameColor = isFuture ? "text-amber-700" : "text-gray-900";
               const isKospi  = p.symbol === "^KS11";
               const isKosdaq = p.symbol === "^KQ11";
               const hasFlow  = isKospi || isKosdaq;
               const indexKey = isKospi ? "KOSPI" : isKosdaq ? "KOSDAQ" : null;
               // 정규장 종료(sleeping) 후 항상 마감가 책갈피 표시.
               // 시간외 거래값(regularPrice 별도)이 있으면 그 값을, 없으면 현재가를 마감가로 통일 표시.
-              const showCloseTag = sleeping && effPrice != null;
+              // 미국 개별 종목은 프리장(04:00 ET)부터 '열림' 이라 sleeping 만 보면 프리장에 어제 종가가 사라졌다(2026-10-12).
+              //   큰 숫자가 프리·애프터·오버나이트 가격인 동안(= 정규장 09:30~16:00 밖)은 정규장 마감 책갈피를 같이 보인다.
+              const usOffRegular = marketOfSymbol(p.symbol) === "US" && !isMarketOpen("US_INDEX");
+              const showCloseTag = (sleeping || usOffRegular) && effPrice != null;
               const closeVal = q?.regularPrice ?? effPrice;
               const regPct = q?.regularPct ?? pct;
               const regSign = regPct == null ? "text-gray-700"
                 : (isInverse ? regPct < 0 : regPct > 0) ? "text-rose-600"
                 : (isInverse ? regPct > 0 : regPct < 0) ? "text-blue-600" : "text-gray-700";
+              // 종목명 색 — 정규장 마감 책갈피가 떠 있을 때(큰 숫자 = 애프터·프리장)만 정규장 등락 색(2026-10-09).
+              //   그 밖엔 큰 숫자와 같은 색 — 한국 NXT 프리마켓(08~08:50)엔 책갈피 없이 '지난 정규장' 색이 이름에 남아
+              //   엘앤에프(이름 파랑·+2.15%)처럼 서로 엇갈렸다(2026-10-12). 선물은 주황 그대로.
+              const nameColor = isFuture ? "text-amber-700" : showCloseTag && regPct != null ? regSign : sign;
               // 마감 책갈피는 노란 배경 + 흐림 제외 → dim 은 콘텐츠 자식에만 적용
               const dimCls = dimNow ? "opacity-60" : "";
               return (
@@ -434,6 +443,12 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
                         ETF
                       </button>
                     );
+                  })()}
+                  {/* 경고 책갈피 — 투자주의·경고·위험(크롤러 목록, 0콜) */}
+                  {(() => {
+                    const tk = krEtfTicker(p.symbol);
+                    const lv = tk ? marketAlerts.get(tk) : undefined;
+                    return tk && lv ? <IndexWarnTag ticker={tk} name={p.name} level={lv} shift={!p.krStock} /> : null;
                   })()}
                   {/* 정규장 마감가 책갈피 — 카드 위로 올림(-top-2). 노란 배경 + 흐림 제외(z-20) */}
                   {showCloseTag && closeVal != null && (

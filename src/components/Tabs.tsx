@@ -313,10 +313,12 @@ export function Tabs({ tabs, activeKey, onChange, onRename, onDelete, folders, l
 
 // 증시 — 증시 자금동향(예탁금·신용·펀드) + 코스피/코스닥/코스피200 실시간 차트. 지수 왼쪽 별도 탭.
 export const MARKET_MONEY_TAB_KEY = "__market-money__";
-export const US_MARKET_TAB_KEY = "__us-market__";   // 지수(주간) — 옛 '지수' 키를 그대로 써서 저장된 탭·설정이 이어진다
-// 지수(야간) — 메뉴의 '📈 지수' 드롭다운에 주간과 같이 묶인다
+export const US_MARKET_TAB_KEY = "__us-market__";   // 지수(한국, 옛 주간) — 옛 '지수' 키를 그대로 써서 저장된 탭·설정이 이어진다
+// 지수(미국, 옛 야간) — 메뉴의 '📈 지수' 드롭다운에 주간과 같이 묶인다
 export const INDEX_NIGHT_TAB_KEY = "__idx-night__";
-export const INDEX_SEMI_TAB_KEY = "__idx-semi__";   // 폐지 — 야간에 합침(2026-10-07). 옛 저장값 이동용으로만 남긴다
+export const INDEX_ROT_TAB_KEY = "__idx-rot__";   // 지수(순환매) — 반도체 지수·일본 반도체·AI 순환매 (2026-10-12)
+export const INDEX_US_TAB_KEY = "__idx-us__";   // 폐지 — 지수(미국)에 합침(2026-10-12). 옛 저장값 이동용으로만 남긴다
+export const INDEX_SEMI_TAB_KEY = "__idx-semi__";   // 폐지 — 지금은 지수(순환매)로(2026-10-12). 옛 저장값 이동용으로만 남긴다
 export const INDEX_LEADERS_TAB_KEY = "__idx-leaders__";   // 폐지 — 주간에 합침(2026-10-08). 옛 저장값 이동용으로만 남긴다
 // 묶음·페이지 매핑(INDEX_GROUP_KEYS·indexPageOf)은 lib/dashboardGroups — 컴포넌트 파일에서 Set·함수를
 //   export 하면 HMR(fast refresh)이 이 파일을 통째로 다시 그린다.
@@ -345,21 +347,23 @@ export const ETF_COMPARE_TAB_KEY = "__etf-compare__";
 export const HEATMAP_TAB_KEY = "__heatmap__";
 // 성적표 — 관심종목 전체의 기업가치 지표(시총·PER·ROE 등)를 한 표로, 열별 정렬
 export const VALUATION_TAB_KEY = "__valuation__";
+// 실적 일정 — 미국·한국 주요 기업 + 내 관심종목의 실적 발표일 달력(한국 시간)
+export const EARNINGS_TAB_KEY = "__earnings__";
 export const ASSET_TREND_TAB_KEY = "__asset-trend__";
 
 // 시스템 reserved — 이름 변경/삭제 불가
 const RESERVED = new Set<string>([
-  "관심ETF", MARKET_MONEY_TAB_KEY, US_MARKET_TAB_KEY, INDEX_NIGHT_TAB_KEY, INDEX_SEMI_TAB_KEY, INDEX_LEADERS_TAB_KEY, SEMI_CHECK_TAB_KEY,
+  "관심ETF", MARKET_MONEY_TAB_KEY, US_MARKET_TAB_KEY, INDEX_NIGHT_TAB_KEY, INDEX_ROT_TAB_KEY, INDEX_US_TAB_KEY, INDEX_SEMI_TAB_KEY, INDEX_LEADERS_TAB_KEY, SEMI_CHECK_TAB_KEY,
   SECTOR_RANK_TAB_KEY, MY_STOCKS_TAB_KEY, MY_TRADES_TAB_KEY, CONSENSUS_TAB_KEY,
   ETF_REVERSE_TAB_KEY, ETF_RANKING_TAB_KEY, ETF_COMPARE_TAB_KEY, HEATMAP_TAB_KEY,
-  SCREENER_TAB_KEY, CLOSE_BET_TAB_KEY, ACCUM_TAB_KEY, VALUATION_TAB_KEY,
+  SCREENER_TAB_KEY, CLOSE_BET_TAB_KEY, ACCUM_TAB_KEY, VALUATION_TAB_KEY, EARNINGS_TAB_KEY,
 ]);
 
 // 묶기 대상 시스템 탭 — 드롭다운 하나로 합침. (증시·지수는 자주 써서 별도 고정 탭)
 export const SYSTEM_TAB_KEYS = new Set<string>([
   MARKET_MONEY_TAB_KEY, US_MARKET_TAB_KEY, SECTOR_RANK_TAB_KEY, SEMI_CHECK_TAB_KEY,
   CONSENSUS_TAB_KEY, ETF_REVERSE_TAB_KEY, ETF_RANKING_TAB_KEY, ETF_COMPARE_TAB_KEY, HEATMAP_TAB_KEY,
-  SCREENER_TAB_KEY, CLOSE_BET_TAB_KEY, ACCUM_TAB_KEY, VALUATION_TAB_KEY,
+  SCREENER_TAB_KEY, CLOSE_BET_TAB_KEY, ACCUM_TAB_KEY, VALUATION_TAB_KEY, EARNINGS_TAB_KEY,
 ]);
 
 // 내자산 묶음 — 내주식 + 내거래를 별도 드롭다운 하나로 (지수 묶음과 동일 방식).
@@ -386,9 +390,9 @@ export function buildTabs(holdings: Stock[], visibility?: TabVisibility, tradeCo
   const tabs: TabSpec[] = [];
   // 증시 — 지수 왼쪽. 증시 자금동향 + 실시간 지수·투자자 차트.
   if (visibility?.stockMarket ?? true) tabs.push({ key: MARKET_MONEY_TAB_KEY, label: "증시", emoji: "💰", count: 0 });
-  // 지수 — 주간·야간 두 탭(메뉴의 '📈 지수' 드롭다운). 라벨은 lib 한 벌(DASHBOARD_PAGES).
+  // 지수 — 한국·미국·순환매 세 탭(메뉴의 '📈 지수' 드롭다운). 라벨은 lib 한 벌(DASHBOARD_PAGES).
   if (showUs) {
-    const keyOf: Record<DashboardPage, string> = { day: US_MARKET_TAB_KEY, night: INDEX_NIGHT_TAB_KEY };
+    const keyOf: Record<DashboardPage, string> = { day: US_MARKET_TAB_KEY, night: INDEX_NIGHT_TAB_KEY, rot: INDEX_ROT_TAB_KEY };
     for (const p of DASHBOARD_PAGES) tabs.push({ key: keyOf[p.key], label: p.tab, emoji: p.emoji, count: 0 });
   }
   // 종목찾기(섹터별) — 섹터를 골라 그 안의 종목을 한 표로(옛 '성적표'). 종목찾기 묶음 맨 위.
@@ -407,6 +411,7 @@ export function buildTabs(holdings: Stock[], visibility?: TabVisibility, tradeCo
   }
   // 섹터 (KODEX ETF 기반 4기간 ranking + 토스 핫 테마). 반도체는 지수 대시보드 그룹으로 통합됨.
   if (showSector) tabs.push({ key: SECTOR_RANK_TAB_KEY, label: "섹터별등락", emoji: "🧩", count: 0 });
+  if (visibility?.earnings ?? true) tabs.push({ key: EARNINGS_TAB_KEY, label: "실적 일정", emoji: "📅", count: 0 });
   // 내주식 (합산) — 보유 수량 있는 모든 ticker 의 가중평균. 종목 1개 이상일 때만 노출.
   if (showMy && uniqHeld.size > 0) {
     tabs.push({ key: MY_STOCKS_TAB_KEY, label: "내주식", emoji: "📦", count: uniqHeld.size });
