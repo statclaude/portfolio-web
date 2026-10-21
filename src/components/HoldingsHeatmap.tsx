@@ -9,9 +9,12 @@ import type { Stock, Price } from "../types";
 import { squarify } from "../lib/treemap";
 import { heatColor, sectorKr } from "../lib/heatColor";
 import { fetchHeatmapForTickers, heatmapLogoUrl, type HeatmapItem } from "../lib/api";
+import { marketOfSymbol, isKrHoldingClosed, tradeSecOf, isEtfOrEtnByName, isUsExtendedTradingOpen, isQuoteStale } from "../lib/format";
 import { HEAT_SIZE_OPTS, HEAT_COLOR_OPTS, type HeatSizeBy, type HeatColorBy, type HeatGroupBy, type HeatSign } from "../lib/holdingsHeat";
 
-interface Cell { ticker: string; name: string; held: number; price: number; d1: number | null; shares: number; cost: number; tv?: HeatmapItem; krwPer: number }
+interface Cell { ticker: string; name: string; held: number; price: number; d1: number | null; shares: number; cost: number; asleep: boolean; tv?: HeatmapItem; krwPer: number }
+// 한국 종목 거래시간 — 흐림(장 안 열림) 판정용. App 의 fetchKrRegularPrices 결과를 그대로 받는다.
+interface KrRegLite { tradingEnd?: string; nextTradingStart?: string }
 
 const fmtPct = (p: number | null | undefined) => p == null ? "—" : `${p >= 0 ? "+" : ""}${p.toFixed(2)}%`;
 function fmtWon(v: number): string {
@@ -24,13 +27,15 @@ function fmtWon(v: number): string {
 const logoPx = (w: number, h: number) => Math.round(Math.max(16, Math.min(40, Math.min(w, h) * 0.22)));
 const fmtCount = (v: number) => v >= 1e8 ? `${(v / 1e8).toFixed(1)}억주` : v >= 1e4 ? `${Math.round(v / 1e4).toLocaleString()}만주` : `${Math.round(v)}주`;
 
-export function HoldingsHeatmap({ stocks, priceMap, sizeBy, colorBy, groupBy = "none", sign = "all", onOpen }: {
+export function HoldingsHeatmap({ stocks, priceMap, krRegMap, sizeBy, colorBy, groupBy = "none", sign = "all", hideFaint = false, onOpen }: {
   stocks: Stock[];
   priceMap: Map<string, Price>;
+  krRegMap?: Map<string, KrRegLite | undefined>;
   sizeBy: HeatSizeBy;
   colorBy: HeatColorBy;
   groupBy?: HeatGroupBy;
   sign?: HeatSign;
+  hideFaint?: boolean;   // 카드에서 흐린(장 안 열린) 종목 빼기 — 옛 이름 그대로(저장 키 호환)
   onOpen?: (ticker: string) => void;
 }) {
   const boxRef = useRef<HTMLDivElement>(null);
@@ -55,8 +60,15 @@ export function HoldingsHeatmap({ stocks, priceMap, sizeBy, colorBy, groupBy = "
     const base = p.prevClose || p.base || p.price;
     const prev = byTicker.get(s.ticker);
     const sh = s.shares > 0 && s.avg_price > 0 ? s.shares : 0;
+    // 흐림(장 안 열림) — 기본 종목 카드와 같은 판정. NXT 프리장(08:00~)엔 NXT 종목만 움직이고 KRX 전용 종목은
+    //   지난 정규장 값에 멈춰 있어, 둘이 섞이면 '오늘 움직임'과 '지난 거래일 움직임'이 한 지도에 칠해진다(2026-10-19).
+    const reg = krRegMap?.get(s.ticker);
+    const mk = marketOfSymbol(s.ticker);
+    const asleep = mk === "KR"
+      ? isKrHoldingClosed(reg?.tradingEnd, reg?.nextTradingStart, p.singlePrice, tradeSecOf(p.trade_dt), isEtfOrEtnByName(s.name))
+      : mk === "US" ? (!isUsExtendedTradingOpen() || isQuoteStale(p.freshTime)) : false;
     byTicker.set(s.ticker, {
-      ticker: s.ticker, name: s.name, price: p.price,
+      ticker: s.ticker, name: s.name, price: p.price, asleep,
       d1: base > 0 ? (p.price / base - 1) * 100 : null,
       held: (prev?.held ?? 0) + Math.max(0, s.shares || 0) * p.price,
       // 내 수익률용 — 여러 계좌면 수량 가중 평단(매입금액 합 ÷ 수량 합)
@@ -104,7 +116,14 @@ export function HoldingsHeatmap({ stocks, priceMap, sizeBy, colorBy, groupBy = "
     colorDef.key === "pnl" ? pnlOf(c) : colorDef.field ? (c.tv ? colorDef.field(c.tv) : null) : c.d1;
   // 부호 필터 — 색 기준 값이 +인 것만 / −인 것만. 색과 같은 값으로 걸러야 '상승만' 에 파란 칸이 안 섞인다.
   const signOk = (c: Cell) => { if (sign === "all") return true; const v = colorVal(c); return v != null && (sign === "up" ? v > 0 : v < 0); };
-  const shown = cells.filter(signOk);
+  const signed = cells.filter(signOk);
+  // 흐린 종목 제외 = **카드에서 흐린 종목**(장이 안 열려 지난 거래일 값에 멈춘 것)만 뺀다.
+  //   ⚠️ 예전엔 '색이 연한 보합 칸(±0.75% 미만)' 도 같이 뺐는데, 상승 4종목 중 +0.74·+0.18·+0.08% 셋이 사라져
+  //   '상승 1' 로 보였다(2026-10-19 사용자 지적) — 작게 오른 것도 오른 것이다. 보합 기준은 없앴다.
+  //   **일부만 잠들어 있을 때만** 뺀다. 밤·주말처럼 전부 닫혀 있으면 지난 거래일 지도가 맞는 그림이라 그대로 둔다.
+  const someAwake = signed.some(c => !c.asleep);
+  const shown = hideFaint && someAwake ? signed.filter(c => !c.asleep) : signed;
+  const sleepOut = signed.length - shown.length;
   const inputs = shown.map(c => ({ item: c, value: sizeOf(c) })).filter(x => x.value > 0);
   const missing = shown.length - inputs.length;
   // 배치 — 그룹 없음 / 섹터(섹터 묶음 안에 종목) / 등락 방향(왼→오 상승·보합·하락 고정). 히트맵 탭과 같은 방식.
@@ -126,13 +145,17 @@ export function HoldingsHeatmap({ stocks, priceMap, sizeBy, colorBy, groupBy = "
         tiles.push(...squarify(list, { x: rect.x, y: rect.y + head, w: rect.w, h: rect.h - head }));
       };
       if (groupBy === "dir") {
-        // 자리를 고정해야 날마다 비교가 된다 — 폭만 크기 합에 비례
+        // 자리를 고정해야 날마다 비교가 된다. 상승·하락은 화면을 반씩 — 크기 합에 비례시키면
+        //   하락 236 : 상승 33 같은 날 상승이 실처럼 가늘어져 안 읽힌다. 보합·값 없음만 크기 합에 비례.
         const blocks = ["상승", "보합", "하락", "값 없음"].map(k => ({ k, list: groups.get(k) ?? [] })).filter(g => g.list.length)
           .map(g => ({ ...g, total: g.list.reduce((a, x) => a + x.value, 0) }));
         const sum = blocks.reduce((a, g) => a + g.total, 0);
+        const halves = blocks.filter(g => g.k === "상승" || g.k === "하락");
+        const sideW = blocks.filter(g => !halves.includes(g)).reduce((a, g) => a + (w * g.total) / sum, 0);
         let x = 0;
         blocks.forEach((g, i) => {
-          const bw = i === blocks.length - 1 ? w - x : (w * g.total) / sum;
+          const bw = i === blocks.length - 1 ? w - x
+            : halves.includes(g) ? (w - sideW) / halves.length : (w * g.total) / sum;
           place(g.k, g.list, { x, y: 0, w: bw, h });
           x += bw;
         });
@@ -225,6 +248,7 @@ export function HoldingsHeatmap({ stocks, priceMap, sizeBy, colorBy, groupBy = "
         {sizeBy === "marketCap" && " · ETF 는 순자산총액"}
         {(sizeBy === "marketCap" || sizeBy === "traded") && " · 미국 종목은 원화 환산"}
         {sign !== "all" && ` · ${sign === "up" ? "+" : "−"}인 ${shown.length}종목만(전체 ${cells.length})`}
+        {sleepOut > 0 && ` · 장 안 열린 종목 ${sleepOut}개 제외`}
         {missing > 0 && ` · 값이 없어 빠진 종목 ${missing}개`}
       </div>
     </div>

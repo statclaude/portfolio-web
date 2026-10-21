@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Settings, StickyNote } from "lucide-react";
 import type { Stock, Price, Investor, Consensus, Memo } from "../types";
-import type { PricePoint } from "../lib/api";
-import { formatSigned, signColor, formatVolume, isKrHoldingClosed, isEtfByName, etfActiveType, holdingYesterdayBaseSum, nowKstDateStr, krCloseTimeLabel, krCloseImminentMin, krFinalCloseHHMM, krSinglePriceSession, fmtAgo, marketOfSymbol, isUsExtendedTradingOpen, isQuoteStale, tradeSecOf, isEtfOrEtnByName } from "../lib/format";
+import { twoDayTodayX, TWO_DAY_HALF, type PricePoint, type DaySeries } from "../lib/api";
+import { formatSigned, signColor, formatVolume, isKrHoldingClosed, isEtfByName, etfActiveType, holdingYesterdayBaseSum, nowKstDateStr, krCloseTimeLabel, krCloseImminentMin, krFinalCloseHHMM, krSinglePriceSession, fmtAgo, marketOfSymbol, isUsExtendedTradingOpen, isQuoteStale, tradeSecOf, isEtfOrEtnByName, isKrAfterRegularClose } from "../lib/format";
 import { getDimSleepingEnabled } from "../lib/proxyConfig";
 import { useEtfCount } from "../lib/etfIndex";
 import { memoTagClass } from "../lib/memoColor";
@@ -26,6 +26,7 @@ interface KrRegInfo {
   tradingEnd?: string;
   nextTradingStart?: string;
   exchange?: string;
+  fromYahoo?: boolean;   // regularPrice 가 야후 15:30 종가로 확인됨(아니면 토스 meta = NXT 섞인 값)
 }
 interface Props {
   stock: Stock;
@@ -39,7 +40,7 @@ interface Props {
   warning?: string;
   loading?: boolean;
   chart?: number[];   // 비거래일 sparkline 용 일봉 종가 시계열 (3개월)
-  dayChart?: number[];   // 당일 10분봉 종가 — 그래프 설정이 24시간이면 배경에 이걸 그린다
+  dayChart?: DaySeries;   // 당일 10분봉(시간 축·어제 종가 포함) — 그래프 설정이 24시간이면 배경에 이걸 그린다
   priceHistory?: PricePoint[];  // OHLC 포함 — 가격 박스 hover tooltip 의 1개월 캔들차트용
   otherGroups?: string[];  // 같은 ticker 가 속한 다른 그룹 이름들 (현재 그룹 제외)
   heldGroups?: Set<string>;  // 그 중 보유수량>0 인 그룹들 (붉은색 표시용)
@@ -551,8 +552,13 @@ export function StockCard({
   const tradeSec = price.trade_dt ? Math.floor(Date.parse(price.trade_dt) / 1000) : undefined;
   const agoLabel = sleeping ? fmtAgo(tradeSec) : "";
   // 마감 책갈피(좌상단) 표시 여부 — 있으면 갱신 책갈피는 자리 양보
-  const showCloseTag = !!(krReg && sleeping && krReg.regularPrice !== price.price
-    && price.price > 0 && Math.abs(krReg.regularPrice - price.price) / price.price < 0.15);
+  //   ★ 흐릴 때만이 아니라 **정규장이 끝난 뒤 NXT 애프터 중(15:30~20:00)** 에도 — 그땐 카드가 안 흐려져
+    //   오늘 정규장 종가가 어디에도 안 보였다(2026-10-19). 값이 같아도 띄운다(큰 숫자가 정규장 종가인지 NXT 인지 알 수 있게).
+  //   ★ 정규장 종가는 **야후로 확인된 값**(fromYahoo)일 때만 믿는다 — 확인 못 하면 토스 meta 는 NXT 현재가라
+  //   책갈피가 큰 숫자와 같은 값으로 따라 움직인다. 그땐 예전 규칙(흐림 + 값이 다를 때만)으로 물러선다.
+  const showCloseTag = !!(krReg && price.price > 0 && Math.abs(krReg.regularPrice - price.price) / price.price < 0.15
+    && (krReg.fromYahoo ? (sleeping || (!isUsHolding && isKrAfterRegularClose()))
+                        : (sleeping && krReg.regularPrice !== price.price)));
 
   // 어제보다 — base (비거래일엔 price 와 동일) 기반. UI 표시용
   const dayDiff = price.price - price.base;
@@ -593,8 +599,30 @@ export function StockCard({
   // 전체수익 (보유 종목만 — shares > 0)
   const hasPosition = stock.shares > 0 && stock.avg_price > 0;
   // 배경 그래프 — 앱 전체 설정(3개월 | 24시간). 24시간 시계열이 없으면 3개월.
-  const bgChart = pickCardChart(chartRange, chart ?? [], dayChart);
-  const bgIsDay = bgChart === dayChart;
+  const bgIsDayRaw = chartRange === "day" && !!dayChart && dayChart.closes.length > 0;
+  // 24시간 차트 — 시간 축·어제 종가선(위 빨강·아래 파랑)·정규장 시작선 + **끝에 지금 가격**(5초 폴링, 추가 호출 0).
+  //   미국 종목 시계열은 달러라 지금 가격도 달러(priceUsd)로 붙인다. 오늘 차트이고 지금이 축 안·마지막 봉 뒤일 때만.
+  const dayLive = (() => {
+    if (!bgIsDayRaw || !dayChart?.xs?.length) return dayChart;
+    const isUs = !/\d/.test(stock.ticker);
+    const live = isUs ? price.priceUsd : price.price;
+    if (!(live && live > 0)) return dayChart;
+    const tz = isUs ? "America/New_York" : "Asia/Seoul";
+    const parts = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })
+      .formatToParts(new Date()).reduce<Record<string, string>>((a, p) => { a[p.type] = p.value; return a; }, {});
+    if (`${parts.year}-${parts.month}-${parts.day}` !== dayChart.date) return dayChart;
+    const mins = (Number(parts.hour) % 24) * 60 + Number(parts.minute);
+    const f = isUs ? mins / (24 * 60) : (mins - 8 * 60) / (12 * 60);
+    const x = dayChart.twoDay ? twoDayTodayX(f) : f;   // 어제+오늘 축이면 오늘은 오른쪽 절반
+    // 토스 봉 시각은 '끝나는 시각' — 지금이 진행 중인 봉 안이면 그 봉 바로 뒤에 붙인다
+    const lastX = dayChart.xs[dayChart.xs.length - 1];
+    if (x > 1 || x < lastX - (dayChart.twoDay ? TWO_DAY_HALF : 1) * 10 / (isUs ? 24 * 60 : 12 * 60)) return dayChart;
+    return { ...dayChart, closes: [...dayChart.closes, live], xs: [...dayChart.xs, Math.max(x, lastX + 0.002)] };
+  })();
+  // 오늘 봉 1개뿐이면 지금 가격을 붙여야 선이 된다 — 그래도 2점이 안 되면 3개월로
+  const bgIsDay = bgIsDayRaw && !!dayLive && dayLive.closes.length > 1;
+  const bgChart = bgIsDay ? dayLive!.closes : pickCardChart("all", chart ?? [], undefined);
+
   const pnl = hasPosition ? Math.round((price.price - stock.avg_price) * stock.shares) : 0;
   const pnlPct = hasPosition ? ((price.price - stock.avg_price) / stock.avg_price) * 100 : 0;
 
@@ -1045,12 +1073,13 @@ export function StockCard({
             {agoLabel}
           </div>
         )}
+        {/* 마감 책갈피는 보유 주수 상자(z-10) **위**(z-20)·불투명 — 좁은 카드에선 주수 상자를 가려도 된다(사용자 결정 2026-10-20) */}
         {showCloseTag && (
-          <div className={`absolute -top-2 left-1 z-10 px-1.5 py-0
+          <div className={`absolute -top-2 left-1 z-20 px-1.5 py-0
                            border rounded text-[10px] leading-tight whitespace-nowrap
-                           ${krReg!.regularPct > 0 ? "bg-rose-100/20 border-rose-300/20"
-                             : krReg!.regularPct < 0 ? "bg-blue-100/20 border-blue-300/20"
-                             : "bg-white/20 border-gray-300/20"}`}>
+                           ${krReg!.regularPct > 0 ? "bg-rose-50 border-rose-300/60"
+                             : krReg!.regularPct < 0 ? "bg-blue-50 border-blue-300/60"
+                             : "bg-white border-gray-300/60"}`}>
             <span className="text-gray-500">마감 </span>
             <span className="text-gray-800 tabular-nums">
               {Math.round(krReg!.regularPrice).toLocaleString()}
@@ -1061,9 +1090,20 @@ export function StockCard({
                                 : "text-gray-700"}`}>
               ({krReg!.regularPct >= 0 ? "+" : ""}{krReg!.regularPct.toFixed(2)}%)
             </span>
+            {/* 정규장 종가 → 지금(큰 숫자) 차이 — NXT 애프터·다음 날 프리에서 얼마나 더 움직였나(사용자 요청 2026-10-20) */}
+            {(() => {
+              const gap = (price.price / krReg!.regularPrice - 1) * 100;
+              if (!Number.isFinite(gap) || Math.abs(gap) < 0.005) return null;
+              return (
+                <span className={`tabular-nums ml-1 font-bold text-white px-1 rounded ${gap > 0 ? "bg-rose-600/60" : "bg-blue-600/60"}`}
+                      title="정규장 종가 대비 지금(큰 숫자) 차이">
+                  {gap > 0 ? "+" : "−"}{Math.abs(gap).toFixed(2)}%
+                </span>
+              );
+            })()}
           </div>
         )}
-        {!sleeping && price.singlePrice && price.price > 0 && closeImminentMin == null && (
+        {!sleeping && !showCloseTag && price.singlePrice && price.price > 0 && closeImminentMin == null && (
           <div className="absolute -top-2 left-1 z-10 px-1.5 py-0
                           border rounded text-[10px] leading-tight whitespace-nowrap
                           bg-yellow-100/30 border-yellow-300/30">
@@ -1107,7 +1147,12 @@ export function StockCard({
           {/* 배경 그래프 — 3개월 추이 또는 24시간(당일 10분봉, 앱 전체 설정). 색은 차트 자체 추세.
               24시간엔 목표가·평단 선을 뺀다 — 하루 폭이 좁아 선이 축을 넓히면 그래프가 납작해진다. */}
           {bgChart.length > 1 && (
-            <Sparkline data={bgChart} width={300} height={80}
+            <Sparkline data={bgIsDay && dayLive ? dayLive.closes : bgChart} width={300} height={80}
+                       xs={bgIsDay ? dayLive?.xs : undefined} baseline={bgIsDay ? dayLive?.base : undefined}
+                       markIndex={bgIsDay ? dayLive?.openIdx : undefined}
+                       closeIndex={bgIsDay ? dayLive?.closeIdx : undefined}
+                       breakIndex={bgIsDay ? dayLive?.breakIdx : undefined}
+                       prevBaseline={bgIsDay ? dayLive?.prevBase : undefined}
                        target={bgIsDay ? undefined : consensus?.target}
                        avgPrice={!bgIsDay && hasPosition ? stock.avg_price : undefined}
                        entry={bgIsDay ? undefined : memo?.entryPrice}
