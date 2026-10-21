@@ -52,6 +52,8 @@ export const US_PAIRS: Pair[] = [
   { symbol: "^VIX",     name: "VIX",         desc: "공포지수 — 20↑ 경계, 30↑ 공포", tier: "T0", sector: "dashboard", direction: "inverse" },
   { symbol: "^TIPS10",  name: "미국 10Y 실질", desc: "2%↑ 부담, 2.5%↑ 위험 — 10년 물가연동국채(TIPS) 실질금리. 성장주·금에 부담, 급등 속도가 더 중요. CNBC", tier: "T0", sector: "dashboard", direction: "inverse" },
   { symbol: "^MOVE",    name: "MOVE",        desc: "채권 공포지수 — 미 국채 변동성. 100↑ 경계, 120↑ 불안", tier: "T0", sector: "dashboard", direction: "inverse" },
+  // CNN 공포·탐욕 — 가상 심볼(api.ts fetchCnnFgIndex). 탐욕(↑)이 위험선호라 direct. 0~25 극공포·75~100 극탐욕
+  { symbol: "CNNFG",    name: "공포·탐욕",    desc: "CNN Fear & Greed — 미국 투자심리 0~100 (25↓ 극공포·45↓ 공포·55↑ 탐욕·75↑ 극탐욕). 극단은 역발상 신호. CNN", tier: "T0", sector: "dashboard", direction: "direct" },
   { symbol: "VKOSPI",   name: "V-KOSPI",     desc: "코스피200 변동성지수 — 한국 공포지수 (20↑ 경계, 30↑ 공포). CNBC", tier: "T0", sector: "dashboard", direction: "inverse" },
   // 행 2 — 원자재 + 위험자산
   //   색은 '한국 주가에 유리한가' 기준(사용자 결정 2026-10-08): 원자재 수입국이라 유가·가스·곡물 상승은 원가·물가 부담,
@@ -64,6 +66,16 @@ export const US_PAIRS: Pair[] = [
   //   유럽·중동·아시아 도입 원유의 기준이라 국내 정유주는 WTI 보다 이쪽에 더 붙는다.
   { symbol: "BZ=F",     name: "브렌트유",     desc: "국제 유가(북해) — 국내 정유·항공 원가의 기준", tier: "T0", sector: "dashboard", direction: "inverse" },
   { symbol: "NG=F",     name: "천연가스",     desc: "헨리허브 — LNG·발전·난방·화학", tier: "T0", sector: "dashboard", direction: "inverse" },
+  // 메모리 현물가 — 머니랜드 DRAM 대시보드(api.ts MEM_SERIES). 오르면 메모리 업황 개선 → 삼성·하이닉스에 우호 = direct
+  { symbol: "DRAMIDX=ML", name: "DRAM 현물지수", desc: "DRAM 현물가 종합 지수(2025-06-23 = 100 기준 환산값) — 메모리 업황 체온계. 머니랜드(원 출처 DRAMeXchange)", tier: "T0", sector: "dashboard", direction: "direct" },
+  { symbol: "DDR5=ML",  name: "DDR5 16Gb",   desc: "DDR5 16Gb 칩 현물 평균가(USD) — 현행 주력 DRAM, 매일 갱신", tier: "T0", sector: "dashboard", direction: "direct" },
+  { symbol: "DDR4=ML",  name: "DDR4 8Gb",    desc: "DDR4 8Gb 칩 현물 평균가(USD) — 구형 DRAM(단종 쇼티지), 매일 갱신", tier: "T0", sector: "dashboard", direction: "direct" },
+  { symbol: "RDIMM=ML", name: "서버 RDIMM",  desc: "DDR5 RDIMM 32GB 서버 모듈 현물가(USD) — AI·서버 수요, 주 1회 갱신", tier: "T0", sector: "dashboard", direction: "direct" },
+  { symbol: "GDDR6=ML", name: "GDDR6 8Gb",   desc: "GDDR6 8Gb 그래픽 메모리 현물가(USD) — GPU 수요, 주 1회 갱신", tier: "T0", sector: "dashboard", direction: "direct" },
+  { symbol: "NAND=ML",  name: "NAND 웨이퍼", desc: "NAND 512Gb TLC 웨이퍼 현물가(USD) — 낸드 업황, 주 1회 갱신", tier: "T0", sector: "dashboard", direction: "direct" },
+  // 리튬·니켈 — 시나 금융 가상 심볼(api.ts SINA_METALS). 오르면 국내 양극재 판가↑ → 2차전지에 우호 = direct
+  { symbol: "LITHIUM=F", name: "리튬",       desc: "탄산리튬 선물(광저우, CNY/톤) — 2차전지·ESS 공통 원료. 양극재 판가가 따라간다. 시나 금융", tier: "T0", sector: "dashboard", direction: "direct" },
+  { symbol: "NICKEL=F", name: "니켈",        desc: "LME 니켈(USD/톤) — 하이니켈(NCM) 양극재 원료, ESS(LFP)엔 거의 안 씀. 시나 금융", tier: "T0", sector: "dashboard", direction: "direct" },
   { symbol: "ZW=F",     name: "밀",          desc: "시카고 소맥 선물 — 사료·식품 원가. 토스 원자재에 같이 온다", tier: "T0", sector: "dashboard", direction: "inverse" },
   // 암호화폐 — 토스가 **원화(VWAP.KRW-*)** 로 준다. 심볼은 야후식(-USD)이지만 값은 원이다.
   { symbol: "BTC-USD",  name: "비트코인",    desc: "위험자산 — 한국 IT/플랫폼 상관", tier: "T0", sector: "dashboard", direction: "direct" },
@@ -217,6 +229,8 @@ export const US_PAIRS: Pair[] = [
   { symbol: "QCOM",     name: "퀄컴",         desc: "Qualcomm — 모바일 AP(스냅드래곤)·모뎀 팹리스. 스마트폰 수요·온디바이스 AI 가늠자", tier: "T0", sector: "dashboard", direction: "direct" },
   { symbol: "TSM",      name: "TSMC(ADR)",   desc: "TSMC ADR(뉴욕 상장) — 세계 최대 파운드리(NVDA·AMD·애플 칩 위탁생산). 반도체 전방수요·삼성 파운드리 경쟁 가늠자", tier: "T0", sector: "dashboard", direction: "direct" },
   // 일본 반도체 — 한국과 같은 시간에 열리는 도쿄 본주(야후). 한국 반도체와 당일 상관 0.5~0.69.
+  { symbol: "^HSI",     name: "홍콩항셍",       desc: "홍콩 항셍지수 — 텐센트·알리바바·HSBC 등. 중국 경기·빅테크 체온계 (야후)", tier: "T0", sector: "dashboard", direction: "direct" },
+  { symbol: "000001.SS", name: "상해종합",    desc: "상하이 종합지수 — 중국 본토 A주 전체. 한국 수출(중국) 경기 가늠자 (야후)", tier: "T0", sector: "dashboard", direction: "direct" },
   { symbol: "^N225",    name: "닛케이",       desc: "닛케이225 — 도쿄일렉트론·어드반테스트 등 반도체 비중 큼", tier: "T0", sector: "dashboard", direction: "direct" },
   { symbol: "8035.T",   name: "도쿄일렉트론", desc: "Tokyo Electron — 세계 3위 전공정 장비(증착·식각·코터). 한국 전공정 장비 가늠자", tier: "T0", sector: "dashboard", direction: "direct" },
   { symbol: "6857.T",   name: "어드반테스트", desc: "Advantest — 반도체 테스터 1위(HBM·AI칩 테스트). 한국 후공정·테스트 가늠자", tier: "T0", sector: "dashboard", direction: "direct" },
@@ -260,6 +274,11 @@ export const US_PAIRS: Pair[] = [
   { symbol: "032820.KS", name: "우리기술", desc: "원전 제어계측", tier: "T0", sector: "dashboard", direction: "direct", krStock: true },
   { symbol: "083650.KS", name: "비에이치아이", desc: "원전 보조기기", tier: "T0", sector: "dashboard", direction: "direct", krStock: true },
   { symbol: "006910.KS", name: "보성파워텍", desc: "송전 철탑", tier: "T0", sector: "dashboard", direction: "direct", krStock: true },
+  { symbol: "119850.KS", name: "지엔씨에너지", desc: "데이터센터 비상발전·ESS", tier: "T0", sector: "dashboard", direction: "direct", krStock: true },
+  { symbol: "178320.KS", name: "서진시스템", desc: "ESS 함체·시스템", tier: "T0", sector: "dashboard", direction: "direct", krStock: true },
+  { symbol: "126340.KS", name: "비나텍", desc: "슈퍼커패시터(전력 보조 저장)", tier: "T0", sector: "dashboard", direction: "direct", krStock: true },
+  { symbol: "417200.KS", name: "LS머트리얼즈", desc: "울트라커패시터·ESS 부품", tier: "T0", sector: "dashboard", direction: "direct", krStock: true },
+  { symbol: "107640.KS", name: "한중엔시에스", desc: "ESS 냉각 장치", tier: "T0", sector: "dashboard", direction: "direct", krStock: true },
   { symbol: "475150.KS", name: "SK이터닉스", desc: "신재생 발전 개발", tier: "T0", sector: "dashboard", direction: "direct", krStock: true },
   { symbol: "010060.KS", name: "OCI홀딩스", desc: "폴리실리콘", tier: "T0", sector: "dashboard", direction: "direct", krStock: true },
   { symbol: "322000.KS", name: "HD현대에너지솔루션", desc: "태양광 모듈", tier: "T0", sector: "dashboard", direction: "direct", krStock: true },
@@ -374,6 +393,13 @@ export const US_PAIRS: Pair[] = [
   { symbol: "033780.KS", name: "KT&G", desc: "담배·건기식", tier: "T0", sector: "dashboard", direction: "direct", krStock: true },
   { symbol: "271560.KS", name: "오리온", desc: "제과", tier: "T0", sector: "dashboard", direction: "direct", krStock: true },
   { symbol: "097950.KS", name: "CJ제일제당", desc: "식품·바이오", tier: "T0", sector: "dashboard", direction: "direct", krStock: true },
+  { symbol: "004170.KS", name: "신세계", desc: "백화점·면세", tier: "T0", sector: "dashboard", direction: "direct", krStock: true },
+  { symbol: "023530.KS", name: "롯데쇼핑", desc: "백화점·마트", tier: "T0", sector: "dashboard", direction: "direct", krStock: true },
+  { symbol: "069960.KS", name: "현대백화점", desc: "백화점·면세", tier: "T0", sector: "dashboard", direction: "direct", krStock: true },
+  { symbol: "008770.KS", name: "호텔신라", desc: "면세점", tier: "T0", sector: "dashboard", direction: "direct", krStock: true },
+  { symbol: "139480.KS", name: "이마트", desc: "대형마트", tier: "T0", sector: "dashboard", direction: "direct", krStock: true },
+  { symbol: "282330.KS", name: "BGF리테일", desc: "편의점 CU", tier: "T0", sector: "dashboard", direction: "direct", krStock: true },
+  { symbol: "007070.KS", name: "GS리테일", desc: "편의점 GS25·홈쇼핑", tier: "T0", sector: "dashboard", direction: "direct", krStock: true },
   { symbol: "035420.KS", name: "NAVER", desc: "검색·커머스·AI", tier: "T0", sector: "dashboard", direction: "direct", krStock: true },
   { symbol: "035720.KS", name: "카카오", desc: "플랫폼", tier: "T0", sector: "dashboard", direction: "direct", krStock: true },
   { symbol: "018260.KS", name: "삼성SDS", desc: "IT 서비스·클라우드", tier: "T0", sector: "dashboard", direction: "direct", krStock: true },
@@ -506,6 +532,14 @@ export const SECTOR_ORDER: string[] = [];
 const YASUN_VIRTUAL = new Set<string>(["^KS200N", "^KQ150N"]);
 
 // 모든 Yahoo 심볼 한 번에 fetch 하기 위한 평탄화 (현물 + 선물)
+// 24시간(어제+오늘 5분봉) 카드 차트를 야후 spark 로 받을 심볼 — PC·모바일이 같은 목록을 쓴다(한 벌).
+//   빼는 것: 한국 종목·ETF(.KS — 토스 분봉), 하이퍼리퀴드 무기한(-PERP), 야간선물(yasun), 그리고
+//   야후에 분봉이 없는 가상 심볼 — 메모리 현물(=ML, 일·주 단위)·CNN 공포탐욕·V-KOSPI(CNBC 일봉)·
+//   미 2년물·TIPS(토스 당일 봉)·리튬/니켈(시나 일봉). 점검 2026-10-21.
+const NO_INTRADAY = new Set(["CNNFG", "VKOSPI", "^US2Y", "^TIPS10", "LITHIUM=F", "NICKEL=F"]);
+export const DAY_SPARK_SYMBOLS: string[] = [...new Set(US_PAIRS.flatMap(p => [p.symbol, p.future ?? ""]))]
+  .filter(s => s && !/\.KS$/.test(s) && !/-PERP$/.test(s) && !/=ML$/.test(s) && !YASUN_VIRTUAL.has(s) && !NO_INTRADAY.has(s));
+
 export function allYahooSymbols(): { symbol: string; name: string }[] {
   const result: { symbol: string; name: string }[] = [];
   for (const p of US_PAIRS) {

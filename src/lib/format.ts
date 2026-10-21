@@ -98,7 +98,7 @@ export function isEarlyMorningKst(): boolean {
 // ─────────── 시장 시간 판정 (데스크톱 v1/v2 동일 로직) ───────────
 
 // 심볼 → 시장 분류
-export type Market = "KR" | "KR_NIGHT" | "US" | "US_INDEX" | "JP" | "TW" | "OTHER";
+export type Market = "KR" | "KR_NIGHT" | "US" | "US_INDEX" | "JP" | "TW" | "HK" | "CN" | "OTHER";
 
 export function marketOfSymbol(symbol: string): Market {
   if (!symbol) return "OTHER";
@@ -113,6 +113,9 @@ export function marketOfSymbol(symbol: string): Market {
   // 아시아 — 도쿄(.T)·대만(.TW) 본주와 지수. 한국과 같은 시간대라 흐림도 그 시장 시간으로.
   if (symbol === "^N225" || symbol.endsWith(".T")) return "JP";
   if (symbol === "^TWII" || symbol.endsWith(".TW")) return "TW";
+  // 홍콩(항셍)·중국 본토(상해종합 000001.SS) — '000001' 이 숫자 6자리라도 .SS 가 붙어 위 한국 판정엔 안 걸린다
+  if (symbol === "^HSI" || symbol === "^HSCE" || symbol.endsWith(".HK")) return "HK";
+  if (symbol.endsWith(".SS") || symbol.endsWith(".SZ")) return "CN";
   // 환율/선물/암호화폐/지수 — 24h
   if (symbol.includes("=") || symbol === "DX-Y.NYB" || symbol.includes("-")) return "OTHER";
   // VIX / 미국 국채금리 — Yahoo 가 확장시간(04:00-20:00 ET)까지 갱신 → US 분류
@@ -181,7 +184,8 @@ function dateStrInTz(tz: string): string {
 export function isMarketOpen(market: Market): boolean {
   const TZ_MAP: Record<Market, string | null> = {
     KR: "Asia/Seoul", KR_NIGHT: "Asia/Seoul", US: "America/New_York",
-    US_INDEX: "America/New_York", JP: "Asia/Tokyo", TW: "Asia/Taipei", OTHER: null,
+    US_INDEX: "America/New_York", JP: "Asia/Tokyo", TW: "Asia/Taipei",
+    HK: "Asia/Hong_Kong", CN: "Asia/Shanghai", OTHER: null,
   };
   const tz = TZ_MAP[market];
   if (!tz) return true;
@@ -209,6 +213,10 @@ export function isMarketOpen(market: Market): boolean {
     case "US_INDEX":return 9*60 + 30  <= hhmm && hhmm < 16*60;
     case "JP":      return 8*60 + 30  <= hhmm && hhmm < 15*60 + 30;
     case "TW":      return 9*60       <= hhmm && hhmm < 13*60 + 30;   // 대만 09:00-13:30
+    // 홍콩 09:30-16:00 · 중국 본토 09:30-15:00 (현지 시각). 점심 휴장(홍콩 12-13시·본토 11:30-13시)은 일본처럼 열림으로 둔다.
+    //   휴장일(홍콩 중양절 등)은 시계로 못 잡는다 — 야후 regularMarketTime 정체(isQuoteStale 90분)가 흐린다.
+    case "HK":      return 9*60 + 30  <= hhmm && hhmm < 16*60;
+    case "CN":      return 9*60 + 30  <= hhmm && hhmm < 15*60;
     default:        return true;
   }
 }
@@ -298,6 +306,14 @@ export function isUsAfterMarketOpen(): boolean {
   return 16 * 60 <= hhmm && hhmm < 20 * 60;
 }
 
+// 미국 오버나잇(20:00~다음날 04:00 ET) — 애프터가 끝나고 다음 거래일 프리마켓 전. 토스는 이 구간부터
+//   기준가(base)를 '오늘 정규장 종가' 로 바꾸지만, 화면은 다음 프리마켓 전까지 '어제 종가 대비' 를 유지한다.
+export function isUsOvernightNow(): boolean {
+  const t = nowInTz("America/New_York");
+  const hhmm = t.hour * 60 + t.minute;
+  return hhmm >= 20 * 60 || hhmm < 4 * 60;
+}
+
 // yasun.gg 한국 선물 — 현재 표시 데이터가 '야간 세션' 소속인지.
 //   세션 개장 시각 기준으로 소유권 전환: 야간(18:00 개장)은 다음날 주간 개장(09:00) 전까지,
 //   주간(09:00 개장)은 야간 개장(18:00) 전까지. → 마감 대기 구간도 직전 세션 라벨 유지.
@@ -352,6 +368,15 @@ export function krCloseTimeLabel(tradingEnd?: string): string {
     if (Number.isFinite(ms) && ms > Date.now()) return fmtKstHHMM(tradingEnd);
   }
   return "18:00";
+}
+
+// 한국 정규장(15:30)이 오늘 이미 끝났나 — 평일 15:30~24:00 KST. 이 시간엔 NXT 애프터(~20:00)가 열려 있어
+//   카드가 흐려지지 않지만, 토스 meta close 는 이미 **오늘 정규장 종가**다(2026-10-19 18:52 실측: 하이닉스
+//   meta 1,293,000 = 네이버 KRX 종가 / details 1,294,000 = NXT). 마감 책갈피를 이 시간에도 띄우는 근거.
+//   ⚠️ 08:00~09:00 NXT 프리장엔 meta close 가 프리장 가격으로 바뀐다 — 그 시간은 여기서 제외된다.
+export function isKrAfterRegularClose(): boolean {
+  const t = nowInTz("Asia/Seoul");
+  return t.weekday >= 1 && t.weekday <= 5 && t.hour * 60 + t.minute >= 15 * 60 + 30;
 }
 
 // 단일가 세션 종류 — 09:00 이전이면 프리장(장전 동시호가/단일가),

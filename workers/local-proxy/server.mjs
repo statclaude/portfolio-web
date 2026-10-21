@@ -31,6 +31,12 @@ const ALLOWED_HOSTS = new Set([
   "query2.finance.yahoo.com",
   "api.investing.com",
   "yasun.gg",
+  "finance.daum.net",
+  "production.dataviz.cnn.io",
+  "hq.sinajs.cn",
+  "stock2.finance.sina.com.cn",
+  "moneyland.co.kr",
+  "markets.hankyung.com",
   "scanner.tradingview.com",
 ]);
 
@@ -141,6 +147,18 @@ function upstreamHeaders(t) {
   } else if (t.hostname.includes("naver")) {
     h["Referer"] = "https://finance.naver.com/";
     h["Accept-Language"] = "ko-KR,ko;q=0.9";
+  } else if (t.hostname === "finance.daum.net") {
+    h["Referer"] = "https://finance.daum.net/";
+  } else if (t.hostname.endsWith("sina.com.cn") || t.hostname === "hq.sinajs.cn") {
+    h["Referer"] = "https://finance.sina.com.cn/";
+  } else if (t.hostname === "markets.hankyung.com") {
+    h["Authorization"] = "Bearer 0ZdNlr7LrQoawewqweq78k6usasBsqhqSIaUarSTf8mxnHuQVh9CvKAfpUy94LhBmZMg";   // 한경 프론트엔드 번들의 공개 키 — 없으면 403
+    h["Referer"] = "https://markets.hankyung.com/";
+    h["Accept"] = "application/json";
+  } else if (t.hostname === "production.dataviz.cnn.io") {
+    h["Origin"] = "https://edition.cnn.com";
+    h["Referer"] = "https://edition.cnn.com/";
+    h["Accept-Language"] = "en-US,en;q=0.9";
   } else if (t.hostname.includes("yasun.gg")) {
     h["Referer"] = "https://yasun.gg/";
     h["Accept"] = "application/json";

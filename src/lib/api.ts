@@ -8,7 +8,7 @@ import {
 } from "./proxyConfig";
 import { isExtensionProxyReady, fetchViaExtension } from "./extensionProxy";
 import { incrementProxyCall, cleanupOldProxyCalls } from "./usageCounter";
-import { isKrNightSession, krFuturesName, isKrFuturesTradingNow, isUsAfterMarketOpen, isUsExtendedTradingOpen, nowKstDateStr } from "./format";
+import { isKrNightSession, krFuturesName, isKrFuturesTradingNow, isUsAfterMarketOpen, isUsExtendedTradingOpen, nowKstDateStr, isMarketOpen, isKrAfterRegularClose, isUsOvernightNow } from "./format";
 import { rememberTossCode, getTossCode } from "./toss";
 
 // 앱 로드 시 1회 — 30일 이상 된 일자 키 정리
@@ -278,6 +278,7 @@ export interface TossUsPrice {
   closeKrw: number;    // 토스 환산 원화 정규장 종가 (토스 앱 표시값)
   baseKrw: number;     // 토스 환산 원화 직전(어제) 종가
   afterCloseKrw: number; // 애프터장 원화 현재가 (16:00~20:00 ET, 없으면 0)
+  afterClose: number;    // 애프터장 달러 현재가 (16:00~20:00 ET, 없으면 0)
   pct: number;         // (close - base) / base × 100
   tradeDateTime: string;
 }
@@ -291,7 +292,7 @@ export async function fetchTossUsPrices(codes: string[]): Promise<Map<string, To
     const data = await resp.json() as {
       result?: Array<{
         code: string; close: number; base: number; tradeDateTime: string;
-        closeKrw?: number; baseKrw?: number; afterMarketCloseKrw?: number;
+        closeKrw?: number; baseKrw?: number; afterMarketCloseKrw?: number; afterMarketClose?: number;
       }>;
     };
     for (const item of (data.result ?? [])) {
@@ -304,6 +305,7 @@ export async function fetchTossUsPrices(codes: string[]): Promise<Map<string, To
         code: item.code, close: item.close, base: item.base,
         closeKrw, baseKrw,
         afterCloseKrw: item.afterMarketCloseKrw && item.afterMarketCloseKrw > 0 ? item.afterMarketCloseKrw : 0,
+        afterClose: item.afterMarketClose && item.afterMarketClose > 0 ? item.afterMarketClose : 0,   // 애프터 현재가(달러)
         pct, tradeDateTime: item.tradeDateTime,
       });
     }
@@ -324,18 +326,76 @@ export async function fetchTossUsStockCandles(symbol: string, count = 120): Prom
 // 종목 당일 10분봉 종가 — 카드 배경 '24시간' 차트용. 국내 kr-s(NXT 포함 통합 08~20시), 미국 us-s(오버나이트 포함).
 //   응답은 최신→과거, 여러 날이 섞여 오므로 **가장 최근 날짜(현지 날짜)** 봉만 남긴다.
 //   빈 결과는 던진다 — 일시적 0건이 staleTime 동안 굳지 않게(빈 캐시 금지).
-export async function fetchTossIntraday(ticker: string): Promise<number[]> {
+// 토스 분봉을 '그날 처음'까지 이어받기 — 한 번에 450개가 상한이라 모자라면
+//   응답의 nextDateTime 을 from 으로 넘겨 더 받는다(최대 maxPages). 반환은 최신 → 과거 순(토스 응답과 같다).
+type TossBar = { dt: string; close: number; base?: number };
+//   5분봉 — 토스·야후 **둘 다 있는 간격**으로 통일(사용자 결정 2026-10-21). 어제+오늘 이틀:
+//   한국 288개 = 1콜, 미국 576개 = 2콜(450개 상한 → 이어받기).
+const TOSS_DAY_MIN = 5;
+async function fetchTossMinuteBars(path: string, maxPages: number): Promise<TossBar[]> {
+  const out: TossBar[] = [];
+  let from: string | undefined;
+  for (let page = 0; page < maxPages; page++) {
+    const url = `https://wts-info-api.tossinvest.com/api/v1/c-chart/${path}/min:${TOSS_DAY_MIN}?count=450${from ? `&from=${encodeURIComponent(from)}` : ""}`;
+    const r = await fetchProxied(url);
+    if (!r.ok) break;
+    const res = ((await r.json()) as { result?: { candles?: TossBar[]; nextDateTime?: string } }).result;
+    const cs = (res?.candles ?? []).filter(c => c.dt && c.close > 0);
+    out.push(...cs);
+    // 날짜가 3개째 보이면(= 어제까지 다 받았다) 그만
+    if (!cs.length || !res?.nextDateTime || new Set(out.map(c => c.dt.slice(0, 10))).size >= 3) break;
+    from = res.nextDateTime;
+  }
+  return out;
+}
+
+// 분봉(최신→과거) → **어제 + 오늘** 두 날을 이어 붙인 시계열(사용자 요청 2026-10-21).
+//   가로축 왼쪽 절반 = 직전 거래일, 오른쪽 절반 = 최신 날(오늘) — 각 날은 한국 08:00~20:00 / 미국 00:00~24:00 시간 축.
+//   장 초반에 오늘 봉이 적어 그래프 대부분이 비던 문제. 기준선(base)·정규장 시작(openIdx)은 **오늘** 것.
+//   두 날 사이엔 빈칸(TWO_DAY_GAP)을 둔다 — 한국 주식은 어제 20:00 과 오늘 08:00 이 맞닿아, 선을 끊어도
+//   세로선처럼 보였다(ETF 는 NXT 가 없어 원래 비어 보임 → 카드마다 달라 보이던 문제).
+export const TWO_DAY_GAP = 0.04;
+export const TWO_DAY_HALF = (1 - TWO_DAY_GAP) / 2;   // 하루가 차지하는 폭
+/** 오늘 하루 안 위치(0~1) → 어제+오늘 축의 x(오른쪽 칸) */
+export const twoDayTodayX = (f: number) => 1 - TWO_DAY_HALF + f * TWO_DAY_HALF;
+function buildTwoDaySeries(rows: TossBar[], isKr: boolean): DaySeries | null {
+  const [startMin, spanMin, openHHMM, closeHHMM] = isKr ? [8 * 60, 12 * 60, "09:00", "15:30"] : [0, 24 * 60, "09:30", "16:00"];
+  const frac = (dt: string) => Math.min(1, Math.max(0, (Number(dt.slice(11, 13)) * 60 + Number(dt.slice(14, 16)) - startMin) / spanMin));
+  const days = [...new Set(rows.map(c => c.dt.slice(0, 10)))];         // 최신 날짜 먼저
+  const barsOf = (d?: string) => d ? rows.filter(c => c.dt.slice(0, 10) === d && c.close > 0).reverse() : [];
+  const li = days.findIndex(d => barsOf(d).length > 0);
+  if (li < 0) return null;
+  const latest = barsOf(days[li]), prev = barsOf(days[li + 1]);
+  const oi = latest.findIndex(c => c.dt.slice(11, 16) >= openHHMM);
+  // 정규장 종가 봉 — 토스 봉 시각은 '끝나는 시각'이라 15:30(미국 16:00) 이하인 마지막 봉. 정규장이 끝난 뒤에만.
+  const ended = latest.some(c => c.dt.slice(11, 16) >= closeHHMM);
+  const ci = ended ? latest.map(c => c.dt.slice(11, 16) <= closeHHMM).lastIndexOf(true) : -1;
+  const base = latest[latest.length - 1].base;
+  const pb = prev.length ? prev[prev.length - 1].base : undefined;   // 어제의 기준(그저께 종가) — 왼쪽 기준선
+  return {
+    closes: [...prev.map(c => c.close), ...latest.map(c => c.close)],
+    xs: [...prev.map(c => frac(c.dt) * TWO_DAY_HALF), ...latest.map(c => twoDayTodayX(frac(c.dt)))],
+    base: base && base > 0 ? base : undefined,
+    prevBase: pb && pb > 0 ? pb : undefined,
+    openIdx: oi >= 0 ? prev.length + oi : undefined,
+    closeIdx: ci > 0 ? prev.length + ci : undefined,
+    date: days[li], twoDay: true, breakIdx: prev.length > 0 ? prev.length : undefined,
+  };
+}
+
+// 종목 카드 배경 '24시간' 그래프용 당일 시계열 — 시간 축(xs)·어제 종가(base)·정규장 시작(openIdx) 포함.
+//   지수 카드(KrDaySparkline·야후 spark)와 같은 모양(어제 종가선 위 빨강·아래 파랑, 정규장 시작 세로선)으로 그리려고
+//   종가만 주던 걸 넓혔다(2026-10-21). 한국 = 08:00~20:00 KST(정규 09:00), 미국 = 00:00~24:00 ET(정규 09:30).
+//   오늘 봉이 1개라도 있으면 오늘(실시간 끝점과 이어 선이 된다), 없을 때만 직전 날. 값 단위는 한국 원·미국 **달러**(카드 원화와 다름 — 실시간 끝점은 priceUsd).
+export interface DaySeries { closes: number[]; xs?: number[]; base?: number; openIdx?: number; closeIdx?: number; date?: string; twoDay?: boolean; breakIdx?: number; prevBase?: number; todayTimes?: string[] }   // prevBase = 어제(왼쪽) 기준선   // breakIdx = 오늘 첫 봉(어제와 선을 잇지 않는다)   // twoDay = 어제(왼쪽 절반)+오늘(오른쪽 절반)
+export async function fetchTossIntraday(ticker: string): Promise<DaySeries | null> {
   const isKr = /^[\dA-Za-z]{6}$/.test(ticker) && /\d/.test(ticker);
   const code = isKr ? `A${ticker}` : (TOSS_US_STOCK_CODE[ticker] ?? getTossCode(ticker));
-  if (!code) return [];   // 코드 모름 — 3개월로 그린다
-  const target = `https://wts-info-api.tossinvest.com/api/v1/c-chart/${isKr ? "kr-s" : "us-s"}/${code}/min:10?count=150`;
-  const resp = await fetchProxied(target);
-  if (!resp.ok) throw new Error(`toss intraday ${ticker}: HTTP ${resp.status}`);
-  const data = await resp.json() as { result?: { candles?: Array<{ dt?: string; close?: number }> } };
-  const rows = (data.result?.candles ?? []).filter(c => c.dt && typeof c.close === "number" && c.close > 0);
+  if (!code) return null;   // 코드 모름 — 3개월로 그린다
+  // 5분봉 이틀(어제+오늘) — 한국 288개 = 1콜, 미국 576개 = 2콜(이어받기)
+  const rows = await fetchTossMinuteBars(`${isKr ? "kr-s" : "us-s"}/${code}`, isKr ? 1 : 2);
   if (rows.length === 0) throw new Error(`toss intraday ${ticker}: empty`);
-  const day = rows[0].dt!.slice(0, 10);   // dt 는 현지 오프셋 포함 ISO → 앞 10자리가 현지 날짜
-  return rows.filter(c => c.dt!.slice(0, 10) === day).map(c => c.close!).reverse();
+  return buildTwoDaySeries(rows, isKr);
 }
 
 // 토스 내부코드를 이미 아는 경우(TICS 구성종목 등) — 심볼→코드 변환을 건너뛴다.
@@ -1147,6 +1207,8 @@ export interface KrRegularPrice {
   ticker: string;
   regularPrice: number;
   regularPct: number;       // (regularPrice - prevClose) / prevClose × 100
+  base?: number;            // 토스 base(전일 종가) — 야후 정규장 종가로 덮을 때 등락률 기준
+  fromYahoo?: boolean;      // regularPrice 가 야후 15:30 정규장 종가로 확인됐나(아니면 토스 meta = NXT 섞인 값)
   marketState: string;
   tradingEnd?: string;      // 이번/직전 세션 종료 시각 (ISO) — 종목별(정규장 15:30 or NXT 20:00)
   nextTradingStart?: string; // 다음 세션 시작 시각 (ISO)
@@ -1216,8 +1278,57 @@ export async function fetchKrStockName(ticker: string): Promise<string | null> {
 // markets 매개변수는 호환용으로 유지 (토스는 A 코드만 사용).
 export async function fetchKrRegularPrices(
   tickers: string[],
-  _markets?: Map<string, string>,
+  markets?: Map<string, string>,
 ): Promise<Map<string, KrRegularPrice>> {
+  const out = await fetchKrRegularPricesToss(tickers);
+  await overlayYahooKrClose(out, markets);
+  return out;
+}
+
+// ★ 토스 meta close 는 **정규장 종가가 아니다** — 15:30 뒤 NXT 애프터(~20:00)·밤에도 NXT 최신가를 따라 움직인다
+//   (2026-10-19 18:5x 실측: 하이닉스 meta 1,295,000~1,297,000 / 실제 KRX 종가 1,277,000). 마감 책갈피가 큰 숫자와
+//   같은 값으로 계속 바뀌던 원인. 정규장 종가는 야후 .KS/.KQ regularMarketPrice 가 정확하다 — 토스 1분봉의
+//   15:30 종가 단일가 체결(15:31 봉)·다음 금융(현재가 − afterMarketChangePrice)과 세 종목 모두 일치했다.
+//   야후 v7 은 40종목 1콜이라 싸다. 정규장 중(09:00~15:30)엔 부르지 않는다 — 그땐 종가가 없고 책갈피도 안 뜬다.
+//   야후가 가끔 옛 값을 주므로(코스닥을 .KS 로 물으면 옛 상장 기록) **체결 시각이 15:20 KST 이후이고 4일 이내**인 값만 쓴다.
+async function overlayYahooKrClose(out: Map<string, KrRegularPrice>, markets?: Map<string, string>): Promise<void> {
+  if (out.size === 0 || (isMarketOpen("KR") && !isKrAfterRegularClose())) return;
+  // 시장을 모르면(지수 카드처럼 코스닥도 '.KS' 로 들고 있는 목록) **.KS·.KQ 둘 다** 묻는다 — 엉뚱한 쪽은 야후가
+  //   옛 상장 기록·빈 값을 줘 아래 신선도 검사에서 걸러진다. 둘 다 신선하면 체결 시각이 늦은 쪽.
+  const syms = [...out.keys()].flatMap(t => {
+    const mk = markets?.get(t) ?? "";
+    return /KOSDAQ|코스닥/i.test(mk) ? [`${t}.KQ`] : /KOSPI|코스피/i.test(mk) ? [`${t}.KS`] : [`${t}.KS`, `${t}.KQ`];
+  });
+  const quotes: V7Quote[] = [];
+  for (let i = 0; i < syms.length; i += YAHOO_V7_CHUNK) {
+    const chunk = syms.slice(i, i + YAHOO_V7_CHUNK).join(",");
+    // 야후는 가끔 한 번씩 실패한다(빈 응답·오류) — 한 번 더 묻는다. 그래도 안 되면 그 묶음은 fromYahoo=false 로 남는다.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const r = await fetchProxied(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(chunk)}`);
+        const res = r.ok ? ((await r.json()) as V7Response).quoteResponse?.result : null;
+        if (res?.length) { quotes.push(...res); break; }
+      } catch { /* 재시도 */ }
+      await new Promise(res => setTimeout(res, 800));
+    }
+  }
+  const usedTs = new Map<string, number>();
+  for (const q of quotes) {
+    const t = (q.symbol ?? "").replace(/\.K[SQ]$/, "");
+    const reg = out.get(t);
+    const px = _vnum(q.regularMarketPrice), ts = q.regularMarketTime;
+    if (!reg || px == null || px <= 0 || typeof ts !== "number") continue;
+    const kst = new Date((ts + 9 * 3600) * 1000);
+    const fresh = Date.now() / 1000 - ts < 4 * 86400 && kst.getUTCHours() * 60 + kst.getUTCMinutes() >= 15 * 60 + 20;
+    if (!fresh || (usedTs.get(t) ?? 0) > ts) continue;
+    usedTs.set(t, ts);
+    // 등락률 기준 = 토스 base(전일 종가) — 카드 큰 숫자와 같은 기준이라야 둘을 나란히 읽을 수 있다
+    const base = reg.base ?? 0;
+    out.set(t, { ...reg, regularPrice: px, regularPct: base > 0 ? (px / base - 1) * 100 : reg.regularPct, fromYahoo: true });
+  }
+}
+
+async function fetchKrRegularPricesToss(tickers: string[]): Promise<Map<string, KrRegularPrice>> {
   const out = new Map<string, KrRegularPrice>();
   if (tickers.length === 0) return out;
   // 200종목 폴더처럼 코드가 많으면 URL 이 길어져 토스가 거절한다 → 시세와 같은 50개 단위로 분할.
@@ -1226,7 +1337,7 @@ export async function fetchKrRegularPrices(
   if (tickers.length > CHUNK) {
     const chunks: string[][] = [];
     for (let i = 0; i < tickers.length; i += CHUNK) chunks.push(tickers.slice(i, i + CHUNK));
-    const settled = await Promise.allSettled(chunks.map(c => fetchKrRegularPrices(c)));
+    const settled = await Promise.allSettled(chunks.map(c => fetchKrRegularPricesToss(c)));
     for (const r of settled) {
       if (r.status === "fulfilled") for (const [k, v] of r.value) out.set(k, v);
     }
@@ -1254,6 +1365,7 @@ export async function fetchKrRegularPrices(
         ticker,
         regularPrice: r.close,
         regularPct: regPct,
+        base: base > 0 ? base : undefined,
         marketState: "",
         tradingEnd: r.tradingEnd,
         nextTradingStart: r.nextTradingStart,
@@ -1488,6 +1600,7 @@ export interface PricePoint {
 interface YahooChartResp {
   chart?: {
     result?: Array<{
+      meta?: { regularMarketPrice?: number; regularMarketTime?: number };
       timestamp?: number[];
       indicators?: {
         quote?: Array<{
@@ -1592,8 +1705,15 @@ async function fetchPriceHistoryWithEventsFor(
   const highs = q.high ?? [];
   const lows = q.low ?? [];
   const points: PricePoint[] = [];
+  // ★ 장 마감 직후 몇 시간은 **마지막 봉의 OHLC 가 전부 null** 로 온다(MU 10/15 실측 — 다음 날 아침에도 비어 있었다).
+  //   그냥 버리면 직전 봉이 '마지막 정규장' 으로 둔갑해 마감 책갈피가 하루 전 날짜·등락률을 단다.
+  //   그 세션의 종가는 meta.regularMarketPrice 에 이미 있다(regularMarketTime 이 그 봉 이후면 같은 세션).
+  const meta = res.meta;
+  const lastFill = (i: number): number | null =>
+    i === ts.length - 1 && (meta?.regularMarketPrice ?? 0) > 0 && (meta?.regularMarketTime ?? 0) >= ts[i]
+      ? meta!.regularMarketPrice! : null;
   for (let i = 0; i < ts.length; i++) {
-    const c = closes[i];
+    const c = closes[i] ?? lastFill(i);
     if (c == null) continue;
     const d = new Date(ts[i] * 1000);
     const kst = new Date(d.getTime() + (d.getTimezoneOffset() + 540) * 60_000);
@@ -1709,6 +1829,43 @@ export async function fetchKrFuturesDaily(count = 60): Promise<KrFuturesData | n
     const price = num(rows[0].closePrice);
     const prevClose = price - num(rows[0].compareToPreviousClosePrice);
     return { series, price, prevClose };
+  } catch {
+    return null;
+  }
+}
+
+// KOSPI200 선물 미결제약정 — 다음 금융. 네이버(FUT integration·basic·price·polling)엔 필드가 없다.
+//   masters = 상장 월물 목록(근월물이 맨 앞) → days = 그 월물의 일별 종가·미결제수량.
+//   ⚠️ Referer 가 finance.daum.net 이 아니면 403 — 프록시 8곳·확장 HEADER_GROUPS·nativeProxy 가 붙인다.
+//   월물 단위 값이라 만기 전후(롤오버)엔 근월물 미결제가 크게 줄어든다 — 방향 신호가 아니다.
+export interface KrFuturesOpenInterest {
+  contract: string;       // "F 202612"
+  date: string;           // "YYYY-MM-DD"
+  oi: number;             // 미결제약정(계약)
+  prevOi: number | null;  // 직전 거래일
+  price: number | null;   // 같은 날 선물 종가(장중엔 현재가)
+  chg: number | null;     // 같은 날 선물 가격 전일 대비(pt) — 미결제 증감과 짝지어 해석(같은 행이라 날짜가 어긋나지 않는다)
+}
+export async function fetchKrFuturesOpenInterest(): Promise<KrFuturesOpenInterest | null> {
+  try {
+    const mr = await fetchProxied("https://finance.daum.net/api/futures/masters");
+    if (!mr.ok) return null;
+    const masters = (await mr.json()) as { data?: Array<{ symbolCode?: string; name?: string }> };
+    const near = masters.data?.[0];
+    if (!near?.symbolCode) return null;
+    const dr = await fetchProxied(`https://finance.daum.net/api/future/${near.symbolCode}/days?page=1&perPage=2`);
+    if (!dr.ok) return null;
+    const days = (await dr.json()) as { data?: Array<{ date?: string; unsettledVolume?: number; changePrice?: number; tradePrice?: number }> };
+    const rows = (days.data ?? []).filter(r => r.date && Number.isFinite(r.unsettledVolume) && (r.unsettledVolume ?? 0) > 0);
+    if (!rows.length) return null;
+    return {
+      contract: near.name ?? near.symbolCode,
+      date: String(rows[0].date).slice(0, 10),
+      oi: rows[0].unsettledVolume!,
+      prevOi: rows[1]?.unsettledVolume ?? null,
+      price: Number.isFinite(rows[0].tradePrice) ? rows[0].tradePrice! : null,
+      chg: Number.isFinite(rows[0].changePrice) ? rows[0].changePrice! : null,
+    };
   } catch {
     return null;
   }
@@ -2251,15 +2408,16 @@ export interface IntradayFlowPoint {
   individuals: number; foreigners: number; institutions: number;
   financialInvestment: number; insurance: number; trust: number;
   bank: number; otherFinancial: number; pensionFund: number; otherCorp: number;
+  // 그 시각까지의 **총 매수·총 매도**(선물=계약, 현물=억원) — 순매수만으론 안 보이는 '당일 회전'(사고판 양) 계산용
+  gross?: { fBuy: number; fSell: number; iBuy: number; iSell: number };
 }
 export interface IntradayFlow {
-  unit: "억원" | "계약";
-  points: IntradayFlowPoint[];
-  /** 서버가 실제로 내려준 거래일 "YYYY-MM-DD" (요청한 날짜와 다를 수 있다). */
-  servedDate?: string;
+  unit: "억원" | "계약"; points: IntradayFlowPoint[];
+  date?: string;    // 이 행들의 실제 날짜 "YYYY-MM-DD" — 장 시작 전엔 KRX 가 **어제** 행을 준다
+  pre?: boolean;    // 넥스트레이드 프리장(08:00~) 수급
 }
 
-interface TrendRow { bizdate?: string; time?: string; netAmounts?: Array<{ investorGubun?: string; diffValue?: string }> }
+interface TrendRow { bizdate?: string; time?: string; netAmounts?: Array<{ investorGubun?: string; diffValue?: string; buyQuant?: string; sellQuant?: string; buyPrice?: string; sellPrice?: string }> }
 interface TrendResp { content?: TrendRow[]; last?: boolean }
 
 // 한 행의 투자자별 값 → 우리 컬럼. 금액은 원 → 억원, 선물은 계약 그대로.
@@ -2273,7 +2431,18 @@ function mapTrendRow(row: TrendRow, futures: boolean) {
   const trust = v(GUBUN.trust) + v(GUBUN.privateEquity);
   const institutions = v(GUBUN.financialInvestment) + v(GUBUN.insurance) + trust
     + v(GUBUN.bank) + v(GUBUN.otherFinancial) + v(GUBUN.pensionFund) + v(GUBUN.stateLocal);
+  // 총 매수·매도 — 선물은 수량(계약), 현물은 금액(원 → 억원)
+  const side = (code: string, k: "buy" | "sell") => {
+    const n = (row.netAmounts ?? []).find(x => x.investorGubun === code);
+    return Number((futures ? (k === "buy" ? n?.buyQuant : n?.sellQuant) : (k === "buy" ? n?.buyPrice : n?.sellPrice)) ?? 0) || 0;
+  };
+  const g = (code: string[], k: "buy" | "sell") => scale(code.reduce((a, c) => a + side(c, k), 0));
+  const gross = {
+    fBuy: g([GUBUN.foreigners, GUBUN.otherForeigners], "buy"), fSell: g([GUBUN.foreigners, GUBUN.otherForeigners], "sell"),
+    iBuy: g([GUBUN.individuals], "buy"), iSell: g([GUBUN.individuals], "sell"),
+  };
   return {
+    gross,
     individuals: scale(v(GUBUN.individuals)),
     foreigners: scale(v(GUBUN.foreigners) + v(GUBUN.otherForeigners)),
     institutions: scale(institutions),
@@ -2287,55 +2456,52 @@ function mapTrendRow(row: TrendRow, futures: boolean) {
   };
 }
 
-// bizdate(YYYYMMDD) 생략 시 오늘(KST).
-//   ★ 이 API 는 **최신 거래일 하루치만** 준다 — bizdate 는 (어떤 이름으로 줘도) 무시되고 과거로 가는
-//     페이지도 없다(실측 2026-09-20: startIdx 3 부터 빈 응답). 옛 finance.naver 소스는 과거 날짜를
-//     받았지만 410 으로 폐쇄됐다. 그래서 요청한 날짜와 응답 날짜가 다르면 그 데이터를 **버린다** —
-//     안 그러면 9/18 값이 9/17 차트로 조용히 그려진다. 과거 흐름은 일별(fetchKrDailyInvestorFlow).
-export async function fetchKrIntradayInvestorFlow(market: IntradayMarket, bizdate?: string): Promise<IntradayFlow> {
+// ⚠️ **당일치만 나온다.** 네이버 trend/time 은 bizdate 를 받기는 하지만 **무시**하고 늘 오늘 값을
+//   돌려준다(실측: 20260921·20260925·20260929 모두 20260929 행). 과거 날짜를 넣으면 조용히
+//   오늘 수급이 그 날짜인 척 그려진다 → 그래서 날짜 인자를 아예 받지 않는다.
+//   시간별 과거 수급은 무료 소스가 없다(옛 investorDealTrendTime 은 410, KRX 는 로그인 필수).
+//   과거를 보려면 fetchKrDailyInvestorFlow(일별)를 쓴다.
+export async function fetchKrIntradayInvestorFlow(market: IntradayMarket): Promise<IntradayFlow> {
   const mkt = TREND_MARKET[market];
   const futures = market === "futures";
-  const bd = bizdate ?? new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10).replace(/-/g, "");
-  const MAX_PAGES = 4;   // 200×4 = 800행 — 하루(435행)보다 넉넉하다
-  const byTime = new Map<string, IntradayFlowPoint>();
-  let servedBd = "";
-  for (let page = 0; page < MAX_PAGES; page++) {
-    let data: TrendResp;
-    try {
-      const resp = await fetchProxied(
-        `https://stock.naver.com/api/domestic/market/trend/time`
-        + `?tradeType=KRX&marketType=${mkt}&bizdate=${bd}&startIdx=${page}&pageSize=200`);
-      if (!resp.ok) break;
-      data = await resp.json() as TrendResp;
-    } catch { break; }
-    const rows = data.content ?? [];
-    if (rows.length === 0) break;
-    for (const r of rows) {
-      const t = String(r.time ?? "");
-      if (t.length < 4) continue;
-      if (r.bizdate && !servedBd) servedBd = r.bizdate;
-      if (r.bizdate && r.bizdate !== bd) continue;   // 다른 날 데이터는 쓰지 않는다
-      const time = `${t.slice(0, 2)}:${t.slice(2, 4)}`;
-      if (!byTime.has(time)) byTime.set(time, { time, ...mapTrendRow(r, futures) });
+  const bd = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10).replace(/-/g, "");
+  const unit = futures ? "계약" as const : "억원" as const;
+  const load = async (tradeType: "KRX" | "NXT") => {
+    const MAX_PAGES = 4;   // 200×4 = 800행 — 하루(443행)보다 넉넉하다
+    const byTime = new Map<string, IntradayFlowPoint>();
+    let rowDate = "";
+    for (let page = 0; page < MAX_PAGES; page++) {
+      let data: TrendResp;
+      try {
+        const resp = await fetchProxied(
+          `https://stock.naver.com/api/domestic/market/trend/time`
+          + `?tradeType=${tradeType}&marketType=${mkt}&bizdate=${bd}&startIdx=${page}&pageSize=200`);
+        if (!resp.ok) break;
+        data = await resp.json() as TrendResp;
+      } catch { break; }
+      const rows = data.content ?? [];
+      if (rows.length === 0) break;
+      for (const r of rows) {
+        const t = String(r.time ?? "");
+        if (t.length < 4) continue;
+        if (!rowDate && r.bizdate) rowDate = String(r.bizdate);
+        const time = `${t.slice(0, 2)}:${t.slice(2, 4)}`;
+        if (!byTime.has(time)) byTime.set(time, { time, ...mapTrendRow(r, futures) });
+      }
+      if (data.last) break;
     }
-    if (data.last) break;
+    return { rowDate, points: [...byTime.values()].sort((a, b) => a.time.localeCompare(b.time)) };
+  };
+  const iso = (d: string) => d.length === 8 ? `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}` : undefined;
+  const krx = await load("KRX");
+  // ★ 프리장(08:00~09:00) — KRX 는 09:01 첫 행이 나올 때까지 **어제 행(~20:04)** 을 그대로 준다.
+  //   그 사이 넥스트레이드(tradeType=NXT)는 오늘 08:00 부터 프리장 수급을 준다(실측 2026-10-14 08:45:
+  //   KRX=20261013 443행 / NXT=20261014 08:00~). 선물은 넥스트레이드에 없다. 추가 1콜은 이때만 든다.
+  if (!futures && krx.rowDate !== bd) {
+    const nxt = await load("NXT");
+    if (nxt.rowDate === bd && nxt.points.length >= 2) return { unit, points: nxt.points, date: iso(bd), pre: true };
   }
-  const points = [...byTime.values()].sort((a, b) => a.time.localeCompare(b.time));
-  const servedDate = /^\d{8}$/.test(servedBd)
-    ? `${servedBd.slice(0, 4)}-${servedBd.slice(4, 6)}-${servedBd.slice(6, 8)}` : undefined;
-  return { unit: futures ? "계약" : "억원", points, servedDate };
-}
-
-// 시간별 투자자 순매수가 실제로 제공되는 거래일("YYYY-MM-DD") — 1콜(1행).
-//   휴장일·개장 전엔 직전 거래일이 온다. 화면이 '오늘' 대신 이 날짜를 기본으로 쓴다.
-export async function fetchLatestFlowBizdate(): Promise<string | null> {
-  const resp = await fetchProxied(
-    "https://stock.naver.com/api/domestic/market/trend/time"
-    + "?tradeType=KRX&marketType=KOSPI&startIdx=0&pageSize=1");
-  if (!resp.ok) throw new Error(`flow bizdate HTTP ${resp.status}`);
-  const j = await resp.json() as TrendResp;
-  const bd = String(j.content?.[0]?.bizdate ?? "");
-  return /^\d{8}$/.test(bd) ? `${bd.slice(0, 4)}-${bd.slice(4, 6)}-${bd.slice(6, 8)}` : null;
+  return { unit, points: krx.points, date: iso(krx.rowDate) };
 }
 
 // ─── 일별 투자자 순매수 (네이버 stock.naver 시장 매매동향, 기간별) ───────────
@@ -2346,6 +2512,7 @@ export interface DailyFlowPoint {
   individuals: number; foreigners: number; institutions: number;
   financialInvestment: number; insurance: number; trust: number;
   bank: number; otherFinancial: number; pensionFund: number; otherCorp: number;
+  gross?: { fBuy: number; fSell: number; iBuy: number; iSell: number };   // 그날 총 매수·매도(선물=계약)
 }
 export interface DailyFlow { unit: "억원" | "계약"; points: DailyFlowPoint[]; }
 
@@ -3294,51 +3461,42 @@ const TOSS_US_STOCK_CODE: Record<string, string> = {
 };
 
 // 토스 US 종목 가격(기존 fetchTossUsPrices) → UsIndex 변환. 현재가 = close, 기준 = base.
+// 지수 탭 미국 종목·ETF 카드(+티커바) — **달러로만**, 등락은 **어제 종가 대비 누적**(사용자 결정 2026-10-21).
+//   예전엔 원화 환산 + 장 마감 뒤엔 '정규장 종가 대비'(토스식)라, 한국 카드(어제 종가 대비)와 기준이 달라
+//   "정규장 −3.22% → 애프터 +3.31%" 를 더해 읽는 혼동이 생겼다. 이제 큰 숫자 = 어제 종가 대비, 마감 책갈피 = 정규장 종가.
+//   토스 세션별 값(USD):
+//     정규·휴장   close = 현재/정규 종가, base = 어제 종가
+//     애프터      close = 오늘 정규 종가(고정), afterMarketClose = 애프터 현재가, base = 어제 종가
+//     오버나잇    close = 현재가, base = **오늘 정규 종가** → 어제 종가는 머지 단계에서 야후 등락률로 되짚는다(fetchYahooBatch)
+//     프리마켓    close = 현재가, base = 직전 정규 종가 = 새 거래일의 '어제 종가' 그대로
 async function fetchTossUsIndexMap(
   items: { symbol: string; name: string; code: string }[],
 ): Promise<Map<string, UsIndex>> {
   const out = new Map<string, UsIndex>();
   if (items.length === 0) return out;
   const priceByCode = await fetchTossUsPrices(items.map(i => i.code));
-  // 애프터장(16:00~20:00 ET): close 는 정규 종가로 고정, 체결은 afterMarketClose 로만 들어옴 → 메인을 애프터값으로.
   const afterOpen = isUsAfterMarketOpen();
+  const closeIsLive = isUsExtendedTradingOpen() && !afterOpen;   // 오버나잇·프리마켓 — close 가 라이브
   for (const it of items) {
     const tp = priceByCode.get(it.code);
     if (!tp) continue;
-    // 토스 앱과 동일하게 환산 원화로 표시. closeKrw 없으면(폴백) 달러 그대로.
-    const hasKrw = tp.closeKrw > tp.close;   // 원화는 달러 × ~1500 → 항상 큼
-    const liveKrw = hasKrw ? tp.closeKrw : tp.close;   // 토스 close(원화) = 현재가 (정규·프리·오버나잇 땐 live, 애프터·휴장 땐 정규 종가)
-    const baseKrw = hasKrw ? tp.baseKrw  : tp.base;    // 토스 base(원화) = 기준가
-    // 토스 close 가 '라이브 비정규' 인 세션(오버나잇·프리마켓) 여부 — 이땐 정규 종가가 base 에 들어옴.
-    //   (애프터장 16:00~20:00 ET·휴장 땐 close 가 정규 종가 그대로 → 그때만 close 가 마감가)
-    const closeIsLive = isUsExtendedTradingOpen() && !afterOpen;
-    // 정규장 마감가(책갈피용): close 가 라이브면 base(직전 정규 종가), 아니면 close 자체가 정규 종가.
-    const regClose    = closeIsLive ? baseKrw : liveKrw;
-    const regCloseUsd = closeIsLive ? tp.base : tp.close;
-    // 애프터장 거래중이고 애프터값(원화)이 있으면 메인 = 애프터 현재가, 아니면 close(라이브 or 정규 종가).
-    const useAfter = hasKrw && afterOpen && tp.afterCloseKrw > 0;
-    const price = useAfter ? tp.afterCloseKrw : liveKrw;
-    // 변동 기준: 애프터장은 토스 앱처럼 '정규 종가 대비'(애프터 세션 변동), 오버나잇/프리도 정규 종가(base) 대비, 정규/휴장은 어제(base) 대비.
-    const base = useAfter ? regClose : baseKrw;
+    const regClose = closeIsLive ? tp.base : tp.close;            // 정규장 종가(마감 책갈피)
+    const useAfter = afterOpen && tp.afterClose > 0;
+    const price = useAfter ? tp.afterClose : tp.close;
+    const base = tp.base;                                         // 어제 종가(오버나잇은 머지에서 다시 맞춘다)
     const diff = price - base;
     const pct = base > 0 ? (diff / base) * 100 : 0;
-    // 마감 책갈피 등락률 = 정규 종가의 전일대비. 오버나잇/프리엔 전전일 종가가 없어 계산 불가 → undefined(머지 시 Yahoo regularPct 폴백).
-    const regPct = closeIsLive
-      ? undefined
-      : (baseKrw > 0 ? ((regClose - baseKrw) / baseKrw) * 100 : undefined);
+    // 정규장 종가의 전일 대비 — 오버나잇·프리엔 토스에 전전일 값이 없어 undefined(야후 regularPct 폴백)
+    const regPct = closeIsLive ? undefined : (base > 0 ? ((regClose - base) / base) * 100 : undefined);
     out.set(it.symbol, {
       symbol: it.symbol, name: it.name,
       price, prev: base, prevClose: base,
-      diff, pct, currency: hasKrw ? "KRW" : "USD",
-      // 달러 보조표기 — 현재가 달러(실시간: 현재 원가 × 환율) / 마감 달러(정규 종가 USD)
-      priceUsd: (hasKrw && tp.closeKrw > 0) ? price * (tp.close / tp.closeKrw) : tp.close,
-      regularPriceUsd: regCloseUsd,
+      diff, pct, currency: "USD",
+      priceUsd: price, regularPriceUsd: regClose,
       tradeDate: tp.tradeDateTime ? toKstDateString(tp.tradeDateTime) : "",
-      // 토스 tradeDateTime = 실측 마지막 체결시각(체결 있을 때만 전진, 무체결 종목은 멈춤 — 폴링 검증됨).
-      //   24h(Blue Ocean) 거래 중엔 계속 갱신 → 정체 판정에서 통과(밝게). 진짜 끊기면 흐림.
+      // 토스 tradeDateTime = 실측 마지막 체결시각 — 24h(Blue Ocean) 거래 중엔 계속 갱신(흐림 판정용)
       freshTime: isoToUnixSec(tp.tradeDateTime),
       marketState: "",
-      // 마감 책갈피 = 토스 정규 종가(원화) — 애프터장엔 메인(애프터)과 별개로 정규 종가 표시. Yahoo 달러값 대체.
       regularPrice: regClose, regularPct: regPct,
     });
   }
@@ -3622,6 +3780,9 @@ export async function fetchDashboardChart(sym: string): Promise<number[]> {
   const kr = /^([\dA-Za-z]{6})\.KS$/.exec(sym);
   if (kr) return (await fetchKrPriceHistory(kr[1], "3mo")).map(p => p.close);
   if (isCnbcIndex(sym)) return fetchCnbcChart(sym);
+  if (sym === CNN_FG_SYMBOL) return fetchCnnFgChart();
+  if (isSinaMetal(sym)) return fetchSinaMetalChart(sym);
+  if (isMemPrice(sym)) return fetchMemChart(sym);
   return fetchYahooChart(sym, "3mo");
 }
 
@@ -3649,6 +3810,253 @@ export async function fetchCnbcPriceHistory(symbol: string): Promise<PricePoint[
     });
   }
   return Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
+}
+
+// ─── CNN 공포·탐욕 지수 (Fear & Greed) ─────────────────────────
+//   CNN 페이지가 쓰는 내부 JSON 하나에 점수·전일·1주·1개월·1년 전 값, 구성 지표 7개, 1년치 일별 시계열이 다 있다.
+//   ⚠️ 브라우저 Referer/Origin(edition.cnn.com) 없으면 418 "You're a bot" — 프록시 8곳·확장·nativeProxy 가 붙인다.
+//      Cloudflare 워커 IP 는 안 막힌다(2026-10-17 실측).
+//   가상 심볼 CNNFG — 지수 카드(fetchYahooBatch)와 스파크라인(fetchDashboardChart)이 같은 응답을 나눠 쓰게
+//   5분 메모를 둔다(카드 폴링마다 2콜이 나가지 않게). 값은 미국 장중 수 분 간격으로만 바뀐다.
+export const CNN_FG_SYMBOL = "CNNFG";
+const CNN_FG_URL = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata";
+interface CnnFgPart { score?: number; rating?: string }
+interface CnnFgResp {
+  fear_and_greed?: CnnFgPart & {
+    timestamp?: string; previous_close?: number; previous_1_week?: number;
+    previous_1_month?: number; previous_1_year?: number;
+  };
+  fear_and_greed_historical?: { data?: { x: number; y: number }[] };
+  [k: string]: unknown;
+}
+let cnnFgMemo: { at: number; p: Promise<CnnFgResp | null> } | null = null;
+function loadCnnFg(): Promise<CnnFgResp | null> {
+  if (cnnFgMemo && Date.now() - cnnFgMemo.at < 5 * 60_000) return cnnFgMemo.p;
+  const p = fetchProxied(CNN_FG_URL)
+    .then(r => (r.ok ? (r.json() as Promise<CnnFgResp>) : null))
+    .catch(() => null);
+  cnnFgMemo = { at: Date.now(), p };
+  p.then(v => { if (!v) cnnFgMemo = null; });   // 실패는 메모하지 않는다 — 다음 폴링에 다시
+  return p;
+}
+// 구성 지표 7개 — CNN 화면 순서·한국어 이름
+const CNN_FG_PARTS: [string, string][] = [
+  ["market_momentum_sp500", "시장 모멘텀(S&P500 vs 125일선)"],
+  ["stock_price_strength", "주가 강도(52주 신고가 vs 신저가)"],
+  ["stock_price_breadth", "시장 폭(상승·하락 거래량)"],
+  ["put_call_options", "풋/콜 옵션 비율"],
+  ["market_volatility_vix", "변동성(VIX vs 50일 평균)"],
+  ["junk_bond_demand", "정크본드 수요(신용 스프레드)"],
+  ["safe_haven_demand", "안전자산 수요(주식 vs 국채)"],
+];
+export interface CnnFearGreed {
+  score: number; rating: string; timestamp: string;
+  prevClose: number | null; week: number | null; month: number | null; year: number | null;
+  parts: { label: string; score: number; rating: string }[];
+}
+export async function fetchCnnFearGreed(): Promise<CnnFearGreed | null> {
+  const d = await loadCnnFg();
+  const f = d?.fear_and_greed;
+  if (!f || typeof f.score !== "number") return null;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  return {
+    score: f.score, rating: f.rating ?? "", timestamp: f.timestamp ?? "",
+    prevClose: num(f.previous_close), week: num(f.previous_1_week),
+    month: num(f.previous_1_month), year: num(f.previous_1_year),
+    parts: CNN_FG_PARTS.flatMap(([k, label]) => {
+      const p = d?.[k] as CnnFgPart | undefined;
+      return typeof p?.score === "number" ? [{ label, score: p.score, rating: p.rating ?? "" }] : [];
+    }),
+  };
+}
+async function fetchCnnFgIndex(name: string): Promise<UsIndex | null> {
+  const fg = await fetchCnnFearGreed();
+  if (!fg) return null;
+  const prev = fg.prevClose ?? fg.score;
+  const diff = fg.score - prev;
+  const ms = Date.parse(fg.timestamp);
+  return {
+    symbol: CNN_FG_SYMBOL, name, price: fg.score, prev, prevClose: prev,
+    diff, pct: prev > 0 ? (diff / prev) * 100 : 0, currency: "",
+    tradeDate: Number.isFinite(ms) ? new Date(ms + 9 * 3600_000).toISOString().slice(0, 10) : "",
+    regularMarketTime: Number.isFinite(ms) ? Math.floor(ms / 1000) : undefined,
+    marketState: "",
+  };
+}
+// 스파크라인 — 다른 카드와 같은 3개월(약 63거래일). CNN 은 1년치 일별을 준다.
+async function fetchCnnFgChart(): Promise<number[]> {
+  const d = await loadCnnFg();
+  const pts = d?.fear_and_greed_historical?.data ?? [];
+  return pts.map(p => p.y).filter(v => Number.isFinite(v)).slice(-63);
+}
+
+// ─── 리튬·니켈 — 시나 금융 (가상 심볼 LITHIUM=F · NICKEL=F) ─────────────
+//   리튬 = 광저우선물거래소 **탄산리튬 연결물**(CNY/톤), 니켈 = **LME 니켈**(USD/톤) — Trading Economics 가 보여주는 그 시장들.
+//   야후엔 리튬 선물(LTH=F)·니켈 지수(^SPGSIK)가 일봉 1개뿐이라 차트를 못 그리고, 광산 ETF(LITP·NIKL)는 금속 가격이 아니다.
+//   시세 1콜(hq.sinajs.cn, 두 종목 한 번에) + 일봉 종목당 1콜. ⚠️ Referer finance.sina.com.cn 없으면 403 — 프록시·확장·네이티브가 붙인다.
+//   응답은 GBK 지만 숫자·날짜만 쓰므로 그냥 text() 로 읽는다(이름 글자만 깨진다).
+const SINA_METALS: Record<string, { hq: string; kline: string; nf: boolean }> = {
+  "LITHIUM=F": { hq: "nf_LC0", nf: true,
+    kline: "https://stock2.finance.sina.com.cn/futures/api/jsonp.php/x=/InnerFuturesNewService.getDailyKLine?symbol=LC0" },
+  "NICKEL=F": { hq: "hf_NID", nf: false,
+    kline: "https://stock2.finance.sina.com.cn/futures/api/jsonp.php/x=/GlobalFuturesService.getGlobalFuturesDailyKLine?symbol=NID" },
+};
+export function isSinaMetal(symbol: string): boolean { return symbol in SINA_METALS; }
+async function fetchSinaMetals(pairs: { symbol: string; name: string }[]): Promise<UsIndex[]> {
+  const items = pairs.filter(p => isSinaMetal(p.symbol));
+  if (!items.length) return [];
+  try {
+    const r = await fetchProxied(`https://hq.sinajs.cn/list=${items.map(p => SINA_METALS[p.symbol].hq).join(",")}`);
+    if (!r.ok) return [];
+    const text = await r.text();
+    const out: UsIndex[] = [];
+    for (const p of items) {
+      const m = new RegExp(`hq_str_${SINA_METALS[p.symbol].hq}="([^"]*)"`).exec(text);
+      const f = m?.[1].split(",") ?? [];
+      // 국내 선물(nf_): 8 현재가 · 10 전일 정산가 · 1 시각(HHMMSS) · 17 날짜 / 해외 선물(hf_): 0 현재가 · 7 전일 종가 · 6 시각 · 12 날짜
+      const nf = SINA_METALS[p.symbol].nf;
+      const price = Number(nf ? f[8] : f[0]), prev = Number(nf ? f[10] : f[7]);
+      if (!(price > 0) || !(prev > 0)) continue;
+      const date = (nf ? f[17] : f[12]) ?? "";
+      const tm = nf ? (f[1] ?? "").replace(/^(\d{2})(\d{2})(\d{2})$/, "$1:$2:$3") : (f[6] ?? "");
+      const ms = Date.parse(`${date}T${tm}+08:00`);   // 시나 시각은 베이징(UTC+8)
+      out.push({
+        symbol: p.symbol, name: p.name, price, prev, prevClose: prev,
+        diff: price - prev, pct: (price / prev - 1) * 100, currency: nf ? "CNY" : "USD",
+        tradeDate: date, marketState: "",
+        ...(Number.isFinite(ms) ? { regularMarketTime: Math.floor(ms / 1000), freshTime: Math.floor(ms / 1000) } : {}),
+      });
+    }
+    return out;
+  } catch { return []; }
+}
+// 스파크라인 — 다른 카드와 같은 3개월(63거래일) 종가
+async function fetchSinaMetalChart(symbol: string): Promise<number[]> {
+  const def = SINA_METALS[symbol];
+  if (!def) return [];
+  try {
+    const r = await fetchProxied(def.kline);
+    if (!r.ok) return [];
+    const s = await r.text();
+    const rows = JSON.parse(s.slice(s.indexOf("["), s.lastIndexOf("]") + 1)) as { c?: string; close?: string }[];
+    return rows.map(x => Number(x.c ?? x.close)).filter(v => v > 0).slice(-63);
+  } catch { return []; }
+}
+
+// ─── 메모리 현물가 — 머니랜드 DRAM 대시보드 JSON (가상 심볼 *=ML) ─────────────
+//   https://moneyland.co.kr/moneyweb/api/dram_dashboard.json 한 콜에 DRAM 현물지수(2025-06-23=기준)·DDR5/DDR4 일별 이력(~300일)·
+//   RDIMM·GDDR6·NAND 웨이퍼 주간 이력이 다 있다(원 출처 DRAMeXchange — 거기선 이력이 유료라 못 받는다).
+//   CORS 헤더가 없어 프록시를 탄다(헤더는 필요 없음). 값은 하루 한 번(현지 18시경) 바뀌어 10분 메모.
+//   카드 값 = 이력의 마지막 점, 등락 = 직전 점 대비(주간 품목은 지난주 대비).
+const MONEYLAND_URL = "https://moneyland.co.kr/moneyweb/api/dram_dashboard.json";
+// 심볼 → 이력 위치 (index = DRAM 현물지수, 숫자 = series 키 = DRAMeXchange 품목 번호)
+const MEM_SERIES: Record<string, string> = {
+  "DRAMIDX=ML": "index", "DDR5=ML": "475", "DDR4=ML": "471", "RDIMM=ML": "21", "GDDR6=ML": "3", "NAND=ML": "9603",
+};
+export function isMemPrice(symbol: string): boolean { return symbol in MEM_SERIES; }
+type MemSeries = { d?: string[]; v?: number[] };
+let memMemo: { at: number; p: Promise<Record<string, MemSeries> | null> } | null = null;
+function loadMemSeries(): Promise<Record<string, MemSeries> | null> {
+  if (memMemo && Date.now() - memMemo.at < 10 * 60_000) return memMemo.p;
+  const p = fetchProxied(MONEYLAND_URL)
+    .then(r => (r.ok ? (r.json() as Promise<{ index?: { series?: MemSeries }; series?: Record<string, MemSeries> }>) : null))
+    .then(j => (j ? { index: j.index?.series ?? {}, ...(j.series ?? {}) } : null))
+    .catch(() => null);
+  memMemo = { at: Date.now(), p };
+  p.then(v => { if (!v) memMemo = null; });   // 실패는 메모하지 않는다
+  return p;
+}
+async function fetchMemPrices(pairs: { symbol: string; name: string }[]): Promise<UsIndex[]> {
+  const items = pairs.filter(p => isMemPrice(p.symbol));
+  if (!items.length) return [];
+  const all = await loadMemSeries();
+  if (!all) return [];
+  const out: UsIndex[] = [];
+  for (const p of items) {
+    const s = all[MEM_SERIES[p.symbol]];
+    const v = s?.v ?? [], d = s?.d ?? [];
+    if (v.length < 2) continue;
+    const price = v[v.length - 1], prev = v[v.length - 2];
+    if (!(price > 0) || !(prev > 0)) continue;
+    out.push({
+      symbol: p.symbol, name: p.name, price, prev, prevClose: prev,
+      diff: price - prev, pct: (price / prev - 1) * 100, currency: "USD",
+      tradeDate: d[d.length - 1] ?? "", marketState: "",
+    });
+  }
+  return out;
+}
+async function fetchMemChart(symbol: string): Promise<number[]> {
+  const s = (await loadMemSeries())?.[MEM_SERIES[symbol]];
+  return (s?.v ?? []).filter(x => x > 0).slice(-63);   // 다른 카드와 같은 3개월(일별 품목 기준 63점)
+}
+
+// ─── 미국 종목 24시간(당일) 차트 — 야후 spark 배치 ─────────────
+//   카드 배경 차트 '24시간' 용. 지수·원자재는 토스 overview 의 당일 봉(sparkline)이 있지만 미국 개별 종목·ETF 는
+//   당일 시계열이 없어 3개월로 그려졌다(2026-10-20 지적). 야후 v7 spark 는 **20종목 1콜**로 5분봉(이틀)을 주고
+//   includePrePost 면 프리(04:00 ET)~애프터(20:00 ET)까지 들어 있다. 오버나잇(20:00~04:00)은 없다.
+const SPARK_CHUNK = 20;
+//   openIdx = 오늘 정규장 시작(09:30 ET) 첫 봉의 인덱스 — 카드 차트에 '시작가' 표시선(meta.currentTradingPeriod.regular.start).
+export interface DaySpark { closes: number[]; openIdx?: number; closeIdx?: number; prevClose?: number; breakIdx?: number; prevBase?: number }   // prevBase = 어제 칸 기준선(그저께 종가 = 2d 범위의 chartPreviousClose)   // prevClose = 어제 정규장 종가(달러 — closes 와 같은 단위)
+export async function fetchYahooSparkDay(symbols: string[]): Promise<Map<string, DaySpark>> {
+  const out = new Map<string, DaySpark>();
+  const chunks: string[][] = [];
+  for (let i = 0; i < symbols.length; i += SPARK_CHUNK) chunks.push(symbols.slice(i, i + SPARK_CHUNK));
+  await Promise.all(chunks.map(async c => {
+    try {
+      const r = await fetchProxied(`https://query1.finance.yahoo.com/v7/finance/spark?symbols=${encodeURIComponent(c.join(","))}&range=2d&interval=5m&includePrePost=true`);   // 어제+오늘, 토스 카드와 같은 5분봉
+      if (!r.ok) return;
+      const j = await r.json() as { spark?: { result?: { symbol?: string; response?: {
+        timestamp?: number[]; meta?: { currentTradingPeriod?: { regular?: { start?: number; end?: number } }; gmtoffset?: number; previousClose?: number; chartPreviousClose?: number };
+        indicators?: { quote?: { close?: (number | null)[] }[] } }[] }[] } };
+      for (const x of j.spark?.result ?? []) {
+        const resp = x.response?.[0];
+        const ts = resp?.timestamp ?? [], raw = resp?.indicators?.quote?.[0]?.close ?? [];
+        const closes: number[] = [], times: number[] = [];
+        raw.forEach((v, i) => { if (v != null && v > 0) { closes.push(v); times.push(ts[i] ?? 0); } });   // 빈 봉은 시각과 같이 뺀다
+        if (!x.symbol || closes.length < 2) continue;
+        // 정규장 시작·종가 봉 — currentTradingPeriod 는 '지금 기준 다음/현재' 세션이라, 장이 끝난 뒤엔
+        //   차트의 마지막 날과 날짜가 어긋나 선이 사라졌다. 그래서 하루 중 시각(거래소 현지)만 뽑아 마지막 날에 적용한다.
+        const reg = resp?.meta?.currentTradingPeriod?.regular, gmt = resp?.meta?.gmtoffset ?? 0;
+        const tod = (t: number) => (((t + gmt) % 86400) + 86400) % 86400;   // 거래소 현지 하루 중 초
+        const dayOf = (t: number) => Math.floor((t + gmt) / 86400);
+        const lastDay = times.length ? dayOf(times[times.length - 1]) : 0;
+        // 한국은 야후가 마감을 아직 15:00 으로 준다(실제 15:30 — 2026-10-21 실측). 한국 지수·종목은 15:30 으로 고정하고,
+        //   15:30 봉(종가 단일가 체결)까지가 정규장이라 그 봉을 종가로 친다(<= 로).
+        const isKrSym = /^\^K[SQ]|\.K[SQ]$/.test(x.symbol);
+        const sTod = reg?.start != null ? tod(reg.start) : undefined;
+        const eTod = isKrSym ? 15 * 3600 + 30 * 60 + 1 : reg?.end != null ? tod(reg.end) : undefined;
+        const inLast = (i: number) => dayOf(times[i]) === lastDay;
+        const oi = sTod != null ? times.findIndex((t, i) => inLast(i) && tod(t) >= sTod) : -1;
+        // 종가 = 마감 전 마지막 봉(야후 봉 시각은 시작 시각). 마지막 날 정규장이 끝난 뒤에만(마감 직전 봉이 있을 때)
+        const lastTod = times.length ? tod(times[times.length - 1]) : 0;
+        const ci = eTod != null && eTod > (sTod ?? 0) && lastTod >= eTod - 300
+          ? times.map((t, i) => inLast(i) && tod(t) < eTod).lastIndexOf(true) : -1;
+        const pc = resp?.meta?.previousClose ?? resp?.meta?.chartPreviousClose;
+        const cpc = resp?.meta?.previousClose ? resp?.meta?.chartPreviousClose : undefined;   // previousClose 없으면 cpc 가 어제 종가라 어제 기준으론 못 쓴다
+        // 날짜(뉴욕)가 바뀌는 첫 봉 — 어제와 선을 잇지 않는다
+        //   아시아 지수·종목은 한국 날짜로 — 뉴욕 날짜면 아시아 장중(한국 13:00)에 끊긴다
+        //   선물(=F)은 거래일이 뉴욕 18:00 에 시작 — 그 시각을 날짜 경계로(UTC+2 로 보면 18:00 ET 가 자정)
+        const off = /^\^(K[SQ]|N225|HSI)|\.(K[SQ]|SS|T|HK)$/.test(x.symbol) ? 9 : /=F$/.test(x.symbol) ? 2 : -4;   // 아시아 장(한국·일본·홍콩·상해)은 한국 날짜로
+        const etDay = (t: number) => new Date((t + off * 3600) * 1000).toISOString().slice(0, 10);   // 대략 EDT/KST(일자 경계만 필요)
+        const bi = times.findIndex((t, i) => i > 0 && etDay(t) !== etDay(times[i - 1]));
+        out.set(x.symbol, { closes, openIdx: oi > 0 ? oi : undefined, closeIdx: ci > 0 ? ci : undefined, prevClose: pc && pc > 0 ? pc : undefined, breakIdx: bi > 0 ? bi : undefined, prevBase: bi > 0 && cpc && cpc > 0 ? cpc : undefined });   // 0 이면(프리 없음) 왼쪽 끝이라 표시 안 함
+      }
+    } catch { /* 이 묶음은 3개월 차트로 */ }
+  }));
+  return out;
+}
+
+// ─── 한국 종목·ETF 24시간(당일) 차트 — 토스 10분봉 ─────────────
+//   토스 c-chart 분봉은 NXT 프리(08:00)~애프터(20:00)까지 들어 있고 봉마다 base(= 어제 종가)가 붙는다.
+//   종목당 1콜이라 화면에 보이는 카드만 부른다(KrDaySparkline). openIdx = 09:00 KRX 정규장 첫 봉.
+export type KrDayCandles = DaySeries;   // 5분봉 어제+오늘   // xs = 08:00~20:00 시간 축 위치(0~1)
+export async function fetchKrDayCandles(code: string): Promise<KrDayCandles | null> {
+  try {
+    // 5분봉 이틀(어제+오늘 = 288개) — 1콜. 어제 하루를 왼쪽 절반에 이어 붙인다(buildTwoDaySeries)
+    const cs = await fetchTossMinuteBars(`kr-s/A${code}`, 1);
+    return cs.length ? buildTwoDaySeries(cs, true) : null;
+  } catch { return null; }
 }
 
 // 토스 원달러 환율 — base(당일 09:00 고시 기준가) + close(실시간 현재가).
@@ -3693,8 +4101,9 @@ export async function fetchYahooBatch(
     .filter(p => TOSS_US_STOCK_CODE[p.symbol])
     .map(p => ({ ...p, code: TOSS_US_STOCK_CODE[p.symbol] }));
   const investItems = pairs.filter(p => isCnbcIndex(p.symbol));
+  const cnnFg = pairs.find(p => p.symbol === CNN_FG_SYMBOL);
 
-  const [ksMap, overviewMap, usMap, investResults, yahooResults] = await Promise.all([
+  const [ksMap, overviewMap, usMap, investResults, yahooResults, cnnFgIdx, sinaMetals, memPrices] = await Promise.all([
     ksItems.length > 0
       ? fetchTossPrices(ksItems.map(p => ksRegex.exec(p.symbol)![1]))
           .then(prices => {
@@ -3726,7 +4135,10 @@ export async function fetchYahooBatch(
     fetchTossUsIndexMap(tossUsItems),
     Promise.all(investItems.map(p => fetchCnbcIndexPrice(p.symbol, p.name))),
     // 모든 심볼 Yahoo 베이스 — v7 배치(~2콜). marketState/prevClose + 토스 실패 시 fallback
-    fetchYahooBatchQuote(pairs),
+    fetchYahooBatchQuote(pairs.filter(p => p.symbol !== CNN_FG_SYMBOL && !isSinaMetal(p.symbol) && !isMemPrice(p.symbol))),   // 가상 심볼 — 야후엔 없다
+    cnnFg ? fetchCnnFgIndex(cnnFg.name) : Promise.resolve(null),
+    fetchSinaMetals(pairs),
+    fetchMemPrices(pairs),
   ]);
 
   // 1) Yahoo 결과를 베이스로
@@ -3775,7 +4187,21 @@ export async function fetchYahooBatch(
   }
   for (const [sym, t] of overviewMap) applyToss(sym, t);   // 지수/환율/금리/원자재/BTC (overview 1콜)
   for (const [sym, t] of usMap) applyToss(sym, t);
+  // 미국 종목·ETF 오버나잇 — 토스 base 가 '오늘 정규 종가' 로 바뀐 구간이라, 야후의 오늘 정규장 등락률로 어제 종가를 되짚어
+  //   큰 숫자를 계속 '어제 종가 대비 누적' 으로 둔다(애프터와 이어지게). 프리마켓(04:00 ET~)부터는 토스 base 그대로.
+  if (isUsOvernightNow()) {
+    for (const sym of usMap.keys()) {
+      const m = merged.get(sym);
+      if (!m || !(m.regularPrice && m.regularPrice > 0) || m.regularPct == null) continue;
+      const yClose = m.regularPrice / (1 + m.regularPct / 100);
+      if (!(yClose > 0)) continue;
+      merged.set(sym, { ...m, prev: yClose, prevClose: yClose, diff: m.price - yClose, pct: (m.price / yClose - 1) * 100 });
+    }
+  }
   for (const r of investResults) { if (r) applyToss(r.symbol, r); }
+  if (cnnFgIdx) applyToss(cnnFgIdx.symbol, cnnFgIdx);
+  for (const m of sinaMetals) applyToss(m.symbol, m);
+  for (const m of memPrices) applyToss(m.symbol, m);
 
   return merged;
 }
@@ -4509,6 +4935,29 @@ export async function fetchHlXyzPerps(): Promise<Map<string, HlPerp>> {
   return out;
 }
 // 스파크라인용 — 최근 24시간 15분봉 종가. coin 은 "xyz:SKHY" 처럼 프리픽스 포함.
+// 24h 카드용 **어제+오늘** — 무기한선물은 끝없이 거래돼 '하루'가 없다. 그래서 최근 48시간을 반으로:
+//   왼쪽 = 48~24시간 전, 오른쪽 = 최근 24시간(시간 축). 기준선 = 각 반쪽의 시작 가격 — 오른쪽 기준은 24시간 전 가격이라
+//   카드 %(prevDayPx 대비)와 같은 기준이다.
+export async function fetchHlPerpTwoDay(coin: string): Promise<DaySeries | null> {
+  try {
+    const end = Date.now(), start = end - 48 * 3600_000, mid = end - 24 * 3600_000;
+    const resp = await fetch("https://api.hyperliquid.xyz/info", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "candleSnapshot", req: { coin, interval: "5m", startTime: start, endTime: end } }),
+    });
+    if (!resp.ok) return null;
+    const arr = (await resp.json() as { t?: number; c?: string }[]).flatMap(k => (k.t && Number(k.c) > 0 ? [{ t: k.t, c: Number(k.c) }] : []));
+    if (arr.length < 2) return null;
+    const bi = arr.findIndex(k => k.t >= mid);
+    const xs = arr.map(k => (k.t < mid ? ((k.t - start) / (24 * 3600_000)) * TWO_DAY_HALF : twoDayTodayX((k.t - mid) / (24 * 3600_000))));
+    return {
+      closes: arr.map(k => k.c), xs, twoDay: true,
+      base: bi > 0 ? arr[bi - 1].c : undefined, prevBase: arr[0].c,
+      breakIdx: bi > 0 ? bi : undefined,
+    };
+  } catch { return null; }
+}
+
 export async function fetchHlPerpCandles(coin: string): Promise<number[]> {
   try {
     const end = Date.now(), start = end - 24 * 60 * 60 * 1000;
@@ -4910,4 +5359,182 @@ export async function fetchTossTicsStocks(
     }];
   });
   return { total: num(j.result?.totalCount), page: num(j.result?.page) || page, stocks };
+}
+
+// ─── 종목 실시간 체결 (토스 v2 ticks) ───────────────────────────────
+//   체결 하나하나에 매수/매도 구분(tradeType)이 붙어 있다 — 반도체 대시보드의 '지금 사는 쪽이 센가'.
+//   ⚠️ 최근 것만 준다: count 는 300 까지(500 이상은 400). 하이닉스 기준 약 50초치 → 화면이 5초마다 받아 쌓는다.
+//   과거로 넘기는 파라미터는 없다(실측 2026-10-21). 시각은 KST "HH:MM:SS".
+export interface TossTick { time: string; price: number; volume: number; side: "BUY" | "SELL"; cum: number }
+export async function fetchTossTicks(code: string, count = 300): Promise<TossTick[]> {
+  const r = await fetchProxied(`https://wts-info-api.tossinvest.com/api/v2/stock-prices/A${code}/ticks?count=${Math.min(300, count)}`);
+  if (!r.ok) throw new Error(`체결 조회 실패 (HTTP ${r.status})`);
+  const j = await r.json() as { result?: { time?: string; price?: number; volume?: number; tradeType?: string; cumulativeVolume?: number }[] };
+  return (j.result ?? []).flatMap(t => t.time && t.price && t.volume && (t.tradeType === "BUY" || t.tradeType === "SELL")
+    ? [{ time: t.time, price: t.price, volume: t.volume, side: t.tradeType, cum: t.cumulativeVolume ?? 0 }] : []);
+}
+
+// ─── 코스피200 선물·옵션 실시간 (한국경제 markets.hankyung.com) ─────────────
+//   네이버 선물 수급은 20분 늦지만 한경 시세는 실시간이다(실측 11:23 요청 → 11:23:12 체결).
+//   인증 헤더(사이트 공개 키)는 프록시가 붙인다 — 프론트엔드 번들의 값을 그대로(사이트가 바꾸면 401).
+//   옵션은 **투자자별 수급이 아니라 시세**(행사가별 현재가·거래량·미결제) — 풋/콜 비율로 분위기를 본다.
+export interface KrFuturesLive {
+  price: number; chg: number; pct: number; open: number; high: number; low: number;
+  volume: number; oi: number; oiChg: number; basis: number; time: string; month: string;
+}
+const HK = "https://markets.hankyung.com/api/v2/future/option";
+type HkTrader = { chetime?: string; curprc?: number | string; chgprc?: number | string; chgrate?: number | string; openprc?: number | string;
+  highprc?: number | string; lowprc?: number | string; volume?: string; mivol?: number | string; basis?: number | string };
+type HkOptRow = { stkprice?: string; premivol?: string; option_trader?: HkTrader };
+const hkTime = (t?: string) => (t && t.length >= 6 ? `${t.slice(0, 2)}:${t.slice(2, 4)}:${t.slice(4, 6)}` : "");
+type HkKind = "kospi200" | "kosdaq150";
+const hkDetailMemo = new Map<HkKind, { at: number; p: Promise<{ future?: { kr_name?: string; premivol?: string; future_trader?: HkTrader }; lastDates?: string[] } | null> }>();
+function loadHkDetail(kind: HkKind = "kospi200") {
+  const m = hkDetailMemo.get(kind);
+  if (m && Date.now() - m.at < 4_000) return m.p;   // 선물·옵션이 같은 응답을 쓴다 — 한 번만
+  const p = fetchProxied(`${HK}/${kind}`).then(r => (r.ok ? r.json() : null)).catch(() => null);
+  hkDetailMemo.set(kind, { at: Date.now(), p });
+  return p;
+}
+export async function fetchKrFuturesLive(kind: HkKind = "kospi200"): Promise<KrFuturesLive | null> {
+  const j = await loadHkDetail(kind);
+  const f = j?.future, t = f?.future_trader;
+  const n = (v: unknown) => Number(v) || 0;
+  if (!t || !(n(t.curprc) > 0)) return null;
+  return {
+    price: n(t.curprc), chg: n(t.chgprc), pct: n(t.chgrate), open: n(t.openprc), high: n(t.highprc), low: n(t.lowprc),
+    // 미결제 mivol 은 **천 계약** 단위(144.69 = 144,690 — 전일 premivol 145866 과 비교해 확인)
+    volume: n(t.volume), oi: Math.round(n(t.mivol) * 1000), oiChg: Math.round(n(t.mivol) * 1000) - n(f?.premivol),
+    basis: n(t.basis), time: hkTime(t.chetime), month: f?.kr_name ?? "",
+  };
+}
+
+export interface OptionSummary {
+  month: string;               // 만기일 "YYYYMMDD"(근월물)
+  atm: number;                 // 가운데 행사가
+  callVol: number; putVol: number;   // 받은 행사가 범위의 당일 거래량 합
+  callOi: number; putOi: number;     // 미결제약정 합
+  callOiChg: number; putOiChg: number;   // 전일 대비 미결제 증감
+  maxCallOi?: number; maxPutOi?: number; // 미결제가 가장 많은 행사가(콜=위 저항·풋=아래 지지로 흔히 본다)
+  range: [number, number];     // 받은 행사가 범위
+  time: string;
+}
+// 근월물 옵션 — 행사가가 위에서부터(높은 값 먼저) 10개씩 페이지로 온다(343개 = 35쪽).
+//   지금 가격 근처 3쪽(약 ±37pt)만 받는다 — 1분마다 3~4콜.
+export async function fetchKospi200OptionSummary(underlying: number): Promise<OptionSummary | null> {
+  const d = await loadHkDetail();
+  const month = d?.lastDates?.[0];
+  if (!month || !(underlying > 0)) return null;
+  const page = async (p: number) => {
+    const r = await fetchProxied(`${HK}/kospi200-list?lastDate=${month}&page=${p}`);
+    if (!r.ok) return null;
+    const j = await r.json() as { data?: Record<string, { call?: HkOptRow[]; put?: HkOptRow[] }> | { call?: HkOptRow[]; put?: HkOptRow[] }[]; last_page?: number };
+    // 1쪽은 배열, 2쪽부터는 {"10": …} 객체로 온다(라라벨 페이지네이션) — 둘 다 배열로
+    return { last_page: j.last_page, data: Object.values(j.data ?? {}) };
+  };
+  const first = await page(1);
+  const rows0 = first?.data ?? [];
+  const top = Number(rows0[0]?.call?.[0]?.stkprice ?? 0), step = Math.abs(top - Number(rows0[1]?.call?.[0]?.stkprice ?? top)) || 2.5;
+  if (!top) return null;
+  const idx = Math.max(0, Math.round((top - underlying) / step));
+  // 가운데 행사가 위·아래 15개씩(±37.5pt) 이 걸치는 쪽들 — 보통 3~4쪽
+  const lastPage = first?.last_page ?? 1;
+  const p0 = Math.max(1, Math.floor((idx - 15) / 10) + 1), p1 = Math.min(lastPage, Math.floor((idx + 15) / 10) + 1);
+  const pages = await Promise.all(Array.from({ length: p1 - p0 + 1 }, (_, i) => p0 + i).map(p => (p === 1 ? Promise.resolve(first) : page(p))));
+  const n = (v: unknown) => Number(v) || 0;
+  let callVol = 0, putVol = 0, callOi = 0, putOi = 0, callPre = 0, putPre = 0, lo = Infinity, hi = 0, time = "";
+  let maxC = { k: 0, oi: -1 }, maxP = { k: 0, oi: -1 };
+  for (const pg of pages) for (const r of pg?.data ?? []) {
+    const c = r.call?.[0], p = r.put?.[0];
+    const k = n(c?.stkprice ?? p?.stkprice);
+    if (!k) continue;
+    lo = Math.min(lo, k); hi = Math.max(hi, k);
+    const co = n(c?.option_trader?.mivol), po = n(p?.option_trader?.mivol);
+    callVol += n(c?.option_trader?.volume); putVol += n(p?.option_trader?.volume);
+    callOi += co; putOi += po; callPre += n(c?.premivol); putPre += n(p?.premivol);
+    if (co > maxC.oi) maxC = { k, oi: co };
+    if (po > maxP.oi) maxP = { k, oi: po };
+    const tt = c?.option_trader?.chetime ?? "";
+    if (tt > time && tt.length >= 6) time = tt;
+  }
+  if (!hi) return null;
+  return {
+    month, atm: top - idx * step, callVol, putVol, callOi, putOi, callOiChg: callOi - callPre, putOiChg: putOi - putPre,
+    maxCallOi: maxC.oi > 0 ? maxC.k : undefined, maxPutOi: maxP.oi > 0 ? maxP.k : undefined,
+    range: [lo, hi], time: hkTime(time),
+  };
+}
+
+// 코스피200 선물 1분봉(한경) — 최근 6거래일(08:45~15:45, 하루 약 411개)이 한 콜로 온다. 실시간(11:46 요청 → 11:46 봉).
+//   카드 배경용 **어제+오늘** 시계열(buildTwoDaySeries 와 같은 모양): 축은 하루 08:45~15:45, 기준선은 각 날의 전일 종가
+//   (봉의 close − chg_net), 세로선은 09:00(현물 개장).
+export async function fetchKrFuturesMinute(kind: "kospi200" | "kosdaq150" = "kospi200"): Promise<DaySeries | null> {
+  const r = await fetchProxied(`https://markets.hankyung.com/api/v2/future/${kind}/min`);
+  if (!r.ok) return null;
+  const rows = await r.json() as { mdate?: string; mtime?: string; close?: number; chg_net?: number }[];
+  if (!Array.isArray(rows) || !rows.length) return null;
+  const days = [...new Set(rows.map(x => x.mdate ?? ""))].filter(Boolean).sort();
+  const today = days[days.length - 1], prevDay = days[days.length - 2];
+  const START = 8 * 60 + 45, SPAN = 7 * 60;
+  const frac = (t = "") => Math.min(1, Math.max(0, (Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5)) - START) / SPAN));
+  const of = (d?: string) => rows.filter(x => x.mdate === d && (x.close ?? 0) > 0);
+  const prev = of(prevDay), cur = of(today);
+  if (!cur.length) return null;
+  const baseOf = (xs: typeof rows) => { const l = xs[xs.length - 1]; return l ? (l.close ?? 0) - (l.chg_net ?? 0) : undefined; };
+  const oi = cur.findIndex(x => (x.mtime ?? "") >= "09:00");
+  // 선물 정규장 종가 15:45 — 한경 봉 시각은 시작 시각이라 15:45 전 마지막 봉, 장이 끝난 뒤에만
+  const ci = cur.some(x => (x.mtime ?? "") >= "15:44") ? cur.map(x => (x.mtime ?? "") < "15:45").lastIndexOf(true) : -1;
+  return {
+    closes: [...prev.map(x => x.close!), ...cur.map(x => x.close!)],
+    xs: [...prev.map(x => frac(x.mtime) * TWO_DAY_HALF), ...cur.map(x => twoDayTodayX(frac(x.mtime)))],
+    base: baseOf(cur), prevBase: baseOf(prev), openIdx: oi >= 0 ? prev.length + oi : undefined,
+    closeIdx: ci > 0 ? prev.length + ci : undefined,
+    todayTimes: cur.map(x => (x.mtime ?? "").slice(0, 5)),   // 오늘 봉 시각(가설 검증 — 베이시스 시계열)
+    date: today, twoDay: true, breakIdx: prev.length > 0 ? prev.length : undefined,
+  };
+}
+
+// 오늘 하루 전체 체결강도(토스) — 시세 상세의 tradingStrength(매수 체결량 ÷ 매도 체결량 × 100, 장 시작부터 누적)·거래량·거래대금.
+//   반도체 대시보드 '오늘 전체' 순매수 근사: 대금 × (S−100)/(S+100). 동시호가처럼 방향 없는 체결도 대금에 섞여 있어 근사다.
+export interface DayStrength { strength: number; volume: number; value: number; netAmt: number }
+export async function fetchTossDayStrength(codes: string[]): Promise<Map<string, DayStrength>> {
+  const out = new Map<string, DayStrength>();
+  const r = await fetchProxied(`https://wts-info-api.tossinvest.com/api/v3/stock-prices/details?productCodes=${codes.map(c => `A${c}`).join(",")}`);
+  if (!r.ok) return out;
+  const j = await r.json() as { result?: { code?: string; tradingStrength?: number; volume?: number; value?: number }[] };
+  for (const x of j.result ?? []) {
+    const s = x.tradingStrength ?? 0, v = x.value ?? 0;
+    if (!x.code || !(s > 0)) continue;
+    out.set(x.code.replace(/^A/, ""), { strength: s, volume: x.volume ?? 0, value: v, netAmt: v * (s - 100) / (s + 100) });
+  }
+  return out;
+}
+
+
+// 프로그램 매매 **일별**(시장 전체, 네이버) — 가설 검증용 '최근 N거래일 차익·비차익 순매수'.
+//   periodType=DAY 에 기간을 주면 그 사이 거래일이 온다(약 20일/콜, 실측 2026-10-21). 값은 그날 순매수(원, 비누적).
+export interface ProgramDay { date: string; arbitrage: number; nonArbitrage: number }
+export async function fetchKrProgramDaily(market: "KOSPI" | "KOSDAQ", days = 20): Promise<ProgramDay[]> {
+  const end = nowKstDateStr().replace(/-/g, "");
+  const start = new Date(Date.now() + 9 * 3600_000 - Math.ceil(days * 1.6) * 86400_000).toISOString().slice(0, 10).replace(/-/g, "");
+  const r = await fetchProxied("https://stock.naver.com/api/domestic/market/trendProgram/chart"
+    + `?tradeType=KRX&krxMarketType=${market}&bizdate=${end}&startDate=${start}&endDate=${end}&periodType=DAY`);
+  if (!r.ok) throw new Error(`프로그램 일별 실패 (HTTP ${r.status})`);
+  const rows = await r.json() as Record<string, unknown>[];
+  return (Array.isArray(rows) ? rows : []).flatMap(x => {
+    const d = String(x.bizdate ?? "");
+    return d.length === 8 ? [{ date: `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6)}`, arbitrage: progNum(x.diffPureBuyAmt), nonArbitrage: progNum(x.biDiffPureBuyAmt) }] : [];
+  }).sort((a, b) => a.date.localeCompare(b.date)).slice(-days);
+}
+
+// 오늘 5분봉(야후 v8) — 시각("HH:MM" KST)과 종가. 가설 검증의 베이시스(선물 − 코스피200 현물) 계산용.
+export async function fetchYahooTodayKst(symbol: string): Promise<{ t: string; c: number }[]> {
+  const r = await fetchProxied(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=1d&interval=5m`);
+  if (!r.ok) return [];
+  const j = await r.json() as { chart?: { result?: { timestamp?: number[]; indicators?: { quote?: { close?: (number | null)[] }[] } }[] } };
+  const res = j.chart?.result?.[0], ts = res?.timestamp ?? [], cl = res?.indicators?.quote?.[0]?.close ?? [];
+  return ts.flatMap((t, i) => {
+    const c = cl[i];
+    return c != null && c > 0 ? [{ t: new Date((t + 9 * 3600) * 1000).toISOString().slice(11, 16), c }] : [];
+  });
 }

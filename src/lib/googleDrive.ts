@@ -110,6 +110,41 @@ export async function uploadFile<T>(payload: T): Promise<string> {
   return updated.modifiedTime;
 }
 
+// ─── 이전 버전(revision) — 덮어쓰기 사고 복구용 ─────────────────
+//   Drive 는 PATCH 로 내용을 바꿀 때마다 이전 내용을 revision 으로 남긴다(일반 파일은 약 30일·최대 100개).
+//   appDataFolder 파일도 같다. 새 기기에서 빈 데이터가 올라가 덮인 경우 여기서 되살린다(2026-10-20 사고).
+export interface DriveRevision { id: string; modifiedTime: string; size?: string }
+export async function listRevisions(): Promise<DriveRevision[]> {
+  const meta = await getFileMeta();
+  if (!meta) return [];
+  const resp = await driveFetch(
+    `https://www.googleapis.com/drive/v3/files/${meta.id}/revisions?fields=revisions(id,modifiedTime,size)&pageSize=200`);
+  if (!resp.ok) throw new Error(`Drive 버전 목록 실패: ${resp.status}`);
+  const data = await resp.json() as { revisions?: DriveRevision[] };
+  return [...(data.revisions ?? [])].sort((a, b) => b.modifiedTime.localeCompare(a.modifiedTime));   // 최신 먼저
+}
+// 버전 내용 받기 — 목록을 띄운 뒤 여러 개를 연달아 받으므로 파일 id 는 1분 캐시(매번 목록 조회 1콜을 아낀다).
+let fileIdCache: { id: string; at: number } | null = null;
+export async function downloadRevision<T = unknown>(revisionId: string): Promise<T> {
+  if (!fileIdCache || Date.now() - fileIdCache.at > 60_000) {
+    const m = await getFileMeta();
+    if (!m) throw new Error("Drive 파일이 없습니다");
+    fileIdCache = { id: m.id, at: Date.now() };
+  }
+  const url = `https://www.googleapis.com/drive/v3/files/${fileIdCache.id}/revisions/${encodeURIComponent(revisionId)}?alt=media`;
+  // ★ 연달아 받으면 Drive 가 속도 제한으로 403(rateLimitExceeded)·429 를 섞어 준다(2026-10-20 실측 — 200·403 이 번갈아).
+  //   잠깐 쉬었다(1·2·4초) 다시 받는다. 그래도 안 되면 그 버전만 '확인 실패' 로 둔다.
+  for (let attempt = 0; ; attempt++) {
+    const resp = await driveFetch(url);
+    if (resp.ok) return await resp.json() as T;
+    if ((resp.status === 403 || resp.status === 429) && attempt < 3) {
+      await new Promise(r => setTimeout(r, 1000 * 2 ** attempt));
+      continue;
+    }
+    throw new Error(`Drive 버전 받기 실패: ${resp.status}`);
+  }
+}
+
 // 파일 완전 삭제 (테스트·디버깅용)
 export async function deleteFile(): Promise<void> {
   const meta = await getFileMeta();

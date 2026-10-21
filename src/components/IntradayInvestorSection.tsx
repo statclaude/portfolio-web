@@ -1,17 +1,29 @@
 // 증시탭 — 투자자 순매수. 코스피·선물·코스닥 3개를 한 줄에, 공통 투자자 토글로 제어.
 //   [당일] 시간별 누적(네이버 intraday) / [일별] 기간별 누적(네이버 daily) 토글.
 //   일별은 기간 선택 + 기간 합계(헤더)를 표시. 데이터: 네이버 investorDealTrend*(로그인 불필요).
+//
+// ★ 당일(시간별)에는 **날짜 선택이 없다**. 네이버가 bizdate 를 무시하고 늘 오늘 값을 주기 때문에
+//   (api.ts fetchKrIntradayInvestorFlow 주석) 날짜를 옮기면 배경 지수만 바뀌고 수급은 오늘 것이
+//   그 날짜인 척 그려졌다. 과거는 [일별] 로 본다.
 
 import { useState, useMemo, useCallback, lazy, Suspense, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { fetchKrIntradayInvestorFlow, fetchLatestFlowBizdate, fetchKrDailyInvestorFlow, fetchYahooIntraday, fetchTossIndexIntraday, fetchYahooPriceHistory, fetchKrFuturesDaily, fetchLeverageDailyFlow, fetchKrPriceHistory, LEVERAGE_BASKETS } from "../lib/api";
-import type { IntradayMarket, LeverageBasket } from "../lib/api";
+import { fetchKrIntradayInvestorFlow, fetchKrDailyInvestorFlow, fetchYahooIntraday, fetchTossIndexIntraday, fetchYahooPriceHistory, fetchKrFuturesDaily, fetchKrFuturesOpenInterest, fetchLeverageDailyFlow, fetchKrPriceHistory, LEVERAGE_BASKETS } from "../lib/api";
+import type { IntradayMarket, LeverageBasket, KrFuturesOpenInterest } from "../lib/api";
 import { INTRADAY_SERIES, type IntradayKey } from "../lib/intradayInvestor";
 import { useCrosshairSync, type SyncRegistrar } from "../lib/useCrosshairSync";
 import { nextFuturesExpiry } from "../lib/futuresExpiry";
+import { Tooltip } from "./Tooltip";
 import { isMarketOpen, nowKstDateStr } from "../lib/format";
 import type { FlowSeriesPoint } from "./IntradayInvestorChart";
 import type { UTCTimestamp } from "lightweight-charts";
+
+// 넥스트레이드 프리장 08:00~09:00 KST(평일)
+function isKrPreMarket(): boolean {
+  const k = new Date(Date.now() + 9 * 3600_000);
+  const day = k.getUTCDay(), hhmm = k.getUTCHours() * 60 + k.getUTCMinutes();
+  return day >= 1 && day <= 5 && hhmm >= 8 * 60 && hhmm < 9 * 60 + 2;
+}
 
 const IntradayInvestorChart = lazy(() => import("./IntradayInvestorChart"));
 
@@ -49,11 +61,6 @@ function pick(p: Record<IntradayKey, number>): Record<IntradayKey, number> {
 function todayKST(): string {
   return new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10);
 }
-function shiftDate(d: string, delta: number): string {
-  const dt = new Date(`${d}T00:00:00Z`);
-  dt.setUTCDate(dt.getUTCDate() + delta);
-  return dt.toISOString().slice(0, 10);
-}
 function hmToTime(hm: string): UTCTimestamp {
   const [h, m] = hm.split(":").map(Number);
   return (Date.UTC(2000, 0, 1, h, m) / 1000) as UTCTimestamp;
@@ -74,24 +81,26 @@ function kstFromEpoch(sec: number): { date: string; t: UTCTimestamp } {
   };
 }
 
-function MarketBlock({ market, label, enabled, mode, days, bizdate, intraOk = true, on, onReady, onToggle, refFirstT, refLastT }: {
+function MarketBlock({ market, label, enabled, mode, days, on, onReady, onToggle, refFirstT, refLastT }: {
   market: IntradayMarket; label: string; enabled: Record<string, boolean>;
-  mode: "intraday" | "daily"; days: number; bizdate: string; on: boolean; onReady: SyncRegistrar;
-  /** false 면 시간별 투자자 조회를 건너뛴다(그 날짜는 서버가 데이터를 주지 않는다). */
-  intraOk?: boolean;
+  mode: "intraday" | "daily"; days: number; on: boolean; onReady: SyncRegistrar;
   onToggle: (k: IntradayKey) => void;
   refFirstT?: UTCTimestamp; refLastT?: UTCTimestamp;   // 기준 시간범위(코스피·코스닥)
 }) {
-  // 당일·장중일 때만 60초 폴링 — 안 걸면 첫 로드 값에 그대로 굳어(지수선이 실제와 어긋남) 있게 된다.
-  //   과거 날짜 조회·장 마감 후·섹션 접힘 상태에서는 폴링 없음(프록시 호출수 절약).
-  const live = on && bizdate === nowKstDateStr() && isMarketOpen("KR");
+  // 시간별은 당일치뿐이라 조회일 = 오늘 고정(배경 지수도 같은 날로 맞춘다).
+  const bizdate = nowKstDateStr();
+  // 장중일 때만 60초 폴링 — 안 걸면 첫 로드 값에 그대로 굳어(지수선이 실제와 어긋남) 있게 된다.
+  //   장 마감 후·섹션 접힘 상태에서는 폴링 없음(프록시 호출수 절약).
+  const live = on && isMarketOpen("KR");
+  // 프리장(08:00~09:00, 넥스트레이드) — 수급만 60초 폴링. 선물은 프리장이 없다.
+  const preNow = on && market !== "futures" && isKrPreMarket();
   const livePoll = live ? 60_000 : (false as const);
 
   const intra = useQuery({
-    queryKey: ["market-flow-intraday", market, bizdate],
-    queryFn: () => fetchKrIntradayInvestorFlow(market, bizdate.replace(/-/g, "")),
-    enabled: on && mode === "intraday" && intraOk,
-    refetchInterval: mode === "intraday" ? livePoll : false,
+    queryKey: ["market-flow-intraday", market],
+    queryFn: () => fetchKrIntradayInvestorFlow(market),
+    enabled: on && mode === "intraday",
+    refetchInterval: mode === "intraday" ? (preNow ? 60_000 : livePoll) : false,
     staleTime: 60_000, refetchOnWindowFocus: false,
   });
   const daily = useQuery({
@@ -140,6 +149,11 @@ function MarketBlock({ market, label, enabled, mode, days, bizdate, intraOk = tr
   });
 
   const q = mode === "intraday" ? intra : daily;
+  // 당일 차트가 실제로 무엇인지 — 프리장이면 '프리장(NXT)', 오늘 행이 아직 없으면 그 날짜(장 시작 전엔 어제 수급이다)
+  const intraDate = intra.data?.date;
+  const intraTag = mode !== "intraday" ? ""
+    : intra.data?.pre ? " · 프리장(NXT)"
+    : intraDate && intraDate !== bizdate ? ` · ${+intraDate.slice(5, 7)}/${+intraDate.slice(8, 10)} 수급` : "";
 
   const shell = (inner: ReactNode) => (
     <div className="h-[240px] flex flex-col items-center justify-center text-xs text-gray-400 border border-gray-200 rounded gap-0.5">
@@ -259,7 +273,7 @@ function MarketBlock({ market, label, enabled, mode, days, bizdate, intraOk = tr
   return (
     <Suspense fallback={<div className="h-[260px]" />}>
       <IntradayInvestorChart series={series} summary={summary} enabled={enabled}
-        unit={unit} marketLabel={label} timeVisible={mode === "intraday"}
+        unit={unit} marketLabel={label + intraTag} timeVisible={mode === "intraday"}
         summaryHint={mode === "daily" ? "기간합계" : undefined}
         indexSeries={indexSeries} indexLabel={ysym ? INDEX_LABEL[market] : undefined}
         indexBaseline={indexBaseline} onReady={onReady} onToggle={onToggle}
@@ -326,6 +340,124 @@ function LeverageBlock({ basket, enabled, days, on, onReady, onToggle }: {
   );
 }
 
+// 선물 미결제약정 — 근월물 기준, 전일 대비 증감. 일별 값이라 장중 5분 간격으로만 다시 묻는다.
+//   증감 색은 가격 색(빨강·파랑)과 헷갈리지 않게 중립(진회색)·굵기만. 늘었다 = 새 포지션 유입.
+//   숫자만으론 읽을 수 없어 같은 날 가격 방향과 짝지은 해석을 한 줄 붙인다(모바일엔 title 이 안 보인다).
+//   ★ 만기 2주 안은 근월물→차월물 롤오버로 근월물 미결제가 줄어드는 게 정상 — 그땐 감소를 해석하지 않는다.
+type OiCase = "uu" | "ud" | "du" | "dd";   // 가격 방향 + 미결제 방향
+function oiCase(diff: number, chg: number): OiCase | null {
+  if (diff === 0 || chg === 0) return null;
+  return `${chg > 0 ? "u" : "d"}${diff > 0 ? "u" : "d"}` as OiCase;
+}
+const OI_CASES: Record<OiCase, { text: string; tone: string; why: string }> = {
+  uu: { text: "가격↑·미결제↑ 신규 매수 유입 — 상승에 힘이 실림", tone: "text-rose-600",
+        why: "새로 사는 쪽이 들어오며 계약이 늘었다. 상승에 새 돈이 붙은 것이라 추세가 이어질 근거가 된다." },
+  ud: { text: "가격↑·미결제↓ 매도 포지션 청산(숏커버링) — 새 매수 없는 반등", tone: "text-rose-400",
+        why: "판 사람들이 되사서 포지션을 닫으며 오른 것. 새로 사는 돈이 아니라 청산이라, 청산이 끝나면 힘이 빠지기 쉽다." },
+  du: { text: "가격↓·미결제↑ 신규 매도 유입 — 하락에 힘이 실림", tone: "text-blue-600",
+        why: "새로 파는 쪽이 들어오며 계약이 늘었다. 하락에 새 매도가 붙은 것이라 추세가 이어질 근거가 된다." },
+  dd: { text: "가격↓·미결제↓ 매수 포지션 정리 — 새 매도 없는 하락", tone: "text-blue-400",
+        why: "산 사람들이 팔고 나가며 내린 것. 새 매도가 아니라 정리라, 정리가 끝나면 하락이 멈추기 쉽다." },
+};
+function FuturesOpenInterestLine({ on }: { on: boolean }) {
+  const q = useQuery({
+    queryKey: ["kr-futures-oi"],
+    queryFn: fetchKrFuturesOpenInterest,
+    enabled: on,
+    refetchInterval: on && isMarketOpen("KR") ? 5 * 60_000 : false,
+    staleTime: 5 * 60_000, refetchOnWindowFocus: false,
+  });
+  const d = q.data;
+  if (!d) return null;
+  const diff = d.prevOi != null ? d.oi - d.prevOi : null;
+  const exp = nextFuturesExpiry();
+  const rolling = exp.daysLeft <= 14;
+  const rollDrop = rolling && diff != null && diff < 0;
+  const kase = diff != null && d.chg != null && !rollDrop ? oiCase(diff, d.chg) : null;
+  const reading = kase ? OI_CASES[kase] : null;
+  return (
+    <Tooltip className="mt-1 px-1 text-[11px] leading-snug flex-col cursor-help" content={<OiTip d={d} diff={diff} kase={kase} rollDrop={rollDrop} daysLeft={exp.daysLeft} />}>
+      <div className="text-gray-500 flex flex-wrap items-baseline gap-x-1.5">
+        <span className="underline decoration-dotted underline-offset-2">미결제약정</span>
+        <span className="font-semibold text-gray-800 tabular-nums">{d.oi.toLocaleString()}계약</span>
+        {diff != null && (
+          <span className="tabular-nums text-gray-700">({diff > 0 ? "+" : ""}{diff.toLocaleString()})</span>
+        )}
+        <span className="text-gray-400">{+d.date.slice(5, 7)}/{+d.date.slice(8, 10)} · {d.contract}</span>
+      </div>
+      <div className="text-[10px] text-gray-400">
+        {reading ? <span className={`font-medium ${reading.tone}`}>{reading.text}</span>
+          : rollDrop ? <span>만기 D-{exp.daysLeft} 롤오버 구간 — 근월물 감소는 다음 월물로 옮겨 가는 것(방향 신호 아님)</span>
+          : <span>청산 안 된 계약 수 · 가격과 같이 늘면 새 돈 유입, 줄면 기존 포지션 정리</span>}
+      </div>
+    </Tooltip>
+  );
+}
+
+// 미결제약정 설명 레이어 — 브라우저 title 은 1초 넘게 늦게 떠서 즉시 뜨는 Tooltip 을 쓴다.
+//   맨 위에 **지금 값**을 숫자로 풀고, 아래 표에서 지금 해당하는 줄을 칠한다.
+// "F 202612" → "26년 12월물"
+function contractLabel(name: string): string {
+  const m = /(\d{2})(\d{2})(\d{2})\s*$/.exec(name);
+  return m ? `${m[2]}년 ${+m[3]}월물` : name;
+}
+function OiTip({ d, diff, kase, rollDrop, daysLeft }: {
+  d: KrFuturesOpenInterest; diff: number | null; kase: OiCase | null; rollDrop: boolean; daysLeft: number;
+}) {
+  const md = `${+d.date.slice(5, 7)}/${+d.date.slice(8, 10)}`;
+  const chgPct = d.chg != null && d.price != null && d.price - d.chg > 0 ? (d.chg / (d.price - d.chg)) * 100 : null;
+  const oiPct = diff != null && d.prevOi ? (diff / d.prevOi) * 100 : null;
+  const sgn = (v: number, digits = 0) => `${v > 0 ? "+" : ""}${v.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+  const rows: [OiCase, string, string, string][] = [
+    ["uu", "↑", "↑", "신규 매수 유입 — 상승 추세 강화"],
+    ["ud", "↑", "↓", "매도 청산(숏커버링) — 힘이 약한 반등"],
+    ["du", "↓", "↑", "신규 매도 유입 — 하락 추세 강화"],
+    ["dd", "↓", "↓", "매수 정리 — 하락 막바지일 수 있음"],
+  ];
+  return (
+    <div className="space-y-1.5 max-w-[360px]">
+      <div className="rounded bg-gray-50 border border-gray-200 px-2 py-1.5 space-y-0.5">
+        <div className="font-bold text-gray-700">지금 값 ({md} · {d.contract} = {contractLabel(d.contract)} 코스피200 선물)</div>
+        {d.chg != null && (
+          // 다음 금융은 지수 포인트(881.05) 그대로다. 같은 카드 차트는 ×100(88,105 — KODEX 200 가격대)이라 둘 다 적는다.
+          <div>선물가 <b className="tabular-nums">{d.price?.toFixed(2)}</b>pt{" "}
+            <span className={`tabular-nums font-bold ${d.chg > 0 ? "text-rose-600" : d.chg < 0 ? "text-blue-600" : ""}`}>
+              {sgn(d.chg, 2)}pt{chgPct != null ? ` (${sgn(chgPct, 2)}%)` : ""}
+            </span>
+            {d.price != null && <span className="text-gray-400"> · 차트 표기 {Math.round(d.price * 100).toLocaleString()}</span>}
+          </div>
+        )}
+        {diff != null && d.prevOi != null && (
+          <div>미결제 <span className="tabular-nums">{d.prevOi.toLocaleString()}</span> → <b className="tabular-nums">{d.oi.toLocaleString()}</b>계약{" "}
+            <span className="tabular-nums font-bold">{sgn(diff)}{oiPct != null ? ` (${sgn(oiPct, 1)}%)` : ""}</span></div>
+        )}
+        {kase ? (
+          <div className={`font-medium ${OI_CASES[kase].tone}`}>→ {OI_CASES[kase].why}</div>
+        ) : rollDrop ? (
+          <div className="text-gray-600">→ 만기 D-{daysLeft} 롤오버 구간이라 근월물 감소는 다음 월물로 옮겨 가는 것 — 방향 신호로 읽지 않는다.</div>
+        ) : d.chg == null || diff == null ? (
+          <div className="text-gray-600">→ {d.chg == null ? "선물 가격 등락" : "전일 미결제"}을 못 받아 둘을 묶어 읽을 수 없다.</div>
+        ) : (
+          <div className="text-gray-600">→ {d.chg === 0 ? "선물 가격이 전일과 같아" : "미결제가 전일과 같아"} 방향을 읽을 신호가 없다.</div>
+        )}
+      </div>
+      <div><b>미결제약정</b> — 아직 청산되지 않고 남아 있는 선물 계약 수. 새로 사고·파는 사람이 만나면 +1, 둘 다 청산하면 −1.</div>
+      <table className="text-[11px] border-collapse">
+        <thead><tr className="text-gray-500"><th className="pr-2 text-left font-medium">가격</th><th className="pr-2 text-left font-medium">미결제</th><th className="text-left font-medium">읽는 법</th></tr></thead>
+        <tbody>
+          {rows.map(([k, p, o, t]) => (
+            <tr key={k} className={k === kase ? "bg-amber-100 font-bold" : ""}>
+              <td className={`pl-1 ${p === "↑" ? "text-rose-600" : "text-blue-600"}`}>{p}</td><td>{o}</td>
+              <td className="pr-1">{t}{k === kase ? " ← 지금" : ""}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="text-gray-500">근월물(가장 가까운 만기) 기준 일별 값 · 출처 다음 금융. 장중엔 그 시각까지의 값이다. 만기 2주 전후엔 다음 월물로 옮겨 가며(롤오버) 근월물 값이 크게 줄어드는데, 방향 신호가 아니다.</div>
+    </div>
+  );
+}
+
 // 선물·옵션 동시만기 배지 — 만기 1주 이내에만 표시(당일은 강조). 만기일 현물 변동성↑ 경고.
 function FuturesExpiryBadge() {
   const info = nextFuturesExpiry();
@@ -359,21 +491,6 @@ export function IntradayInvestorSection() {
 
   const [mode, setMode] = useState<"intraday" | "daily">("intraday");
   const [days, setDays] = useState<number>(22);   // 일별 기간 (기본 1개월)
-  const today = todayKST();
-  // 시간별 데이터는 서버가 '최신 거래일' 하루치만 준다 — 오늘이 휴장일·개장 전이면 그 직전 거래일이 기본이다.
-  //   사용자가 고른 날짜(pickedDate)가 있으면 그것을 존중하되, 데이터가 없는 날짜임을 화면에 알린다.
-  const [pickedDate, setPickedDate] = useState<string | null>(null);
-  const latestQ = useQuery({
-    queryKey: ["market-flow-latest-bizdate"],
-    queryFn: fetchLatestFlowBizdate,
-    enabled: open && mode === "intraday",
-    staleTime: 5 * 60_000, refetchInterval: 5 * 60_000, refetchOnWindowFocus: false,
-  });
-  const latest = latestQ.data ?? null;                       // 서버가 제공하는 최신 거래일
-  const defaultDate = latest && latest < today ? latest : today;
-  const intraDate = pickedDate ?? defaultDate;               // 당일 뷰 조회일
-  const maxDate = latest && latest < today ? latest : today; // 그 이후 날짜는 고를 수 없다
-  const intraOk = !latest || intraDate === latest;           // 이 날짜의 시간별 데이터가 제공되는가
 
   const [enabled, setEnabled] = useState<Record<string, boolean>>(() => {
     const init: Record<string, boolean> = {};
@@ -408,14 +525,14 @@ export function IntradayInvestorSection() {
   //   이 범위를 각 차트에 내려 선물이 우측을 공백으로 맞추게 함(코스피·코스닥이 시간축 기준).
   //   MarketBlock 과 동일 queryKey → react-query 가 요청을 중복 없이 공유(추가 네트워크 없음).
   const refKospiIntra = useQuery({
-    queryKey: ["market-flow-intraday", "kospi", intraDate],
-    queryFn: () => fetchKrIntradayInvestorFlow("kospi", intraDate.replace(/-/g, "")),
-    enabled: open && mode === "intraday" && intraOk, staleTime: 60_000, refetchOnWindowFocus: false,
+    queryKey: ["market-flow-intraday", "kospi"],
+    queryFn: () => fetchKrIntradayInvestorFlow("kospi"),
+    enabled: open && mode === "intraday", staleTime: 60_000, refetchOnWindowFocus: false,
   });
   const refKosdaqIntra = useQuery({
-    queryKey: ["market-flow-intraday", "kosdaq", intraDate],
-    queryFn: () => fetchKrIntradayInvestorFlow("kosdaq", intraDate.replace(/-/g, "")),
-    enabled: open && mode === "intraday" && intraOk, staleTime: 60_000, refetchOnWindowFocus: false,
+    queryKey: ["market-flow-intraday", "kosdaq"],
+    queryFn: () => fetchKrIntradayInvestorFlow("kosdaq"),
+    enabled: open && mode === "intraday", staleTime: 60_000, refetchOnWindowFocus: false,
   });
   const refKospiDaily = useQuery({
     queryKey: ["market-flow-daily", "kospi", days],
@@ -477,45 +594,24 @@ export function IntradayInvestorSection() {
               </div>
             )}
             {mode === "intraday" && (
-              <div className="flex items-center gap-1 text-xs">
-                <button onClick={() => setPickedDate(shiftDate(intraDate, -1))}
-                        title="이전 날" className="px-1.5 py-1 rounded border border-gray-300 hover:bg-gray-50 leading-none">‹</button>
-                <input type="date" value={intraDate} max={maxDate}
-                       onChange={e => e.target.value && setPickedDate(e.target.value)}
-                       className="border border-gray-300 rounded px-1.5 py-0.5 text-xs" />
-                <button onClick={() => setPickedDate(intraDate < maxDate ? shiftDate(intraDate, 1) : intraDate)}
-                        disabled={intraDate >= maxDate} title="다음 날"
-                        className="px-1.5 py-1 rounded border border-gray-300 hover:bg-gray-50 leading-none disabled:opacity-40">›</button>
-                {intraDate !== defaultDate && (
-                  <button onClick={() => setPickedDate(null)}
-                          className="px-2 py-1 rounded border border-gray-300 hover:bg-gray-50 font-medium">
-                    {defaultDate === today ? "오늘" : "최신일"}
-                  </button>
-                )}
+              // 날짜 선택을 두지 않는다 — 소스가 당일치만 준다(파일 상단 주석). 대신 오늘 날짜를
+              //   적어 두고, 과거를 찾는 사람이 헤매지 않게 [일별] 로 바로 보낸다.
+              <div className="flex items-center gap-1.5 text-xs">
+                <span className="px-2 py-1 rounded border border-gray-300 bg-gray-50 font-medium tabular-nums">
+                  {todayKST()}
+                </span>
+                <button onClick={() => setMode("daily")}
+                        title="시간별 수급은 네이버가 당일치만 제공합니다. 과거는 일별로 보세요."
+                        className="text-[10px] text-gray-500 underline decoration-dotted hover:text-gray-800">
+                  과거는 일별로 →
+                </button>
               </div>
             )}
             <span className="text-[10px] text-gray-400">
-              {mode === "intraday" ? "시간별 누적(날짜 선택)" : "기간 누적 (합계 상단 표시)"} · 전 종목 억원(선물=계약 환산)
+              {mode === "intraday" ? "시간별 누적 (당일만 제공)" : "기간 누적 (합계 상단 표시)"} · 전 종목 억원(선물=계약 환산)
             </span>
             <FuturesExpiryBadge />
           </div>
-
-          {mode === "intraday" && !intraOk && (
-            <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 rounded border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-800">
-              <span>
-                ⚠ 시간별 투자자 순매수는 <b>최신 거래일({latest})만</b> 제공됩니다(네이버 API 한계) —
-                {" "}{intraDate} 데이터는 받을 수 없습니다.
-              </span>
-              <button onClick={() => setPickedDate(null)}
-                      className="px-1.5 py-0.5 rounded border border-amber-400 bg-white font-medium hover:bg-amber-100">
-                {latest} 보기
-              </button>
-              <button onClick={() => setMode("daily")}
-                      className="px-1.5 py-0.5 rounded border border-amber-400 bg-white font-medium hover:bg-amber-100">
-                일별로 보기
-              </button>
-            </div>
-          )}
 
           {/* 공통 투자자 토글 (모든 차트 동시 제어) */}
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mb-1.5">
@@ -555,8 +651,9 @@ export function IntradayInvestorSection() {
                   // min-w-0 — grid 자식 기본 min-width:auto 로 선물(칩 많음) 셀이 안 줄고 나머지를 압축하는 것 방지.
                   <div key={m.key} className="min-w-0">
                     <MarketBlock market={m.key} label={m.label} enabled={enabled}
-                      mode={mode} days={days} bizdate={intraDate} intraOk={intraOk} on={open} onReady={registerSync} onToggle={toggleInvestor}
+                      mode={mode} days={days} on={open} onReady={registerSync} onToggle={toggleInvestor}
                       refFirstT={refRange?.from} refLastT={refRange?.to} />
+                    {m.key === "futures" && <FuturesOpenInterestLine on={open} />}
                   </div>
                 ))}
               </div>

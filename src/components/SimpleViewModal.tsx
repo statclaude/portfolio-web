@@ -11,7 +11,7 @@ import { HoldingsHeatmap } from "./HoldingsHeatmap";
 import { HEAT_SIZE_OPTS, HEAT_COLOR_OPTS, HEAT_GROUP_OPTS, HEAT_SIGN_OPTS, type HeatSizeBy, type HeatColorBy, type HeatGroupBy, type HeatSign } from "../lib/holdingsHeat";
 
 // 보기 전환(카드 | 히트맵)·히트맵 크기 기준 — 마지막 선택을 기억한다(2026-10-13)
-const SIZE_KEY = "simple_heat_size", COLOR_KEY = "simple_heat_color", GROUP_KEY = "simple_heat_group";
+const SIZE_KEY = "simple_heat_size", COLOR_KEY = "simple_heat_color", GROUP_KEY = "simple_heat_group", FAINT_KEY = "simple_heat_hide_faint";
 const load = <T extends string>(k: string, ok: readonly T[], d: T): T => { try { const v = localStorage.getItem(k) as T; return ok.includes(v) ? v : d; } catch { return d; } };
 const save = (k: string, v: string) => { try { localStorage.setItem(k, v); } catch { /* 이번 세션만 */ } };
 
@@ -23,9 +23,15 @@ interface Props {
   priceMap: Map<string, Price>;
   chartMap: Map<string, number[]>;
   targetMap?: Map<string, number | undefined>;   // ticker → 컨센서스 목표가
+  onOpenValuation?: (ticker: string) => void;    // 히트맵 칸 클릭 → 📊 기업가치
+  // 흐림 판정용 — 히트맵 '흐린 종목 제외'가 기본 종목 카드와 같은 규칙을 쓰려면 거래시간 정보가 필요하다.
+  krRegMap?: Map<string, KrRegLite | undefined>;
 }
 
-export function SimpleViewModal({ isOpen, onClose, title, stocks, priceMap, chartMap, targetMap }: Props) {
+// 흐림 판정에 필요한 최소 형태만 — StockCard·MobileStockCard 가 각자 KrRegInfo 를 로컬 선언해 둬서 가져올 곳이 없다.
+interface KrRegLite { tradingEnd?: string; nextTradingStart?: string }
+
+export function SimpleViewModal({ isOpen, onClose, title, stocks, priceMap, chartMap, targetMap, onOpenValuation, krRegMap }: Props) {
   useEscClose(isOpen, onClose);
   // 열 때는 늘 히트맵부터(사용자 결정 2026-10-13) — 카드는 전환 버튼으로. 그래서 보기는 기억하지 않는다.
   const [view, setView] = useState<"card" | "heat">("heat");
@@ -33,6 +39,8 @@ export function SimpleViewModal({ isOpen, onClose, title, stocks, priceMap, char
   const [colorBy, setColorBy] = useState<HeatColorBy>(() => load(COLOR_KEY, HEAT_COLOR_OPTS.map(o => o.key), "d1"));
   const [groupBy, setGroupBy] = useState<HeatGroupBy>(() => load(GROUP_KEY, HEAT_GROUP_OPTS.map(o => o.key), "none"));
   const [sign, setSign] = useState<HeatSign>("all");   // +만 / −만 — 열 때마다 전체부터(걸러 둔 걸 잊고 종목이 사라진 줄 알지 않게)
+  // 흐린(거의 보합) 종목 제외 — 기본 켬. 잘게 쪼개진 이름 없는 칸이 사라진다(2026-10-14).
+  const [hideFaint, setHideFaint] = useState(() => { try { return localStorage.getItem(FAINT_KEY) !== "0"; } catch { return true; } });
   if (!isOpen) return null;
   const seg = (on: boolean) => `px-2 py-0.5 ${on ? "bg-indigo-600 text-white" : "bg-white text-gray-600 hover:bg-gray-100"}`;
 
@@ -73,6 +81,11 @@ export function SimpleViewModal({ isOpen, onClose, title, stocks, priceMap, char
                             : "bg-white text-gray-600 hover:bg-gray-100"}`}>{o.label}</button>
                 ))}
               </span>
+              <label className="inline-flex items-center gap-1 cursor-pointer select-none" title="장이 안 열려 지난 거래일 값에 멈춘(카드에서 흐린) 종목을 뺀다 — 전부 닫혀 있을 땐 그대로 둔다">
+                <input type="checkbox" checked={hideFaint}
+                       onChange={e => { setHideFaint(e.target.checked); save(FAINT_KEY, e.target.checked ? "1" : "0"); }} />
+                흐린 종목 제외
+              </label>
             </span>
           )}
           <button onClick={onClose} className="ml-auto text-gray-400 hover:text-gray-600 text-xl">✕</button>
@@ -80,7 +93,8 @@ export function SimpleViewModal({ isOpen, onClose, title, stocks, priceMap, char
 
         <div className="px-3 py-3 overflow-y-auto">
           {view === "heat" ? (
-            <HoldingsHeatmap stocks={stocks} priceMap={priceMap} sizeBy={sizeBy} colorBy={colorBy} groupBy={groupBy} sign={sign} />
+            <HoldingsHeatmap stocks={stocks} priceMap={priceMap} krRegMap={krRegMap} sizeBy={sizeBy} colorBy={colorBy} groupBy={groupBy} sign={sign} hideFaint={hideFaint}
+                             onOpen={onOpenValuation ? (t => { if (/^[\dA-Za-z]{6}$/.test(t)) onOpenValuation(t); }) : undefined} />
           ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
             {stocks.map(stock => {

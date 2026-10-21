@@ -34,7 +34,7 @@ describe("지수 탭 페이지 구성", () => {
     expect(row(true)).not.toContain("^KS200N");
     expect(row(true)).not.toContain("^KQ150N");
     // 주간 시장은 한 줄(6칸) — 지수·KODEX·밸류업·V-KOSPI
-    expect(buildDashboardPage("day", false).find(s => s.id === "kr")!.rows).toEqual([["^KS11", "^KQ11", "069500.KS", "229200.KS", "KVALUE", "VKOSPI"]]);
+    expect(buildDashboardPage("day", false).find(s => s.id === "kr")!.rows).toEqual([["^KS11", "^KQ11", "069500.KS", "229200.KS", "VKOSPI", "^N225", "^HSI", "000001.SS"]]);
     // 야간 페이지 '밤의 한국' 은 반대 — 밤엔 야간선물이 있고, 낮(주간선물 시간)엔 안 보인다
     const nightRow = (krNight: boolean) => buildDashboardPage("night", krNight).find(s => s.id === "krnight")!.rows.flat();
     expect(nightRow(true)).toContain("^KS200N");
@@ -61,8 +61,8 @@ describe("지수 탭 페이지 구성", () => {
   });
 
   it("주간·야간 모두 지수 바로 아래는 같은 한 세트(환율·금리·투심 → 선물 → 현물) — 어느 페이지든 같은 자리에서 찾는다 (사용자 결정 2026-10-08)", () => {
-    expect(ids("day").slice(0, 4)).toEqual(["kr", "krfx", "dayfut", "spot"]);
-    expect(ids("night").slice(0, 4)).toEqual(["macro", "krfx", "krnight", "spot"]);
+    expect(ids("day").slice(0, 5)).toEqual(["kr", "krfx", "dayfut", "spot", "mem"]);        // 메모리 현물가 = 현물 바로 아래(2026-10-20)
+    expect(ids("night").slice(0, 4)).toEqual(["macro", "krfx", "krnight", "spot"]);   // 메모리 현물가는 주간에만
   });
 
   it("순환매 = 반도체 지수 → 일본 반도체 → AI 순환매 → ETF TOP → 한·미 섹터 — 환율·선물은 한국·미국 탭에 (2026-10-12)", () => {
@@ -109,7 +109,7 @@ describe("지수 탭 페이지 구성", () => {
   });
 
   it("주간 = 옛 대장주 페이지를 합쳤다 — 공통 세트 아래에 섹터 대장주 6묶음, 그다음 ETF TOP (사용자 결정 2026-10-08)", () => {
-    expect(ids("day").slice(4)).toEqual(["ldtech", "ldpower", "ldind", "ldfin", "ldlife", "ldcont"]);   // ETF TOP·한·미 섹터는 순환매 탭으로
+    expect(ids("day").slice(5)).toEqual(["ldtech", "ldpower", "ldind", "ldfin", "ldlife", "ldcont"]);   // 4번째 = 메모리 현물가(현물 아래)   // ETF TOP·한·미 섹터는 순환매 탭으로
   });
 
   it("섹터 대장주 = 섹터 줄마다 [섹터 ETF] ➜ [대장주](한 줄 8칸 이내, 반도체·2차전지 등 모든 섹터 — 야간의 반도체 묶음과 겹쳐도 된다)", () => {
@@ -120,7 +120,8 @@ describe("지수 탭 페이지 구성", () => {
       sec.rows.forEach((row, i) => {
         const n = sec.leadByRow?.[i] ?? sec.lead!;
         expect(row.length).toBeLessThanOrEqual(8);
-        expect(row.slice(0, n).every(x => !krStock.has(x))).toBe(true);   // 앞 칸 = ETF
+        // 앞 칸 = ETF. 예외: 맞는 ETF 가 없는 줄은 대표 종목이 기준선(백화점·유통 = 신세계, 2026-10-17)
+        if (sec.rowLabels?.[i] !== "백화점·유통") expect(row.slice(0, n).every(x => !krStock.has(x))).toBe(true);
         expect(row.slice(n).every(x => krStock.has(x))).toBe(true);       // 뒤 = 대장주(개별주)
         expect(row.length).toBeLessThanOrEqual(8);                        // ETF + 대장주 합쳐 한 줄 8칸
       });

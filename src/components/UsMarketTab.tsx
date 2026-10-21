@@ -2,9 +2,9 @@ import { useEffect, useState } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { useMarketAlerts } from "../lib/marketAlerts";
 import { IndexWarnTag } from "./IndexWarnTag";
-import { fetchYahooBatch, fetchDashboardChart, fetchYasunNightFutures, fetchTossUsStockCandles, fetchKrBondYieldSeries } from "../lib/api";
+import { fetchYahooBatch, fetchKrFuturesMinute, fetchKrRegularPrices, fetchYahooSparkDay, fetchDashboardChart, fetchYasunNightFutures, fetchTossUsStockCandles, fetchKrBondYieldSeries } from "../lib/api";
 import type { UsIndex, MarketIndexKey } from "../lib/api";
-import { isSymbolSleeping, isMarketOpen, marketOfSymbol, fmtAgo, isUsExtendedTradingOpen, krFuturesName, krFuturesDesc, isKrNightSession, isQuoteStale, isKrHoldingClosed, isUsRateSymbol, displayPctOf, isFxFuturesWeekendClosed } from "../lib/format";
+import { isSymbolSleeping, isMarketOpen, marketOfSymbol, fmtAgo, isUsExtendedTradingOpen, krFuturesName, krFuturesDesc, isKrNightSession, isQuoteStale, isKrHoldingClosed, isUsRateSymbol, displayPctOf, isFxFuturesWeekendClosed, isKrAfterRegularClose, nowKstDateStr } from "../lib/format";
 import { getDimSleepingEnabled, checkPersonalProxyYasunSupport } from "../lib/proxyConfig";
 import { useChartRange, pickCardChart } from "../lib/chartRange";
 import { ChartRangeToggle } from "./ChartRangeToggle";
@@ -12,11 +12,12 @@ import { buildDashboardPage, dashboardGroupNav, dashboardTagTone, dashboardRowLa
 import { RotationTab } from "./RotationTab";
 import { requestTab, isTabVisible } from "../lib/tabNav";
 import { GroupNavBar } from "./GroupNavBar";
-import { US_PAIRS, allYahooSymbols } from "../lib/usMarketData";
+import { US_PAIRS, allYahooSymbols, DAY_SPARK_SYMBOLS } from "../lib/usMarketData";
 import { useAdaptiveRefreshMs } from "../lib/proxyStatus";
 import { reportRefresh } from "../lib/lastRefresh";
 import { handleTossLinkClick, TOSS_SYMBOL_URL } from "../lib/toss";
 import { Sparkline } from "./Sparkline";
+import { KrDaySparkline } from "./KrDaySparkline";
 import { MarketFlowModal } from "./MarketFlowModal";
 import { EtfCompositionDialog } from "./EtfCompositionDialog";
 import { TicsSectorBoard } from "./TicsSectorBoard";
@@ -24,6 +25,7 @@ import { RealRateNote } from "./RealRateNote";
 import { EtfTopCards } from "./EtfTopCards";
 import { ValueupMiniCard } from "./ValueupCard";
 import { HlPerpCard } from "./HlPerpCard";
+import { CnnFearGreedTag } from "./CnnFearGreedTag";
 import { TickArrow } from "./TickArrow";
 import { requestHeatmap, CARD_HEATMAP_LINK } from "../lib/heatmapNav";
 
@@ -37,11 +39,16 @@ function krEtfTicker(symbol: string): string | null {
 }
 
 const BASE_REFRESH_MS = 10_000;
+// 지수 카드에 오르는 한국 개별 종목 코드(정규장 종가 조회용) — 목록은 usMarketData 한 벌
+// 24시간 차트용 미국 종목·ETF 심볼(야후 spark) — 지수(^)·선물(=)·가상 심볼·한국은 빼고 대문자 티커만
+const US_SPARK_SYMBOLS = DAY_SPARK_SYMBOLS;   // 목록은 lib 한 벌(usMarketData)
+const KR_STOCK_CODES = US_PAIRS.filter(p => p.krStock && /^[\dA-Za-z]{6}\.KS$/.test(p.symbol)).map(p => p.symbol.slice(0, 6));
 
 function fmtPrice(symbol: string, price: number): string {
   // 원엔은 한국 관행대로 100엔 기준 표기 (Yahoo 는 1엔당 원 = 8.6원 꼴)
   if (symbol === "JPYKRW=X") return (price * 100).toFixed(2);
   if (symbol.includes("KRW")) return price.toFixed(2);
+  if (symbol === "CNNFG") return Math.round(price).toString();   // CNN 공포·탐욕 — 0~100 점수, CNN 표기처럼 정수
   if (symbol === "^TIPS10" || symbol === "^MOVE" || symbol === "^VIX" || symbol === "^TNX" || symbol === "^TYX" || symbol === "^US2Y") return price.toFixed(2);
   if (price >= 1000) return Math.round(price).toLocaleString();
   return price.toFixed(2);
@@ -83,6 +90,19 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
     queryKey: ["yahoo-batch", yahooSymbols.length],
     queryFn: () => fetchYahooBatch(yahooSymbols),
     refetchInterval: REFRESH_MS,
+  });
+
+  // 지수 카드의 한국 개별 종목 — 오늘 15:30 정규장 종가(마감 책갈피용). 장 마감 뒤 **한 번만** 받는다(그 뒤로 안 바뀐다).
+  //   토스 1콜 + 야후 .KS/.KQ ~9콜(179종목). 정규장 중엔 부르지 않는다.
+  const krStockCodes = KR_STOCK_CODES;
+  const krAfter = isKrAfterRegularClose();
+  const { data: idxKrReg } = useQuery({
+    queryKey: ["idx-kr-reg", nowKstDateStr()],
+    queryFn: () => fetchKrRegularPrices(krStockCodes),
+    enabled: krAfter && krStockCodes.length > 0,
+    staleTime: 6 * 60 * 60_000, refetchOnWindowFocus: false,
+    // 야후 확인이 빠진 종목이 있으면(일시 실패) 5분 뒤 다시 — 다 채워지면 멈춘다
+    refetchInterval: q => (q.state.data && [...q.state.data.values()].filter(v => !v.fromYahoo).length > 3 ? 5 * 60_000 : false),   // 야후에 없는 신규 상장 몇 개는 봐준다
   });
 
   // 야간선물(yasun.gg) — 코스피200/코스닥150. Yahoo 와 분리된 별도 fetch.
@@ -205,6 +225,27 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
   const [marketFlowFor, setMarketFlowFor] = useState<MarketIndexKey | null>(null);
   const [leaderSort, setLeaderSort] = useState<LeaderSort>(loadLeaderSort);   // 대장주 줄 정렬(등락률순 기본)
   const chartRange = useChartRange();   // 카드 배경 차트 3개월 | 24시간 — 앱 전체 설정
+  // 미국 종목·ETF 24시간 차트 — 야후 spark(20종목 1콜). '24시간' 을 골랐을 때만 받는다(5분마다).
+  const { data: usSpark } = useQuery({
+    queryKey: ["us-spark-day", US_SPARK_SYMBOLS.length],
+    queryFn: () => fetchYahooSparkDay(US_SPARK_SYMBOLS),
+    enabled: chartRange === "day",
+    refetchInterval: chartRange === "day" ? 5 * 60_000 : false,
+    staleTime: 4 * 60_000, refetchOnWindowFocus: false,
+  });
+  // 코스피200·코스닥150 **주간**선물 — 낮엔 한경 1분봉 어제+오늘(야선은 당일 세션뿐). 야간장(18~05시)엔 야선 그대로.
+  const krFutDayOn = chartRange === "day" && !isKrNightSession();
+  const krFutDay = useQueries({
+    queries: (["kospi200", "kosdaq150"] as const).map(k => ({
+      queryKey: ["hk-futures-min", k], queryFn: () => fetchKrFuturesMinute(k),
+      enabled: krFutDayOn, refetchInterval: krFutDayOn ? 60_000 : (false as const), staleTime: 30_000, refetchOnWindowFocus: false,
+    })),
+  });
+  const krFutSpark = (sym: string) => {
+    if (!krFutDayOn) return undefined;
+    const d = (sym === "^KS200N" ? krFutDay[0] : sym === "^KQ150N" ? krFutDay[1] : undefined)?.data;
+    return d && d.closes.length > 1 ? { closes: d.closes, openIdx: d.openIdx, closeIdx: d.closeIdx, prevClose: d.base, breakIdx: d.breakIdx, prevBase: d.prevBase } : undefined;
+  };
   const [etfDialog, setEtfDialog] = useState<{ ticker: string; name: string } | null>(null);
   const marketAlerts = useMarketAlerts();   // 종목코드 → 투자주의·경고·위험
   // 야간선물(yasun.gg)은 프록시를 타므로 구버전 개인 워커면 값이 빈다 → 그때만 업데이트 안내.
@@ -221,8 +262,10 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
 
   return (
     <div className="space-y-3">
+      {/* 차트 기간(3개월|24시간)은 그룹 칩 줄 끝에 — 스크롤해도 늘 보이는 자리(사용자 결정 2026-10-20) */}
       <GroupNavBar items={navItems} idPrefix="usidx-"
-                   stickyTop={navStickyTop} scrollMarginTop={idxScrollMargin} />
+                   stickyTop={navStickyTop} scrollMarginTop={idxScrollMargin}
+                   trailing={<ChartRangeToggle />} />
       {/* ─── Tier 0 — 한국시장 영향 관계 기준 그룹 (라벨 헤더 + 한 화면 표시) ─── */}
       {/* 다른 탭과 같은 전체 폭 — 예전엔 lg 에서 75% 로 줄여 PC 에서만 좁아 보였다 */}
       <div className="space-y-4">
@@ -250,10 +293,6 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
                     </button>
                   ))}
                 </span>
-              )}
-              {/* 배경 차트 기간 — 페이지에 하나, 첫 그룹 제목에 */}
-              {section.id === T0_SECTIONS[0]?.id && (
-                <ChartRangeToggle className="ml-2" />
               )}
             </span>
             {/* 한국 섹터 — 토스 TICS 분류. 미국 블록과 **같은 한글 분류**라 이름으로 맞출 수 있다. */}
@@ -391,11 +430,30 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
               const isInverse = p.direction === "inverse";
               const effUp = isInverse ? (mainPct != null && mainPct < 0) : (mainPct != null && mainPct > 0);
               const effDn = isInverse ? (mainPct != null && mainPct > 0) : (mainPct != null && mainPct < 0);
-              const chartArr = pickCardChart(chartRange, t0ChartMap.get(p.symbol) ?? [], nightClosesMap.get(p.symbol) ?? usMap?.get(p.symbol)?.sparkline);
+              const dayArr = krFutSpark(p.symbol)?.closes ?? nightClosesMap.get(p.symbol) ?? usSpark?.get(p.symbol)?.closes ?? usMap?.get(p.symbol)?.sparkline;   // 야후 어제+오늘이 있으면 그걸 먼저
+              const chartArr = pickCardChart(chartRange, t0ChartMap.get(p.symbol) ?? [], dayArr);
+              // 24시간 차트가 야후 spark 에서 왔으면 '오늘 정규장 시작' 위치를 표시
+              const daySpark = chartRange === "day" ? (krFutSpark(p.symbol) ?? (!nightClosesMap.get(p.symbol) ? usSpark?.get(p.symbol) : undefined)) : undefined;
+              const markIdx = daySpark && chartArr === daySpark.closes ? daySpark.openIdx : undefined;
+              const closeIdx = daySpark && chartArr === daySpark.closes ? daySpark.closeIdx : undefined;   // 오늘 정규장 종가 세로선
+              const breakIdx = daySpark && chartArr === daySpark.closes ? daySpark.breakIdx : undefined;   // 어제·오늘 사이 끊기
+              // 24시간 차트의 기준선·색 기준 = 어제 종가(카드 큰 숫자와 같은 기준). 야후 spark 는 달러라 그 응답의 전일 종가를,
+              //   토스·야선 당일 봉은 카드 값과 같은 단위라 카드의 전일 종가(prevClose)를 쓴다. 3개월 차트엔 안 쓴다.
+              const isDayChart = chartRange === "day" && !!dayArr && chartArr === dayArr;
+              // 24시간 차트 끝에 **지금 가격**을 붙인다 — 분봉 이력은 5분마다지만 현재가는 5초마다라, 큰 숫자가 바뀔 때
+              //   그래프 끝도 같이 움직이게(추가 호출 0). 단위가 같은 경우만: 미국 종목(달러)·토스 지수·야간선물.
+              const liveChart = isDayChart && effPrice != null && effPrice > 0 ? [...chartArr, effPrice] : chartArr;
+              const dayBase = !isDayChart ? undefined
+                : daySpark && chartArr === daySpark.closes && marketOfSymbol(p.symbol) === "US" ? daySpark.prevClose   // 미국만 야후 값(달러 단위) — 한국·아시아 지수는 야후 전일 종가가 틀릴 때가 있어(^KQ11 이 그저께 값, 2026-10-21) 카드 값으로
+                : (q?.prevClose && q.prevClose > 0 ? q.prevClose : undefined);
               const sparkColor = dimNow ? "#94a3b8"
-                : (isInverse && chartArr.length > 1)
+                : (isInverse && chartArr.length > 1 && dayBase == null)
+                  // 거꾸로 칠하는 카드(VIX·환율·금리)의 3개월 차트 — 첫 점 기준 한 색. 24시간이면 아래 Sparkline 이
+                  //   어제 종가 선 위·아래를 나눠 칠한다 — 이때는 반전하지 않는다(위=빨강·아래=파랑, 사용자 결정 2026-10-21)
                   ? (chartArr[chartArr.length - 1] > chartArr[0] ? "#2563eb" : "#dc2626")
                   : undefined;
+              // 미국 종목·ETF — 달러로만 표시(원화 환산 없음, 사용자 결정 2026-10-21) → 가격에 $ 를 붙인다
+              const usDollar = q?.currency === "USD" && /^[A-Z][A-Z.]{0,5}$/.test(p.symbol) && marketOfSymbol(p.symbol) === "US" && p.symbol !== "CNNFG";
               const isFuture = p.symbol.endsWith("=F") || p.symbol === "^KS200N" || p.symbol === "^KQ150N";
               const bg = dimNow
                 ? "bg-gray-100 border-transparent"
@@ -415,9 +473,16 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
               // 미국 개별 종목은 프리장(04:00 ET)부터 '열림' 이라 sleeping 만 보면 프리장에 어제 종가가 사라졌다(2026-10-12).
               //   큰 숫자가 프리·애프터·오버나이트 가격인 동안(= 정규장 09:30~16:00 밖)은 정규장 마감 책갈피를 같이 보인다.
               const usOffRegular = marketOfSymbol(p.symbol) === "US" && !isMarketOpen("US_INDEX");
-              const showCloseTag = (sleeping || usOffRegular) && effPrice != null;
-              const closeVal = q?.regularPrice ?? effPrice;
-              const regPct = q?.regularPct ?? pct;
+              // CNN 공포·탐욕은 '정규장 마감가' 개념이 없는 하루 점수라 책갈피를 안 단다
+              // 한국 개별 종목은 15:30 뒤 NXT 애프터 중엔 안 흐려진다 — 그때도 **오늘 정규장 종가**(야후 15:30) 책갈피를 단다.
+              //   ETF 는 애프터가 없어 이미 흐림(sleeping)으로 뜬다. 값은 krRegIdx(fetchKrRegularPrices)를 우선.
+              // 야후로 확인된 값만 — 확인 못 했으면(야후 실패) 토스 meta 는 NXT 현재가라 정규장 종가로 보여주면 안 된다
+              const krRegHere = p.krStock ? idxKrReg?.get(p.symbol.slice(0, 6)) : undefined;
+              const krAfterTag = !!krRegHere?.fromYahoo && isKrAfterRegularClose();
+              const showCloseTag = (sleeping || usOffRegular || krAfterTag) && effPrice != null && p.symbol !== "CNNFG";
+              const krRegOk = krRegHere?.fromYahoo ? krRegHere : undefined;
+              const closeVal = krRegOk?.regularPrice ?? q?.regularPrice ?? effPrice;
+              const regPct = krRegOk?.regularPct ?? q?.regularPct ?? pct;
               const regSign = regPct == null ? "text-gray-700"
                 : (isInverse ? regPct < 0 : regPct > 0) ? "text-rose-600"
                 : (isInverse ? regPct > 0 : regPct < 0) ? "text-blue-600" : "text-gray-700";
@@ -429,26 +494,26 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
               const dimCls = dimNow ? "opacity-60" : "";
               return (
                 <div key={p.symbol} className={`relative h-full`}>
-                  {/* ETF 책갈피 — KR ETF (예: 069500.KS) 만. 왼쪽 위. 클릭 시 구성종목 모달 */}
+                  {/* 왼쪽 위 책갈피 줄 — [ETF] [투자주의…]. 해당되는 것만, 한 줄로 붙여 겹치지 않게.
+                      기업정보는 아이콘 대신 **종목명 클릭**으로 연다(아이콘이 마감 책갈피와 겹쳐 화면을 가렸다 — 사용자 결정 2026-10-21). */}
                   {(() => {
-                    const etfTk = p.krStock ? null : krEtfTicker(p.symbol);   // 한국 개별주는 ETF 가 아니다
-                    if (!etfTk) return null;
+                    const krTk = krEtfTicker(p.symbol);                         // 한국 6자리(.KS) — 종목·ETF 모두
+                    const isKrEtf = !!krTk && !p.krStock;
+                    const lv = krTk ? marketAlerts.get(krTk) : undefined;
+                    if (!krTk || (!isKrEtf && !lv)) return null;
+                    const tag = "px-1.5 py-0 rounded text-[10px] font-bold leading-tight border";
                     return (
-                      <button onClick={() => setEtfDialog({ ticker: etfTk, name: p.name })}
-                              title="ETF 구성 종목 보기"
-                              className="absolute -top-2 left-1 z-20 px-1.5 py-0 rounded
-                                         text-[10px] font-bold leading-tight
-                                         text-violet-700 bg-violet-100/30 hover:bg-violet-100/60
-                                         border border-violet-300/40">
-                        ETF
-                      </button>
+                      <div className="absolute -top-2 left-1 z-30 flex items-center gap-0.5">   {/* 마감 책갈피(z-20)가 길어도 위로 */}
+                        {isKrEtf && (
+                          <button onClick={() => setEtfDialog({ ticker: krTk!, name: p.name })}
+                                title="ETF 구성 종목 보기"
+                                className={`${tag} text-violet-700 bg-violet-100/30 hover:bg-violet-100/60 border-violet-300/40`}>
+                          ETF
+                        </button>
+                        )}
+                        {lv && <IndexWarnTag inline ticker={krTk!} name={p.name} level={lv} />}
+                      </div>
                     );
-                  })()}
-                  {/* 경고 책갈피 — 투자주의·경고·위험(크롤러 목록, 0콜) */}
-                  {(() => {
-                    const tk = krEtfTicker(p.symbol);
-                    const lv = tk ? marketAlerts.get(tk) : undefined;
-                    return tk && lv ? <IndexWarnTag ticker={tk} name={p.name} level={lv} shift={!p.krStock} /> : null;
                   })()}
                   {/* 정규장 마감가 책갈피 — 카드 위로 올림(-top-2). 노란 배경 + 흐림 제외(z-20) */}
                   {showCloseTag && closeVal != null && (
@@ -461,23 +526,63 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
                         </span>
                       )}
                       <span className={`tabular-nums ${regSign}`}>
-                        {closeVal < 1000 ? closeVal.toFixed(2) : Math.round(closeVal).toLocaleString()}
+                        {usDollar ? "$" : ""}{closeVal < 1000 ? closeVal.toFixed(2) : Math.round(closeVal).toLocaleString()}
                       </span>
                       {regPct != null && (
                         <span className={`tabular-nums ml-1 font-bold text-[11px] ${regSign}`}>
                           ({regPct >= 0 ? "+" : ""}{regPct.toFixed(2)}%)
                         </span>
                       )}
+                      {/* 정규장 종가 → 지금(아래 큰 숫자) 차이 — 애프터·프리·NXT 에서 얼마나 더 움직였나(사용자 요청 2026-10-20) */}
+                      {(() => {
+                        if (effPrice == null || !(closeVal > 0)) return null;
+                        // 큰 숫자 % 의 기준이 이미 이 정규장 종가면(미국 종목 장 마감 뒤 — 토스식) 같은 값을 두 번 쓰게 된다 → 생략
+                        if (effBase != null && effBase > 0 && Math.abs(effBase / closeVal - 1) < 0.0005) return null;
+                        const gap = (effPrice / closeVal - 1) * 100;
+                        if (!Number.isFinite(gap) || Math.abs(gap) < 0.005) return null;
+                        const gapCls = (isInverse ? gap < 0 : gap > 0) ? "bg-rose-600/60" : "bg-blue-600/60";   // 마감 후 변동 — 색 배경·흰 글자 배지로 눈에 띄게(사용자 요청)
+                        return (
+                          <span className={`tabular-nums ml-1 font-bold text-[11px] text-white px-1 rounded ${gapCls}`}
+                                title="정규장 종가 대비 지금(아래 큰 숫자) 차이">
+                            {gap > 0 ? "+" : "−"}{Math.abs(gap).toFixed(2)}%
+                          </span>
+                        );
+                      })()}
                     </div>
                   )}
                   <div className={`relative overflow-hidden h-full flex flex-col gap-0.5
                                   rounded-lg border px-3 py-1.5
                                   ${leadRowOf(section, p.symbol) >= 0 ? dashboardTagCard(section.rowLabels?.[leadRowOf(section, p.symbol)]) : bg}`}>
-                  <Sparkline data={chartArr}
+                  {chartRange === "day" && krEtfTicker(p.symbol) ? (
+
+                    // 한국 종목·ETF 24시간 — 토스 10분봉(NXT 포함), 보이는 카드만 받는다
+
+                    <KrDaySparkline code={krEtfTicker(p.symbol)!} fallback={chartArr} live={effPrice ?? undefined} width={400} height={80}
+
+                                    color={sparkColor} dim={dimNow} className={`absolute inset-0 w-full h-full opacity-50
+                                        pointer-events-none ${dimCls}`} />
+
+                  ) : (
+
+                  <Sparkline data={liveChart}
+
                              width={400} height={80}
+
+                             markIndex={markIdx}
+
+                             closeIndex={closeIdx}
+
+                             breakIndex={breakIdx}
+                             prevBaseline={breakIdx != null ? daySpark?.prevBase : undefined}
+
+                             baseline={dayBase}
+
                              color={sparkColor}
+
                              className={`absolute inset-0 w-full h-full opacity-50
                                         pointer-events-none ${dimCls}`} />
+
+                  )}
                   <div className={`relative z-10 flex items-baseline gap-1.5 h-5 overflow-hidden ${dimCls}`}>
                     {sleeping && !inSession && (
                       <span className="text-[11px] text-gray-400">zZ</span>
@@ -485,11 +590,17 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
                     {/* 종목명 자체가 외부 링크 (Toss/Yahoo) */}
                     <a href={quoteUrl(p.symbol)}
                        target="_blank" rel="noopener noreferrer"
-                       onClick={e => handleTossLinkClick(e, quoteUrl(p.symbol))}
-                       title={`${p.name} 자세히 보기`}
+                       onClick={e => {
+                         // 한국 종목·ETF — 종목명 = 앱 기업정보(기업가치) 팝업. 미국 등은 토스 페이지 그대로.
+                         const krNameTk = krEtfTicker(p.symbol);
+                         if (krNameTk) { e.preventDefault(); onOpenValuation?.(krNameTk, p.name); return; }
+                         handleTossLinkClick(e, quoteUrl(p.symbol));
+                       }}
+                       title={krEtfTicker(p.symbol) ? `${p.name} 기업정보 보기` : `${p.name} 자세히 보기`}
                        className={`text-sm font-bold ${nameColor} hover:underline min-w-0 truncate`}>
                       {p.name}
                     </a>
+                    {p.symbol === "CNNFG" && <CnnFearGreedTag />}
                     {/* 매매동향 모달 버튼 — KOSPI/KOSDAQ 만 */}
                     {hasFlow && indexKey && (
                       <button onClick={() => setMarketFlowFor(indexKey)}
@@ -522,12 +633,15 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
                       <span className={`block text-[10px] font-normal leading-tight text-gray-900 ${q?.currency === "KRW" && q?.priceUsd != null ? "" : "invisible"}`}>
                         {q?.currency === "KRW" && q?.priceUsd != null ? `$${q.priceUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : "$"}
                       </span>
-                      <span className="text-sm">{effPrice != null ? fmtPrice(p.symbol, effPrice) : "—"}</span>
+                      <span className="text-sm">{effPrice != null ? `${usDollar ? "$" : ""}${fmtPrice(p.symbol, effPrice)}` : "—"}</span>
                     </span>
                     <span className={`flex-1 text-right text-xl font-bold tabular-nums ${sign}`}>
                       {/* 직전 틱 대비 화살표 — 주식 카드와 같은 규칙, % 왼쪽 */}
                       <TickArrow value={effPrice} className="mr-1 text-sm" />
-                      {showPct != null && Math.abs(showPct) >= 0.005
+                      {p.symbol === "CNNFG" && effPrice != null && effBase != null
+                        // 0~100 점수라 % 가 아니라 점수 차(전일 대비). 31→18 이 "−43%" 로 찍히면 과장돼 보인다
+                        ? (() => { const d = Math.round(effPrice - effBase); return `${d > 0 ? "+" : d < 0 ? "−" : "±"}${Math.abs(d)}점`; })()
+                        : showPct != null && Math.abs(showPct) >= 0.005
                         ? `${showPct >= 0 ? "+" : ""}${showPct.toFixed(2)}%`
                         : ""}
                     </span>
@@ -542,19 +656,6 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
                   )}
                   {/* 역할 책갈피 — 이 그룹에서 이 종목이 무엇인지(예: 전공정·원자력). 오른쪽 아래가 비어
                       있어 그 자리에 둔다(🗺️ 히트맵은 코덱스200·코스닥150 전용이라 겹치지 않는다). */}
-                  {/* 기업가치 — 한국 종목 카드(순환매 줄)만. 히트맵 책갈피와 같은 모양으로 카드 바깥 오른쪽 아래.
-                      종목명은 그대로 토스 링크다. */}
-                  {p.krStock && (
-                    <button
-                      onClick={() => onOpenValuation?.(p.symbol.slice(0, 6), p.name)}
-                      title={`${p.name} 기업가치 보기`}
-                      className="absolute -bottom-1 right-1 z-20 px-1.5 py-0 rounded
-                                 text-[9px] leading-tight whitespace-nowrap font-bold
-                                 text-indigo-700 bg-indigo-50 border border-indigo-300/70
-                                 hover:bg-indigo-100 transition">
-                      📊
-                    </button>
-                  )}
                   {section.tags?.[p.symbol] && (
                     <div className={`absolute -bottom-1 right-1 z-20 px-1.5 py-0 rounded border
                                      text-[9px] leading-tight whitespace-nowrap font-bold
