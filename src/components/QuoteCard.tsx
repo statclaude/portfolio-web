@@ -1,0 +1,103 @@
+// 시세 카드 — 지수 탭 종목 카드와 같은 모양: 배경 그래프(앱 설정 3개월 | 24시간) + 이름·설명 + 현재가·등락률 + 📊종목정보·🔍AI.
+//   최신공시 왼쪽 카드(2026-10-28)와 히트맵 카드 보기(사용자 2026-10-30 "동일하게 다 넣자", "버튼들도 24시간 3개월도")가 같이 쓴다.
+//   두 곳이 각자 그리면 같은 종목이 다르게 보이기 시작한다 — 여기 한 벌만.
+//   24시간 = KrDaySparkline(보이는 카드만 받는다, 어제 종가 점선·시가·종가 세로선), 3개월 = 종목 카드와 같은 캐시의 일봉.
+//   미국 종목(사용자 2026-10-30 "히트맵/카드 보기는?") — 달러 표시, 24시간 = 토스 5분봉(지수 탭 미국 카드와 같은 캐시 키),
+//   3개월 = 종목 카드와 같은 야후 일봉, 종목정보 창엔 미국 자료가 없어 이름·버튼은 토스 페이지로.
+import { useQuery } from "@tanstack/react-query";
+import { DiscTags } from "./DiscTags";
+import { fetchKrPriceHistory, fetchYahooPriceHistory, fetchTossIntraday } from "../lib/api";
+import { openTossStock, openExternal, worldQuoteUrl } from "../lib/toss";
+import { useChartRange, historyRange } from "../lib/chartRange";
+import { openStockInfo } from "../lib/tickPopup";
+import { openGoogleAi, STOCK_ANALYSIS_PROMPT, aiNowStamp } from "../lib/googleAi";
+import { KrDaySparkline } from "./KrDaySparkline";
+import { Sparkline } from "./Sparkline";
+import { ValueupTags } from "./ValueupTags";
+import { SeohakTag } from "./SeohakBox";
+
+export function QuoteCard({ code, name, sub, px, dim, badge, reg, className = "w-[132px] sm:w-[176px] h-[88px] shrink-0" }: {
+  code: string; name: string;
+  sub?: string;                                 // 이름 아래 한 줄(섹터 등)
+  px?: { price: number; pct: number };
+  dim?: boolean;                                // 오늘 체결 없음(지난 거래일 값) — 흐리게
+  className?: string;                           // 크기(공시 줄 = 고정 폭, 히트맵 격자 = 칸에 맞춤)
+  badge?: import("react").ReactNode;            // 아래 줄 맨 왼쪽(지수 소부장 — 공시·뉴스 개수)
+  // 오늘 정규장 종가(15:30) — 애프터(NXT) 중·마감 뒤 노란 책갈피: 종가 (등락%) + 그 뒤 움직임 배지. 지수 탭 카드와 같은 모양(사용자 2026-11-03)
+  reg?: { price: number; pct: number };
+}) {
+  const range = useChartRange();
+  const isUs = !(/^[\dA-Za-z]{6}$/.test(code) && /\d/.test(code));
+  const seohak = isUs && /^[A-Z][A-Z.]{0,5}$/.test(code);   // 미국 티커만 — 서학개미 꼬리표(사용자 2026-11-03)
+  const hist = useQuery({
+    queryKey: [isUs ? "us-price-history" : "kr-price-history", code, historyRange(range)],   // 종목 카드(App chartQs·usChartQs)와 같은 키 — 이미 받은 종목은 다시 안 부른다
+    queryFn: () => isUs ? fetchYahooPriceHistory(code, historyRange(range)) : fetchKrPriceHistory(code, historyRange(range)),
+    staleTime: 60 * 60 * 1000, refetchOnWindowFocus: false,
+    enabled: range !== "day",   // 24시간이면 안 받는다(공시 줄처럼 카드가 많은 곳에서 호출을 늘리지 않게)
+  });
+  const usDay = useQuery({
+    queryKey: ["toss-us-day", code],   // 지수 탭 미국 카드(UsMarketTab tossUsDayQs)와 같은 키
+    queryFn: () => fetchTossIntraday(code),
+    enabled: isUs && range === "day", staleTime: 4 * 60_000, refetchInterval: 5 * 60_000, refetchOnWindowFocus: false, retry: 1,
+  });
+  // 일본(.T) — 엔화로, 누르면 야후(토스엔 일본 종목이 없다). 지수(소부장) 칸의 이비덴·도쿄일렉트론 등(2026-11-02)
+  const isJp = /\.T$/.test(code);
+  const open = () => isJp ? openExternal(worldQuoteUrl(code)) : isUs ? openTossStock(code) : openStockInfo(code, name);
+  const fmtPx = (v: number) => isJp ? `¥${Math.round(v).toLocaleString()}` : isUs ? `$${v.toFixed(2)}` : Math.round(v).toLocaleString();
+  const closes = (hist.data ?? []).map(p => p.close);
+  const pct = px?.pct;
+  const tone = pct == null ? "bg-gray-50 border-gray-200" : pct > 0 ? "bg-rose-50 border-rose-200" : pct < 0 ? "bg-blue-50 border-blue-200" : "bg-gray-50 border-gray-200";
+  const col = pct == null ? "text-gray-700" : pct > 0 ? "text-rose-600" : pct < 0 ? "text-blue-600" : "text-gray-600";
+  return (
+    <div className={`relative ${className}`}>
+      {/* 정규장 종가 책갈피 — 카드 위로 걸치고 흐림 제외(지수 탭 카드와 같은 규칙) */}
+      {reg && reg.price > 0 && (() => {
+        const rc = reg.pct > 0 ? "text-rose-600" : reg.pct < 0 ? "text-blue-600" : "text-gray-700";
+        const gap = px ? (px.price / reg.price - 1) * 100 : 0;
+        return (
+          <div className="absolute -top-2 right-1 z-20 px-1.5 py-0 border rounded bg-yellow-50 border-yellow-400/60 text-[10px] font-medium leading-tight whitespace-nowrap"
+               title="오늘 정규장(15:30) 종가 · 오른쪽 배지 = 그 뒤(애프터) 움직임">
+            <span className={`tabular-nums ${rc}`}>{fmtPx(reg.price)}</span>
+            <span className={`tabular-nums ml-1 font-bold text-[11px] ${rc}`}>({reg.pct >= 0 ? "+" : ""}{reg.pct.toFixed(2)}%)</span>
+            {Math.abs(gap) >= 0.005 && (
+              <span className={`tabular-nums ml-1 font-bold text-[11px] text-white px-1 rounded ${gap > 0 ? "bg-rose-600/60" : "bg-blue-600/60"}`}>
+                {gap > 0 ? "+" : "−"}{Math.abs(gap).toFixed(2)}%
+              </span>
+            )}
+          </div>
+        );
+      })()}
+    <div className={`relative overflow-hidden rounded-lg border ${tone} w-full h-full ${dim ? "opacity-60" : ""}`}>
+      {range === "day" && isUs
+        ? (() => { const d = usDay.data; return d && d.closes.length > 1
+            ? <Sparkline data={d.closes} xs={d.xs} baseline={d.base} prevBaseline={d.prevBase} nextBaseline={d.nextBase}
+                         breakIndex={d.breakIdx} markXs={d.markXs} width={300} height={80}
+                         className="absolute inset-0 w-full h-full opacity-50 pointer-events-none" />
+            : null; })()
+        : range === "day"
+        ? <KrDaySparkline code={code} fallback={closes} live={px?.price} width={300} height={80} dim={dim}
+                          className="absolute inset-0 w-full h-full opacity-50 pointer-events-none" />
+        : closes.length > 1 && <Sparkline data={closes} width={300} height={80}
+                                          className="absolute inset-0 w-full h-full opacity-50 pointer-events-none" />}
+      <div className="relative h-full flex flex-col px-2 py-1">
+        <button type="button" onClick={open} title={isJp ? "네이버 증권에서 보기" : isUs ? "토스에서 보기" : "종목정보"}
+                className={`text-left truncate font-bold text-[13px] ${col} hover:underline`}>{name}</button>
+        {sub && <div className="truncate text-[10.5px] text-gray-500 -mt-0.5">{sub}</div>}
+        <div className="mt-auto flex items-baseline justify-between gap-1 tabular-nums">
+          <span className={`text-[12px] ${col}`}>{px ? fmtPx(px.price) : "—"}</span>
+          <span className={`font-bold text-[16px] sm:text-[18px] ${col}`}>{pct == null ? "" : `${pct > 0 ? "+" : ""}${pct.toFixed(2)}%`}</span>
+        </div>
+        <div className="flex justify-end items-center gap-0.5 -mb-0.5">
+          {/* 밸류업 꼬리표(저PBR·고배당·밸류업★) — 지수 탭 카드와 같은 아래 줄 맨 앞(사용자 2026-11-02 "여기도") */}
+          {(badge || !isUs || seohak) && <span className="mr-auto flex gap-0.5 min-w-0 overflow-hidden">{badge}{!isUs && <DiscTags code={code} name={name} max={2} />}{!isUs && <ValueupTags code={code} flat />}{seohak && <SeohakTag symbol={code} flat />}</span>}
+          <button type="button" onClick={open} title={isJp ? "네이버 증권에서 보기" : isUs ? "토스에서 보기" : "종목정보 — 실시간 체결·호가·거래원 / 기업가치"}
+                  className="px-1 rounded border border-amber-300/70 bg-amber-50 text-amber-800 text-[9.5px] font-bold leading-[15px]">{isJp ? "🔗" : isUs ? "🔗" : "📊"}</button>
+          <button type="button" title="구글 AI에 현재상태 분석 요청"
+                  onClick={() => openGoogleAi(`${STOCK_ANALYSIS_PROMPT}\n\n[기준시각] ${aiNowStamp()}\n[분석 대상] ${name}(${code})${px ? `, 현재가 ${isUs ? `$${px.price.toFixed(2)}` : `${Math.round(px.price).toLocaleString()}원`} (${pct! >= 0 ? "+" : ""}${pct!.toFixed(2)}%)` : ""}`)}
+                  className="px-1 rounded border border-blue-300/70 bg-blue-50 text-blue-700 text-[9.5px] font-bold leading-[15px]">AI</button>
+        </div>
+      </div>
+    </div>
+    </div>
+  );
+}

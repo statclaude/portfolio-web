@@ -1,13 +1,240 @@
-// 네이티브 앱(Capacitor, APK) 여부 판별.
-//   웹 배포본과 APK 가 완전히 같은 코드를 공유하므로(원격 로드), 이 값으로
-//   네이티브 전용 동작(뒤로가기 종료, 구글 로그인 시스템 브라우저 분기 등)을 분기한다.
-//   웹(일반 브라우저)에서는 항상 false.
-import { Capacitor } from "@capacitor/core";
+// 안드로이드 앱(Capacitor) 전송 계층 — 프록시 없이 시세를 직접 받아온다.
+//
+//   브라우저에서 프록시가 필요한 이유는 IP 차단이 아니라 CORS 다. 토스·네이버는 응답에
+//   Access-Control-Allow-Origin 을 주지 않아 브라우저가 읽기 자체를 막는다.
+//   네이티브 HTTP(OkHttp)에는 CORS 가 없으므로 앱에서는 그냥 직접 부르면 된다.
+//   → 프록시 서버가 아예 필요 없다. 호출 한도도, 남의 IP 를 공유하는 문제도 사라진다.
+//
+//   계약은 확장(extensionProxy.fetchViaExtension)과 똑같이 맞췄다 — (url, init) => Response.
+//   그래야 api.ts 의 fetchProxied 가 게이트 한 줄만 늘리고 64 곳이 전부 따라온다.
+//
+//   Yahoo 도 통과한다 — 실측(2026-09-08, 안드로이드 실기기): query1.finance.yahoo.com 68건 200.
+//      로컬 Node 프록시가 429 를 맞아서 OkHttp 도 막힐 줄 알았는데 아니었다. 폰의 통신망 IP 라
+//      가정용과 구분되지 않는 덕으로 보인다. 토스·네이버·yasun 도 전부 200.
+//      다만 crumb 이 필요한 Yahoo 엔드포인트는 401 이 난다(확장은 background.js 가 crumb 을
+//      처리한다 — 네이티브엔 아직 없다). 그건 아래 폴백이 받는다.
+//
+//   실패는 삼키고 기존 프록시 경로로 넘어가게 둔다 — fetchProxied 가 ok 아닌 응답이면
+//      다음 경로로 계속한다. 앱이 단일 실패점이 되지 않게 하는 것이 원칙.
+//
+//   CapacitorHttp 의 fetch/XHR 패치(plugins.CapacitorHttp.enabled)는 꺼 둔다.
+//   전역 패치는 어디로 나가는지 흐려지고, raw.githubusercontent.com 처럼 CORS 가 열려 있어
+//   웹뷰가 직접 받아도 되는 요청까지 네이티브로 끌고 간다. 여기서 명시적으로만 부른다.
 
+import { Capacitor, CapacitorHttp } from "@capacitor/core";
+
+const TIMEOUT_MS = 20_000;
+// 토스 _browserId — 앱 실행마다 하나(아래 refererFor)
+const TOSS_BROWSER_ID = Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
+// 2026-10-29 18:00 경부터 `deviceId=WTS-<32자>` 쿠키도 같이 있어야 200(둘 중 하나만이면 400, 실측) — 값은 아무거나
+const TOSS_DEVICE_ID = Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
+
+// 로컬 프록시(server.mjs)와 같은 UA — 데스크톱 크롬 행세. 소스가 UA 로 거르는 경우 대비.
+const UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
+  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
+
+// 네이티브 앱 안에서 도는가. 웹(브라우저)에서는 항상 false 라 기존 경로가 그대로 쓰인다.
+//   동기 상수라 확장처럼 핸드셰이크를 기다릴 필요가 없다(구독 훅도 필요 없음).
 export function isNativeApp(): boolean {
-  try {
-    return Capacitor.isNativePlatform();
-  } catch {
-    return false;
+  try { return Capacitor.isNativePlatform(); } catch { return false; }
+}
+
+// 데스크톱 앱(맥·윈도우, Tauri) 안인가 — 앱이 페이지보다 먼저 심는 표식(desktop/src-tauri/src/main.rs INIT_SCRIPT).
+//   안드로이드(Capacitor)와 전송만 같고 나머지(구글 로그인·업데이트 안내·서비스워커)는 다르다 → isNativeApp 과 따로 둔다.
+export function isDesktopApp(): boolean {
+  return typeof window !== "undefined" && !!(window as unknown as { __PORTFOLIO_DESKTOP__?: boolean }).__PORTFOLIO_DESKTOP__;
+}
+// 앱이 직접 요청하는가(안드로이드 또는 데스크톱) — 프록시·확장 없이 CORS 없는 네이티브 HTTP 로
+export function isDirectApp(): boolean {
+  return isNativeApp() || isDesktopApp();
+}
+
+// 데스크톱 앱 전송 — Rust(reqwest) 가 보내고 본문은 base64 로 돌려준다(바이너리·EUC-KR 그대로).
+async function desktopRequest(url: string, method: string, headers: Record<string, string>, body?: string)
+  : Promise<{ status: number; contentType: string; buf: ArrayBuffer }> {
+  const tauri = (window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string, args: unknown) => Promise<{ status: number; content_type: string; body: string }> } }).__TAURI_INTERNALS__;
+  const r = await tauri.invoke("native_fetch", { url, method, headers, body });
+  return { status: r.status, contentType: r.content_type, buf: b64ToBuf(r.body) };
+}
+
+// 네이티브 플랫폼 이름 — 설정 화면 표시용 ("android" / "ios"), 웹이면 null.
+export function nativePlatform(): string | null {
+  try { return Capacitor.isNativePlatform() ? Capacitor.getPlatform() : null; } catch { return null; }
+}
+
+// 네이티브 응답 본문 → Response 에 넣을 값.
+//   ★ CapacitorHttp 는 responseType 을 요청해도 그대로 주지 않는다. 실측(안드로이드):
+//     JSON 응답은 responseType:"arraybuffer" 를 줘도 **파싱된 객체**로 돌아온다(type=object).
+//     그래서 "문자열이면 base64" 라는 가정만 두면 본문을 통째로 잃는다 —
+//     빈 본문이 200 으로 통과해 호출측이 조용히 실패한다(티커바·미니차트가 비던 원인).
+//   · object  → JSON 텍스트로 되돌린다 (대부분의 시세 API)
+//   · string  → 그대로 텍스트 본문
+// base64 문자열 후보인가 — 마크업/JSON 텍스트에는 <, >, {, ", 공백이 있어 base64 알파벳과 겹치지 않는다.
+const B64_LIKE = /^[A-Za-z0-9+/\s]+={0,2}$/;
+
+function b64ToBuf(b64: string): ArrayBuffer {
+  const bin = atob(b64.replace(/\s+/g, ""));
+  const buf = new ArrayBuffer(bin.length);
+  const view = new Uint8Array(buf);
+  for (let i = 0; i < bin.length; i++) view[i] = bin.charCodeAt(i);
+  return buf;
+}
+
+// 디코딩 결과가 우리가 다루는 본문처럼 보이는가(HTML/JSON/텍스트). base64 오판을 막는 확인.
+//   ★ 첫 바이트만 <·{·[ 로 보면 JS 응답이 빠진다 — 시나(리튬·니켈)는 'var hq_str…', 일봉은 '/*…' 로 시작해
+//     base64 문자열이 그대로 본문이 됐다(APK 에서 리튬·니켈이 안 나오던 원인, 2026-10-22).
+//     앞 4바이트가 전부 인쇄 가능한 ASCII·공백이면 본문으로 본다(진짜 base64 문자열을 잘못 풀면 제어문자·고위 바이트가 섞인다).
+function looksLikeBody(buf: ArrayBuffer): boolean {
+  const head = new Uint8Array(buf.slice(0, 4));
+  if (head.length === 0) return false;
+  return Array.from(head).every(c => (c >= 0x20 && c <= 0x7e) || c === 0x0a || c === 0x0d || c === 0x09);
+}
+
+function toBody(data: unknown): BodyInit {
+  if (data == null) return "";
+  if (typeof data === "string") {
+    // ★ responseType:"arraybuffer" 를 요청하므로 비-JSON 응답은 base64 문자열로 온다.
+    //   그대로 본문에 넣으면 호출측이 base64 를 HTML 로 읽는다 — 네이버 EUC-KR 페이지
+    //   (투자자 순매수·자금동향)가 그래서 파싱에 실패했다.
+    //   바이트로 되돌려야 decodeHtmlBuf 가 EUC-KR 을 제대로 푼다.
+    if (data.length > 0 && B64_LIKE.test(data)) {
+      try {
+        const buf = b64ToBuf(data);
+        if (looksLikeBody(buf)) return buf;
+      } catch { /* base64 가 아니었다 → 아래에서 텍스트로 */ }
+    }
+    return data;
   }
+  try { return JSON.stringify(data); } catch { return ""; }
+}
+
+// ─── Yahoo crumb 인증 ────────────────────────────────────────
+// v7/quote·quoteSummary 는 crumb 없이 401. v8/chart 는 필요 없다(확장에서 실측된 것과 동일,
+//   네이티브에서도 v8 는 200·v7 는 401 로 재확인).
+// 쿠키는 CapacitorCookies 가 네이티브 쿠키 저장소에 유지해 주므로 확장처럼 직접 나를 필요가 없다.
+const CRUMB_TTL_MS = 30 * 60 * 1000;
+let crumbCache: { crumb: string; ts: number } | null = null;
+
+function needsCrumb(u: URL): boolean {
+  return u.hostname.endsWith("yahoo.com") &&
+         (u.pathname.includes("/quoteSummary") ||
+          u.pathname.includes("/v7/finance/quote") ||
+          u.pathname.includes("/v6/finance/quote"));
+}
+
+// 동시에 들어온 요청들이 crumb 을 각자 새로 받지 않게 한 번으로 묶는다(데스크톱 첫 화면에서 12번 받던 것)
+let crumbInflight: Promise<string | null> | null = null;
+function getYahooCrumb(): Promise<string | null> {
+  if (crumbCache && Date.now() - crumbCache.ts < CRUMB_TTL_MS) return Promise.resolve(crumbCache.crumb);
+  crumbInflight ??= fetchYahooCrumb().finally(() => { crumbInflight = null; });
+  return crumbInflight;
+}
+async function fetchYahooCrumb(): Promise<string | null> {
+  try {
+    // 1) 세션 쿠키 발급 — 응답은 안 본다. 쿠키만 저장소에 들어가면 된다.
+    try {
+      if (isDesktopApp()) await desktopRequest("https://fc.yahoo.com/", "GET", { "User-Agent": UA });   // 쿠키는 reqwest 저장소에
+      else await CapacitorHttp.get({ url: "https://fc.yahoo.com/", headers: { "User-Agent": UA } });
+    } catch { /* 쿠키만 목적이라 실패해도 진행 */ }
+    if (isDesktopApp()) {
+      const d = await desktopRequest("https://query1.finance.yahoo.com/v1/test/getcrumb", "GET", { "User-Agent": UA });
+      const c = new TextDecoder().decode(d.buf).trim();
+      if (d.status !== 200 || !c || c.length > 50) return null;
+      crumbCache = { crumb: c, ts: Date.now() };
+      return c;
+    }
+    // 2) crumb 발급 — 위에서 받은 쿠키가 자동으로 실려 나간다.
+    const r = await CapacitorHttp.get({
+      url: "https://query1.finance.yahoo.com/v1/test/getcrumb",
+      headers: { "User-Agent": UA },
+      responseType: "text",
+    });
+    if (r.status !== 200) return null;
+    const c = (typeof r.data === "string" ? r.data : String(r.data ?? "")).trim();
+    if (!c || c.length > 50) return null;   // 에러 페이지를 crumb 으로 오인하지 않게
+    crumbCache = { crumb: c, ts: Date.now() };
+    return c;
+  } catch {
+    return null;
+  }
+}
+
+// 응답 헤더에서 Content-Type 찾기 — 네이티브가 돌려주는 헤더 키의 대소문자가 제각각이다.
+function pickContentType(headers: Record<string, string> | undefined): string {
+  if (!headers) return "application/octet-stream";
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === "content-type" && v) return v;
+  }
+  return "application/octet-stream";
+}
+
+// 호스트별 Referer — 프록시 워커·확장(HEADER_GROUPS)과 같은 규칙. 없으면 막는 곳만 둔다.
+//   다음 금융 api 는 Referer 없이 403 이다(선물 미결제약정). CNN 은 418.
+function refererFor(targetUrl: string): Record<string, string> {
+  try {
+    const host = new URL(targetUrl).hostname;
+    // 토스 — 2026-10-22 부터 `_browserId` 쿠키 없으면 400(값은 아무거나). PC 브라우저는 토스가 심은 쿠키가 있어 멀쩡했고 APK 만 막혔다
+    if (host.endsWith("tossinvest.com")) return { Cookie: `_browserId=${TOSS_BROWSER_ID}; deviceId=WTS-${TOSS_DEVICE_ID}` };
+    if (host === "finance.daum.net") return { Referer: "https://finance.daum.net/" };
+    // 시나 금융(리튬·니켈) — Referer 없으면 403
+    if (host === "hq.sinajs.cn" || host.endsWith("sina.com.cn")) return { Referer: "https://finance.sina.com.cn/" };
+    // CNN 공포·탐욕 — 브라우저처럼 안 보이면 418("You're a bot")
+    if (host === "markets.hankyung.com") {
+      return { Authorization: "Bearer 0ZdNlr7LrQoawewqweq78k6usasBsqhqSIaUarSTf8mxnHuQVh9CvKAfpUy94LhBmZMg", Referer: "https://markets.hankyung.com/", Accept: "application/json" };   // 한경 공개 키
+    }
+    if (host === "production.dataviz.cnn.io") {
+      return { Origin: "https://edition.cnn.com", Referer: "https://edition.cnn.com/", "Accept-Language": "en-US,en;q=0.9" };
+    }
+  } catch { /* URL 파싱 실패 — 헤더 없이 */ }
+  return {};
+}
+
+export async function fetchViaNative(targetUrl: string, init?: RequestInit): Promise<Response> {
+  const given = (init?.headers ?? {}) as Record<string, string>;
+  const headers: Record<string, string> = { "User-Agent": UA, ...refererFor(targetUrl), ...given };
+
+  // crumb 이 필요한 Yahoo 엔드포인트면 쿼리에 붙여 보낸다(없으면 401).
+  let url = targetUrl;
+  let crumbUsed = false;
+  try {
+    const u = new URL(targetUrl);
+    if (needsCrumb(u)) {
+      const crumb = await getYahooCrumb();
+      if (crumb) {
+        const w = new URL(url);
+        w.searchParams.set("crumb", crumb);
+        url = w.toString();
+        crumbUsed = true;
+      }
+    }
+  } catch { /* URL 파싱 실패 — 원본 그대로 보낸다 */ }
+
+  // 데스크톱 앱 — Rust 로 보내고 base64 본문을 바이트로 되돌린다(추측 없이 항상 바이트)
+  if (isDesktopApp()) {
+    const d = await desktopRequest(url, init?.method ?? "GET", headers, typeof init?.body === "string" ? init.body : undefined);
+    if (crumbUsed && d.status === 401) crumbCache = null;
+    return new Response(d.buf, { status: d.status || 502, headers: { "Content-Type": d.contentType } });
+  }
+
+  const res = await CapacitorHttp.request({
+    url,
+    method: init?.method ?? "GET",
+    headers,
+    data: typeof init?.body === "string" ? init.body : undefined,
+    // 바이너리 안전 경로 — 네이티브는 base64 문자열로 돌려준다(EUC-KR 보존).
+    responseType: "arraybuffer",
+    connectTimeout: TIMEOUT_MS,
+    readTimeout: TIMEOUT_MS,
+  });
+
+  // crumb 을 붙였는데도 401 이면 만료된 것 — 캐시를 버려 다음 호출이 새로 받게 한다.
+  //   (TTL 만 믿으면 조기 만료 시 30분 내내 401 이 반복된다)
+  if (crumbUsed && res.status === 401) crumbCache = null;
+
+  const body = toBody(res.data);
+  return new Response(body, {
+    status: res.status ?? 502,
+    headers: { "Content-Type": pickContentType(res.headers as Record<string, string>) },
+  });
 }

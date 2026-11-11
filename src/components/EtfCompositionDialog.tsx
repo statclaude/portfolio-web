@@ -1,14 +1,16 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery, useQueries } from "@tanstack/react-query";
-import { fetchEtfCompositions, fetchTossPrices, fetchKrPriceHistory, fetchKrRegularPrices, searchTossAutoComplete, fetchUsHoldingPrices, fetchTossCodeInfo, fetchYahooPriceHistory, fetchEtfKeyIndicator, fetchWarning, type KrRegularPrice } from "../lib/api";
+import { fetchEtfCompositions, fetchTossPrices, fetchKrPriceHistory, fetchKrRegularPrices, searchTossAutoComplete, fetchUsHoldingPrices, fetchTossCodeInfo, fetchYahooPriceHistory, fetchTossIntraday, fetchEtfKeyIndicator, fetchWarning, type KrRegularPrice } from "../lib/api";
 import { loadHoldings } from "../lib/db";
 import { Sparkline } from "./Sparkline";
+import { useChartRange } from "../lib/chartRange";
+import { KrDaySparkline } from "./KrDaySparkline";
 import { Tooltip } from "./Tooltip";
 import { formatSigned, signColor, isEtfByName, etfActiveType, dayChangePct, dayChangeDiff, isKrHoldingClosed, tradeSecOf } from "../lib/format";
 import { getDimSleepingEnabled } from "../lib/proxyConfig";
 import { usSessionLabel, etTodayStr } from "../lib/usSectorFlow";
 import { fetchForeignHoldingPrices, looksLikeForeignName } from "../lib/foreignStocks";
-import { openExternal } from "../lib/toss";
+import { openExternal, worldQuoteUrl } from "../lib/toss";
 import { EtfCompareChartDialog } from "./EtfCompareChartDialog";
 import { MarketAlertDialog } from "./MarketAlertDialog";
 import { EtfReturnsTag } from "./EtfStatsBox";
@@ -782,6 +784,13 @@ export function StockCard({ i, item, price: priceProp, chart = [], krReg, groups
   //   usChart(부모가 시세와 함께 받아 둔 일봉)를 먼저 본다.
   const chartData = usChart?.length ? usChart
     : isForeignCode ? (usHist ?? []).map(p => p.close) : chart;
+  // 24시간 설정이면 다른 카드와 같은 24시간 그래프(사용자 2026-11-02) — 한국 = 토스 5분봉(KrDaySparkline), 미국 = 토스 5분봉(지수 탭과 같은 캐시)
+  const dayMode = useChartRange() === "day";
+  const { data: usDay } = useQuery({
+    queryKey: ["toss-us-day", fSymbol],
+    queryFn: () => fetchTossIntraday(fSymbol!),
+    enabled: dayMode && !!fSymbol, staleTime: 4 * 60_000, refetchInterval: 5 * 60_000, refetchOnWindowFocus: false, retry: 1,
+  });
   // 마감 책갈피에 붙일 **그 마감이 언제인지**. 이미 받아 둔 US 일봉의 마지막 봉 날짜를 쓴다.
   //   토스 usRegClose 는 "직전(또는 오늘) 정규장 종가" 이고, 야후 일봉의 마지막 봉이 정확히 그 세션이다.
   //   (오버나잇·프리마켓엔 오늘 봉이 아직 없어 직전 거래일이 마지막 봉 = 그 정규장)
@@ -789,8 +798,14 @@ export function StockCard({ i, item, price: priceProp, chart = [], krReg, groups
   //   '어제 종가' 다(closeIsLive → regClose = base). 그래서 한 칸 물러난 봉을 써야 날짜·%가 맞는다.
   const regIdx = (() => {
     if (!isForeignCode || !usHist || usHist.length === 0) return -1;
-    const last = usHist.length - 1;
-    return usHist[last].date === etTodayStr() && usSessionLabel() === "정규장" ? last - 1 : last;
+    // 오늘(ET) 정규장이 아직 안 끝났으면 오늘·그 뒤 날짜 봉은 미완성 — 오버나잇·프리장에도 일봉 출처(앱 = 토스 일봉)가 새 날 봉을
+    //   미리 연다. 그걸 '마감'으로 잡아 월요일 새벽 MU 가 "마감 11/2 (+3.22%)"(= 오버나잇 움직임)로 찍혔다 — 진짜 마감은 금 10/30 −5.3%
+    //   라서 구성종목은 다 + 인데 ETF 만 − 인 이유가 안 보였다(사용자 2026-11-02).
+    const today = etTodayStr();
+    const etHour = Number(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", hour12: false }).format(new Date())) % 24;
+    let i = usHist.length - 1;
+    while (i >= 0 && (usHist[i].date > today || (usHist[i].date === today && etHour < 16))) i--;
+    return i;
   })();
   const regDate = regIdx >= 0 ? (usHist?.[regIdx]?.date ?? null) : null;
   // ★ 정규장 등락률. 토스는 **오버나잇·프리장엔 이 값을 안 준다**(전전일 종가가 없어 계산 불가) →
@@ -842,7 +857,7 @@ export function StockCard({ i, item, price: priceProp, chart = [], krReg, groups
   //   있으면 흐리게 할 이유가 없다 — '값이 없다' 는 신호를 '값이 있는데' 보내면 안 된다.
   const dimCls = extraDim || ((!isStandard && !fxSym) ? "opacity-60" : closedDim ? "opacity-60" : "");
   return (
-    <div className={`group transition-opacity duration-150 ${dimCls} ${className ?? ""}`}>
+    <div className={`pg-card group transition-opacity duration-150 ${dimCls} ${className ?? ""}`}>   {/* pg-card — 야간 배경에서 다른 카드처럼 톤 낮춤 */}
       {alertOpen && (
         <MarketAlertDialog ticker={tNum} name={item.name} warning={warning ?? ""}
                            onClose={() => setAlertOpen(false)} />
@@ -850,11 +865,11 @@ export function StockCard({ i, item, price: priceProp, chart = [], krReg, groups
       <div className="flex items-end justify-between gap-1 mx-1">
         <div className="flex items-end gap-0.5 flex-wrap min-w-0">
           {/* 종목명 탭 = 외부 링크. 토스에 있는 종목은 토스로, 일본 종목은 토스가 취급하지 않으므로
-              야후 파이낸스로 보낸다(심볼은 우리가 이름으로 찾아낸 6857.T 같은 JPX 코드). */}
+              네이버 해외주식(도쿄)·야후(그 밖)로 보낸다(심볼은 우리가 이름으로 찾아낸 6857.T 같은 JPX 코드). */}
           <button onClick={isStandard
                     ? () => openExternal(`https://www.tossinvest.com/stocks/${item.stockCode}`)
                     : fxSym
-                    ? () => openExternal(`https://finance.yahoo.com/quote/${encodeURIComponent(fxSym)}`)
+                    ? () => openExternal(worldQuoteUrl(fxSym))
                     : undefined}
                   disabled={!isStandard && !fxSym}
                   className={`inline-flex items-center px-2 py-0.5 rounded-t-md min-w-0 max-w-full
@@ -946,8 +961,9 @@ export function StockCard({ i, item, price: priceProp, chart = [], krReg, groups
                 </div>
               );
             })()
-          ) : fxSym && price?.trade_date ? (
+          ) : fxSym && price?.trade_date && price.foreignOpen !== true ? (
             // 일본 — 연휴가 길어 한국 ETF 와 며칠씩 어긋난다. **언제 마감값인지**를 반드시 적는다.
+            //   현지 장이 열려 있으면 안 띄운다 — 도쿄 장중(~15:30)에 키옥시아가 "마감 11/2" 로 찍혔다(사용자 2026-11-02)
             (() => {
               const d = price.trade_date;
               const pct = dayChangePct(price) ?? 0;
@@ -987,7 +1003,14 @@ export function StockCard({ i, item, price: priceProp, chart = [], krReg, groups
                           bg-gray-50/60 px-2 py-1 space-y-0.5 flex-1 min-w-0 ${boxMinH}
                           flex flex-col justify-center
                           ${closedDim ? "border-transparent" : "border-gray-200"}`}>
-            {chartData.length > 1 && (
+            {dayMode && krCode
+              ? <KrDaySparkline code={tNum} fallback={chartData} live={price?.price} width={300} height={120}
+                                className="absolute inset-0 w-full h-full opacity-30 pointer-events-none" />
+              : dayMode && usDay && usDay.closes.length > 1
+              ? <Sparkline data={usDay.closes} xs={usDay.xs} baseline={usDay.base} prevBaseline={usDay.prevBase} nextBaseline={usDay.nextBase}
+                           breakIndex={usDay.breakIdx} markXs={usDay.markXs} width={300} height={120}
+                           className="absolute inset-0 w-full h-full opacity-30 pointer-events-none" />
+              : chartData.length > 1 && (
               <Sparkline data={chartData} width={300} height={120}
                          className="absolute inset-0 w-full h-full opacity-20 pointer-events-none" />
             )}
@@ -1611,7 +1634,7 @@ function PieSlot({ items, otherRatio, cashRatio, onHoverIdx }:
 
   return (
     <div className="flex items-center justify-center min-h-[160px]">
-      <svg viewBox="0 0 220 150" className="w-full h-auto max-h-[160px]"
+      <svg viewBox="0 0 220 150" className="pg-card w-full h-auto max-h-[160px]"
            role="img" aria-label="ETF 구성 비중 분포">
         <defs>
           {/* 슬라이스별 radial gradient — 중심 밝게, 가장자리 어둡게 (3D 돔) */}

@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Settings, StickyNote } from "lucide-react";
+import { DiscTags } from "./DiscTags";
+import { ValueupTags } from "./ValueupTags";
+import { SeohakTag } from "./SeohakBox";
+import { isSyncedHolding, linkedGroupByName } from "../lib/linkedGroups";
+const fmtSyncedAt = (iso?: string) => iso ? new Date(iso).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
 import type { Stock, Price, Investor, Consensus, Memo } from "../types";
 import { twoDayTodayX, TWO_DAY_HALF, type PricePoint, type DaySeries } from "../lib/api";
 import { formatSigned, signColor, formatVolume, isKrHoldingClosed, isEtfByName, etfActiveType, holdingYesterdayBaseSum, nowKstDateStr, krCloseTimeLabel, krCloseImminentMin, krFinalCloseHHMM, krSinglePriceSession, fmtAgo, marketOfSymbol, isUsExtendedTradingOpen, isQuoteStale, tradeSecOf, isEtfOrEtnByName, isKrAfterRegularClose } from "../lib/format";
@@ -8,6 +13,7 @@ import { useEtfCount } from "../lib/etfIndex";
 import { memoTagClass } from "../lib/memoColor";
 import { openTossStock, tossStockUrl } from "../lib/toss";
 import { openGoogleAi, STOCK_ANALYSIS_PROMPT, aiNowStamp } from "../lib/googleAi";
+import { openStockInfo, canStockInfo } from "../lib/tickPopup";
 import { Sparkline } from "./Sparkline";
 import { useChartRange, pickCardChart } from "../lib/chartRange";
 import { AuxIndicators } from "./AuxIndicators";
@@ -17,6 +23,7 @@ import { MarketAlertDialog } from "./MarketAlertDialog";
 import { IntradayPatternDialog } from "./IntradayPatternDialog";
 import { CommunityDialog } from "./CommunityDialog";
 import { InvestorMatrixPanel } from "./InvestorMatrixPanel";
+import { appConfirm } from "../lib/appDialog";
 
 interface KrRegInfo {
   ticker: string;
@@ -462,7 +469,7 @@ const TICK_INIT: TickState = { dir: undefined, arrow: "" };
 
 export function StockCard({
   stock, price, krReg, investor, investorHistory, consensus, sector, market, warning, loading, chart, dayChart, priceHistory, longHistory, onNeedLongHistory, onVisible,
-  memo, otherGroups, heldGroups, onOpenValuation, onEdit, onDelete, onOpenMemo, onOpenEtf, onOpenEtfReverse,
+  memo, otherGroups, heldGroups, onEdit, onDelete, onOpenMemo, onOpenEtf, onOpenEtfReverse,
   hideStats, lastBuy, lastSell,
 }: Props) {
   const [tick, setTick] = useState<TickState>(TICK_INIT);
@@ -538,6 +545,9 @@ export function StockCard({
   // 미국 보유 종목은 한국 세션이 아니라 미국 세션 기준으로 흐림 (지수창 dimNow 로직의 최소 형태).
   //   24h(Blue Ocean) 창이 열려있으면 밝게, 닫히거나(주말) 체결 정체(90분)면 흐림.
   const isUsHolding = marketOfSymbol(stock.ticker) === "US";
+  // 증권사 연동으로 가져온 행 — 잠금(수정·삭제 숨김), 🔗 표시(사용자 결정 2026-10-26)
+  const synced = isSyncedHolding(stock);
+  const syncedAt = synced ? fmtSyncedAt(linkedGroupByName(stock.account)?.lastSyncAt) : "";
   // ETF·ETN 은 애프터마켓(16:00~20:00)에 참여하지 않는다 — 흐림 판정·마감 시각 양쪽에 쓰는 한 값.
   const noAfterHours = isEtfOrEtnByName(stock.name);
   const sleeping = isUsHolding
@@ -613,7 +623,7 @@ export function StockCard({
     if (`${parts.year}-${parts.month}-${parts.day}` !== dayChart.date) return dayChart;
     const mins = (Number(parts.hour) % 24) * 60 + Number(parts.minute);
     const f = isUs ? mins / (24 * 60) : (mins - 8 * 60) / (12 * 60);
-    const x = dayChart.twoDay ? twoDayTodayX(f) : f;   // 어제+오늘 축이면 오늘은 오른쪽 절반
+    const x = dayChart.rolling ? 1 : dayChart.twoDay ? twoDayTodayX(f) : f;   // 밀어 보기(rolling)면 오른쪽 끝 = 지금   // 어제+오늘 축이면 오늘은 오른쪽 절반
     // 토스 봉 시각은 '끝나는 시각' — 지금이 진행 중인 봉 안이면 그 봉 바로 뒤에 붙인다
     const lastX = dayChart.xs[dayChart.xs.length - 1];
     if (x > 1 || x < lastX - (dayChart.twoDay ? TWO_DAY_HALF : 1) * 10 / (isUs ? 24 * 60 : 12 * 60)) return dayChart;
@@ -705,7 +715,7 @@ export function StockCard({
 
   return (
     <div ref={visibilityRef}
-         className={`group ${dimmed ? "opacity-60" : ""} ${hideStats ? "h-full flex flex-col" : ""}`}
+         className={`pg-card group ${dimmed ? "opacity-60" : ""} ${hideStats ? "h-full flex flex-col" : ""}`}
          onMouseEnter={onNeedLongHistory}>
       {/* 책갈피 — 종목명 + 섹터 + 위험 (좌) / 신호 + hover 버튼 (우) — 모두 책갈피 통일 */}
       <div className="flex items-end justify-between gap-1 mx-2">
@@ -762,6 +772,11 @@ export function StockCard({
               <span className="truncate">{stock.name}</span>
             </button>
           </Tooltip>
+          {/* 기업 밸류업 꼬리표(저PBR·고배당·밸류업 우수) — 거래소 KIND 명단 */}
+          <ValueupTags code={stock.ticker} bookmark />
+          {isUsHolding && <SeohakTag symbol={stock.ticker} bookmark />}
+          {/* 최근 5거래일 공시 종류(실적·계약·합병·분할…) — 누르면 목록(사용자 2026-11-03) */}
+          <span className="inline-flex items-end gap-0.5"><DiscTags code={stock.ticker} name={stock.name} size="sm" /></span>
           {/* 메모 태그 칩 — 태그 있을 때만, 클릭 시 메모 다이얼로그 열기 */}
           {memo?.tag && onOpenMemo && (
             <Tooltip content={
@@ -789,9 +804,9 @@ export function StockCard({
             </Tooltip>
           )}
           {/* 수급 신호 — 외인+기관 동반매수 / 개인 떠받치기 / 외인비율 추세
-              호버 시 투자자 그리드 행과 동일한 통합 표 + 미니차트 표시 (시그널 톤별 컬럼 강조) */}
+              칩을 **누르면** 투자자 그리드와 같은 통합 표 + 미니차트(시그널 톤별 컬럼 강조) — 마우스 올림 → 클릭(2026-10-26) */}
           {sig?.primary && (
-            <Tooltip content={
+            <Tooltip click trigger="children" onOpen={onNeedLongHistory} content={
               <>
                 <div className={`font-bold mb-1 ${
                   sig.primary.tone === "bull" ? "text-rose-700" : "text-blue-700"
@@ -804,14 +819,14 @@ export function StockCard({
             }>
               <span className={`inline-flex items-center gap-0.5 px-2 py-0.5
                                 rounded-t-md border-t border-l border-r
-                                text-[10px] leading-none cursor-help
+                                text-[10px] leading-none cursor-pointer
                                 ${SIGNAL_TONE[sig.primary.tone]}`}>
                 {SIGNAL_ICON[sig.primary.tone]} {sig.primary.label}
               </span>
             </Tooltip>
           )}
           {sig?.secondary && (
-            <Tooltip content={
+            <Tooltip click trigger="children" onOpen={onNeedLongHistory} content={
               <>
                 <div className={`font-bold mb-1 ${
                   sig.secondary.tone === "pension_buy" || sig.secondary.tone === "up"
@@ -825,7 +840,7 @@ export function StockCard({
             }>
               <span className={`inline-flex items-center gap-0.5 px-2 py-0.5
                                 rounded-t-md border-t border-l border-r
-                                text-[10px] leading-none cursor-help
+                                text-[10px] leading-none cursor-pointer
                                 ${SIGNAL_TONE[sig.secondary.tone]}`}>
                 {SIGNAL_ICON[sig.secondary.tone]} {sig.secondary.label}
               </span>
@@ -867,16 +882,7 @@ export function StockCard({
               ⏰
             </button>
           )}
-          {onOpenValuation && /^[\dA-Za-z]{6}$/.test(stock.ticker) && (
-            <button
-              type="button"
-              onClick={() => onOpenValuation(stock.ticker)}
-              title="기업가치 보기"
-              className="opacity-60 hover:opacity-100
-                         text-xs leading-none px-0.5 transition-opacity">
-              📊
-            </button>
-          )}
+          {/* 📊 기업가치는 위 '📊종목정보' 팝업의 탭으로 들어갔다(2026-10-23) — 여기 버튼은 뺐다 */}
           {/^[\dA-Za-z]{6}$/.test(stock.ticker) && (
             <button
               type="button"
@@ -887,22 +893,26 @@ export function StockCard({
               💬
             </button>
           )}
+          {synced && (
+            <span title={`토스 연동 보유 — 토스 값으로 자동 갱신, 여기서 수정·삭제 불가${syncedAt ? ` (토스 기준 ${syncedAt})` : ""}`}
+                  className="inline-flex items-center px-1 text-[10px] text-violet-700 cursor-help">🔗</span>
+          )}
           {onEdit && (
             <button
               type="button"
               onClick={() => onEdit(stock)}
-              title="수정"
+              title={synced ? "거래 기록 / 그룹" : "수정"}
               className="opacity-60 hover:opacity-100 inline-flex items-center
                          text-slate-600 hover:text-slate-900
                          px-0.5 transition-opacity">
               <Settings size={14} strokeWidth={2.2} />
             </button>
           )}
-          {onDelete && (
+          {onDelete && !synced && (
             <button
               type="button"
-              onClick={() => {
-                if (confirm(`${stock.name} 을(를) ${stock.account} 에서 삭제할까요?`)) {
+              onClick={async () => {
+                if (await appConfirm(`${stock.name} 을(를) ${stock.account} 에서 삭제할까요?`)) {
                   onDelete(stock);
                 }
               }}
@@ -951,12 +961,21 @@ export function StockCard({
               </span>
             );
           })()}
+          {/* 📊 종목정보 — 실시간(체결·호가·거래원)·기업가치 탭 팝업. 국내 종목만(미국은 아래 🔍AI 만). 2026-10-23 ⚡체결+📊 통합 */}
+          {canStockInfo(stock.ticker) && (
+            <button onClick={() => openStockInfo(stock.ticker, stock.name)}
+                    title="종목정보 — 실시간 체결·호가·거래원 / 기업가치 (팝업)"
+                    className="inline-flex items-center px-1.5 py-0.5 rounded-t-md text-[10px] font-bold leading-none
+                               border-t border-l border-r border-amber-300 text-amber-700 bg-amber-50 hover:bg-amber-100 transition">
+              📊종목정보
+            </button>
+          )}
           {/* 🔍AI — 섹션 오른쪽 (모바일과 동일). 현재상태 구글 AI 분석 팝업 */}
           <button onClick={() => openGoogleAi(buildAiQuery())}
                   title="현재가·등락률·컨센서스로 구글 AI에 현재상태 분석 요청 (팝업)"
                   className="inline-flex items-center px-1.5 py-0.5 rounded-t-md text-[10px] font-bold leading-none
                              border-t border-l border-r border-blue-300 text-blue-700 bg-blue-50 hover:bg-blue-100 transition">
-            🔍AI
+            AI
           </button>
         </div>
       </div>
@@ -968,7 +987,7 @@ export function StockCard({
                             transition-opacity`}>
         {/* 가격 박스 — 고/현재가/저 (3/10). 비거래일엔 sparkline 워터마크.
             Tooltip 으로 감싸서 overflow-hidden 자식이라도 툴팁 영역은 잘리지 않음 */}
-        <Tooltip content={
+        <Tooltip click onOpen={onNeedLongHistory} content={
           <>
             {/* 캔들차트 — 최근 ~60 거래일 OHLC (3개월) + 오늘 형성중 캔들, 평단가/목표가 가로 점선 + 외인비율 보라 라인 */}
             {candlesWithToday.length > 1 && (() => {
@@ -1151,8 +1170,11 @@ export function StockCard({
                        xs={bgIsDay ? dayLive?.xs : undefined} baseline={bgIsDay ? dayLive?.base : undefined}
                        markIndex={bgIsDay ? dayLive?.openIdx : undefined}
                        closeIndex={bgIsDay ? dayLive?.closeIdx : undefined}
+                       extraMarks={bgIsDay ? [dayLive?.prevOpenIdx, dayLive?.prevCloseIdx] : undefined}
+                       markXs={bgIsDay ? dayLive?.markXs : undefined}
                        breakIndex={bgIsDay ? dayLive?.breakIdx : undefined}
                        prevBaseline={bgIsDay ? dayLive?.prevBase : undefined}
+                       nextBaseline={bgIsDay ? dayLive?.nextBase : undefined}
                        target={bgIsDay ? undefined : consensus?.target}
                        avgPrice={!bgIsDay && hasPosition ? stock.avg_price : undefined}
                        entry={bgIsDay ? undefined : memo?.entryPrice}
@@ -1543,10 +1565,12 @@ export function StockCard({
         </div>
         )}
 
-      {/* ───────── 투자자 그리드 (4/10) ───────── */}
-      <div className={`${hideStats ? "basis-[55%]" : "basis-[30%]"} min-w-0 bg-white border border-gray-200 rounded-md
-                       px-1.5 py-1 grid grid-cols-2 gap-x-2 gap-y-0
-                       text-[11px]`}>
+      {/* ───────── 투자자 그리드 (4/10) ───────── 오른쪽 아래 '상세보기' = 200일 수급 표(마우스 올림 → 클릭, 사용자 요청 2026-10-26) */}
+      <Tooltip click onOpen={onNeedLongHistory} className={`${hideStats ? "basis-[55%]" : "basis-[30%]"} min-w-0`}
+               content={longHistory && longHistory.length > 0 ? allInvestorsTable() : null}>
+      <div className="w-full bg-white border border-gray-200 rounded-md
+                       px-1.5 py-1 pb-4 grid grid-cols-2 gap-x-2 gap-y-0
+                       text-[11px]">
         {FLOW_FIELDS.map(({ label, key }) => {
           const raw = investor ? investor[key] : null;
           const isRatio = key === "외국인비율";
@@ -1588,17 +1612,9 @@ export function StockCard({
 
           const sizeCls = HIGHLIGHT_SIZE[label] ?? "";
 
-          // 5/20/60/120/200일 누적 + 일별 — 모든 행에서 동일한 통합 표 표시.
-          // 호버한 행에 대응하는 컬럼 강조 (외인비율 행 → 외인비율(%) 컬럼).
-          const tooltipContent = (longHistory && longHistory.length > 0)
-            ? allInvestorsTable(key)
-            : null;
-
-          const rowEl = (
-            <div
-              className={`flex items-center justify-between gap-1 px-1 py-px rounded
-                          ${rowBg} ${sizeCls} ${tooltipContent ? "cursor-help" : ""}`}
-            >
+          return (
+            <div key={label}
+                 className={`flex items-center justify-between gap-1 px-1 py-px rounded ${rowBg} ${sizeCls}`}>
               <span className={`whitespace-nowrap shrink-0 ${labelColor}`}>
                 {label}
               </span>
@@ -1607,15 +1623,9 @@ export function StockCard({
               </span>
             </div>
           );
-          return tooltipContent ? (
-            <Tooltip key={label} content={tooltipContent} className="block">
-              {rowEl}
-            </Tooltip>
-          ) : (
-            <div key={label}>{rowEl}</div>
-          );
         })}
       </div>
+      </Tooltip>
     </article>
     {intradayOpen && (
       <IntradayPatternDialog

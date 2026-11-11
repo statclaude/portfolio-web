@@ -1,5 +1,30 @@
 // 빌드 시각 + git hash 표시 + 강제 갱신 (Service Worker + Cache 초기화)
 // __BUILD_TIME__ / __COMMIT_HASH__ 는 vite.config.ts 의 define 으로 주입됨.
+import { useEffect, useState } from "react";
+import { appConfirm } from "../lib/appDialog";
+import { isPreviewBuild, fetchPreviewInfo, enterPreview, leavePreview } from "../lib/previewMode";
+
+// 🧪 미리보기 — 미리보기 화면이면 '원래대로', 본 화면이면 더 새 미리보기가 올라가 있을 때만 '미리보기' 단추(사용자 2026-11-04)
+export function PreviewSwitch() {
+  const [info, setInfo] = useState<{ buildTime: string; commit?: string } | null>(null);
+  useEffect(() => {
+    if (isPreviewBuild || location.hostname !== "hanjungwoo3.github.io") return;
+    const load = () => { void fetchPreviewInfo().then(setInfo); };
+    load();
+    const id = setInterval(load, 5 * 60_000);
+    return () => clearInterval(id);
+  }, []);
+  if (isPreviewBuild) return (
+    <button onClick={leavePreview} title="배포 전 미리보기를 쓰는 중 — 누르면 원래(배포된) 버전으로"
+            className="px-1.5 rounded bg-amber-400 text-amber-950 font-bold text-[10.5px] leading-[16px] hover:bg-amber-300">🧪 미리보기 · 원래대로</button>
+  );
+  if (!info || !(Date.parse(info.buildTime) > Date.parse(__BUILD_TIME__))) return null;
+  return (
+    <button onClick={enterPreview}   /* 확인 창 없이 바로 — 맥 앱에서 눌러도 넘어가지 않았다(사용자 2026-11-04 "눌렀는데 그대로"). 원래대로 단추로 언제든 복귀 */
+            title={`배포 전 미리보기(${info.commit ?? ""}) — 지금 쓰는 데이터 그대로, 헤더의 원래대로 단추로 복귀`}
+            className="px-1 rounded border border-amber-400 bg-amber-50 text-amber-800 font-bold text-[10px] leading-[15px] hover:bg-amber-100">🧪 미리보기</button>
+  );
+}
 
 // 첫 로드 시 1회 콘솔에 버전 출력 (개발자 도구로도 확인 가능)
 if (typeof window !== "undefined" && !(window as any).__VERSION_LOGGED__) {
@@ -26,10 +51,10 @@ function formatBuildTime(iso: string): string {
 
 // 외부에서도 호출 가능 (헤더 🔄 버튼 등)
 export async function forceUpdate(opts?: { silent?: boolean }) {
-  if (!opts?.silent && !confirm("최신 버전으로 강제 갱신할까요?\n\n"
+  if (!opts?.silent && !(await appConfirm("최신 버전으로 강제 갱신할까요?\n\n"
                 + "• Service Worker + 캐시 초기화 후 새로고침\n"
                 + "• 보유/피크/그룹 등 저장된 설정값은 그대로 유지됩니다 (IndexedDB는 초기화 X)"
-              )) return;
+              ))) return;
   try {
     // 1) 모든 SW 등록 해제
     if ("serviceWorker" in navigator) {
@@ -59,6 +84,7 @@ export function VersionBadge({ compact }: BadgeProps = {}) {
   const tip = `commit: ${__COMMIT_HASH__}\n빌드: ${__BUILD_TIME__}\n클릭: 캐시 초기화 + 새로고침`;
   return (
     <span className="flex items-center gap-1 text-[10px] text-gray-400 shrink-0">
+      <PreviewSwitch />
       {compact ? (
         // 모바일 — hash 만, 클릭으로 강제 갱신 (🔄 버튼 통합)
         <button onClick={() => void forceUpdate()} title={tip}

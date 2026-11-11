@@ -1,6 +1,9 @@
+// 부호 붙인 금액(원) — 원 단위로 반올림한다. 소수점 주식(토스 연동 미국 주식 0.000855주)이 섞이면
+//   금액에 소수점이 붙어 합계·손익 표가 칸을 넘쳤다(2026-10-26). 쓰는 곳은 전부 원 금액·정수 수량이다.
 export function formatSigned(n: number): string {
-  if (n === 0) return "0";
-  return n > 0 ? `+${n.toLocaleString()}` : n.toLocaleString();
+  const v = Math.round(n);
+  if (v === 0) return "0";
+  return v > 0 ? `+${v.toLocaleString()}` : v.toLocaleString();
 }
 
 export function signColor(n: number): string {
@@ -377,6 +380,13 @@ export function krCloseTimeLabel(tradingEnd?: string): string {
 export function isKrAfterRegularClose(): boolean {
   const t = nowInTz("Asia/Seoul");
   return t.weekday >= 1 && t.weekday <= 5 && t.hour * 60 + t.minute >= 15 * 60 + 30;
+}
+/** 국내 '정규장 뒤' 구간을 다음 장 전까지 늘린 것 — 평일 15:30~ · 다음 평일 08:00(NXT 프리) 전 · 주말 내내.
+ *  업종 평균의 애프터 꼬리표용(사용자 2026-11-07 "프리/애프터는 안 나오는데" — 자정·주말이면 금요일 애프터가 사라졌다). 휴장일은 따지지 않는다 */
+export function isKrAfterWindow(): boolean {
+  const t = nowInTz("Asia/Seoul"), m = t.hour * 60 + t.minute;
+  if (t.weekday === 0 || t.weekday === 6) return true;
+  return m >= 15 * 60 + 30 || m < 8 * 60;
 }
 
 // 단일가 세션 종류 — 09:00 이전이면 프리장(장전 동시호가/단일가),

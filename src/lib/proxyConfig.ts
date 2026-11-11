@@ -3,7 +3,7 @@
 // → 공개 인프라 부담 0, 사용자 본인 100k/일 무료 한도 전용
 
 import { isExtensionProxyReady } from "./extensionProxy";
-import { isNativeApp } from "./nativeProxy";
+import { isDirectApp } from "./nativeProxy";
 
 const KEY = "portfolio_personal_proxy_url";        // 레거시 단일 URL (마이그레이션/호환)
 const LIST_KEY = "portfolio_personal_proxies";     // 신규 — 여러 개 {url, enabled}
@@ -55,7 +55,9 @@ export function setPersonalProxies(list: PersonalProxy[]) {
 // 켜진 전용 프록시 URL 들 (요청 라우팅용 — 여러 개면 fetchProxied 가 랜덤 분산)
 export function getEnabledPersonalProxies(): string[] {
   const stored = getPersonalProxies().filter(p => p.enabled).map(p => p.url);
-  // 확장은 항상 맨 앞 — 가정용 IP 이고 호출 한도가 없어 가장 먼저 쓴다.
+  // 네이티브 앱이면 맨 앞 — CORS 가 없어 프록시를 아예 거치지 않는다(가장 빠르고 한도도 없다).
+  if (isDirectApp()) return [NATIVE_PROXY_URL, ...stored];   // 안드로이드·데스크톱 앱
+  // 확장은 그다음 — 가정용 IP 이고 호출 한도가 없어 프록시보다 먼저 쓴다.
   return isExtensionProxyReady() ? [EXTENSION_PROXY_URL, ...stored] : stored;
 }
 
@@ -90,10 +92,19 @@ export function isExtensionProxyUrl(u: string): boolean {
   return u === EXTENSION_PROXY_URL;
 }
 
-// 합성 표식 — 실제 HTTP 로 때릴 수 없는 항목. 라우팅 순회에서 걸러낸다.
-//   (upstream 은 여기에 안드로이드 앱 표식도 묶지만, 우리 앱은 isNativeApp() 으로 따로 판별한다)
+// ─── 안드로이드 앱도 '전용 프록시 한 개' 로 취급 ──────────────
+// 확장과 같은 이유다(위 주석 참조) — 게이트마다 "앱인가?" 를 따로 묻지 않게 목록에 끼워 넣는다.
+//   실제 요청은 fetchProxied 맨 앞에서 nativeProxy 가 처리하고, 이 표식은 판정용이다.
+//   저장소에는 절대 들어가지 않는다 — 읽기 시점에만 합성한다.
+export const NATIVE_PROXY_URL = "native:app";
+
+export function isNativeProxyUrl(u: string): boolean {
+  return u === NATIVE_PROXY_URL;
+}
+
+// 합성 표식(확장·앱) — 실제 HTTP 로 때릴 수 없는 항목. 라우팅 순회에서 걸러낸다.
 export function isSyntheticProxyUrl(u: string): boolean {
-  return isExtensionProxyUrl(u);
+  return isExtensionProxyUrl(u) || isNativeProxyUrl(u);
 }
 
 export function isLocalProxyUrl(u: string): boolean {
@@ -210,7 +221,8 @@ export function invalidatePersonalProxyStatusCache(): void {
 export function getPersonalPollMs(): number {
   try {
     const v = localStorage.getItem(POLL_KEY);
-    if (v === null || v === "") return DEFAULT_PUBLIC_POLL_MS;
+    // 앱(안드로이드·데스크톱)은 처음부터 5초 — 공용 프록시를 안 써서 호출 한도가 없다(데스크톱 첫 실행이 5분으로 떴다)
+    if (v === null || v === "") return isDirectApp() ? 5_000 : DEFAULT_PUBLIC_POLL_MS;
     const n = Number(v);
     // 0 = 수동(허용), 그 외엔 1초 이상만 유효
     if (n === 0) return 0;
@@ -231,7 +243,7 @@ export function hasDedicatedTransport(): boolean {
 //   전용 '프록시'(본인 워커)와는 구분해야 한다. 워커는 그 자체가 프록시라 다운 집계 대상이지만,
 //   확장·앱은 프록시 목록을 통과하지 않으므로 공용 프록시가 몇 개 죽든 영향을 받지 않는다.
 export function hasDirectTransport(): boolean {
-  return isNativeApp() || isExtensionProxyReady();
+  return isDirectApp() || isExtensionProxyReady();
 }
 
 // 수동 모드 여부 — 자동 폴링 끔 (버튼/메뉴 진입 시에만 갱신)
@@ -272,10 +284,13 @@ export function getDimSleepingEnabled(): boolean {
     return true;
   }
 }
+export const DIM_SLEEPING_EVENT = "dim-sleeping-change";
 export function setDimSleepingEnabled(enabled: boolean) {
   try {
     localStorage.setItem(DIM_KEY, enabled ? "1" : "0");
   } catch {
     /* ignore */
   }
+  // 헤더 토글·설정 어디서 바꿔도 화면이 바로 다시 그려지게(App·모바일이 듣는다)
+  try { window.dispatchEvent(new Event(DIM_SLEEPING_EVENT)); } catch { /* noop */ }
 }

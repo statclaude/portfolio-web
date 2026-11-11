@@ -8,6 +8,9 @@ export interface Stock {
   buy_date?: string;
   market?: string;
   account?: string;
+  // 어디서 온 보유인가 — "toss" = 토스 Open API 연동으로 가져온 행(잠금: 수정·삭제·매수·매도 불가, 갱신 때 토스 값으로 교체).
+  //   손으로 넣은 행은 미설정. ★ Drive normalize(syncManager) 에 포함돼 있다 — 빠지면 동기화에서 조용히 사라진다.
+  source?: string;
   // 합산(내주식) 전용 — 매수일이 섞인 보유의 '오늘' 손익을 보유분별로 계산하기 위한 분리값.
   // 일반 행은 미설정(카드/합계가 buy_date 로 당일 여부 판정). 합산 시에만 채워짐.
   todayShares?: number;   // 이 중 '오늘' 매수한 주식 수
@@ -57,8 +60,13 @@ export interface Investor {
   기타금융: number;
   기타법인: number;
   외국인비율: number;    // 보유율 %
+  갱신?: string;         // 토스 updatedAt — 오늘 행은 장중 KRX 잠정치(하루 몇 번 갱신)
+  개인있음?: boolean;    // 토스 hasIndividual — 장중엔 false(개인은 장 마감 뒤에만)
   // 그 날 종가 — 토스가 수량만 주므로 금액(억원) 표시는 이걸로 환산한다(수량 × 종가).
   종가?: number;
+  // 개인·외국인·기관 [매수 수량, 매도 수량] — 토스만 준다(나머지 투자자는 매도 칸이 없다). 순매수만으론 안 보이는
+  //   '얼마나 사고 얼마나 팔았나'(손바뀜)를 호버 표에 같이 보여 준다(사용자 요청 2026-10-22). 장중 개인은 0(잠정치).
+  매수매도?: Partial<Record<"개인" | "외국인" | "기관", [number, number]>>;
 }
 
 export interface Consensus {

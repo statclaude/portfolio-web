@@ -1,7 +1,10 @@
-import { lazy, Suspense, useCallback, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { openCompare } from "../lib/compareNav";
 import { useQuery } from "@tanstack/react-query";
 import { openGoogleAi, STOCK_ANALYSIS_PROMPT, aiNowStamp } from "../lib/googleAi";
 import { useCrosshairSync } from "../lib/useCrosshairSync";
+import { SemiDashTab } from "./SemiDashTab";
+import { canStockInfo } from "../lib/tickPopup";
 import { useEscClose } from "../lib/useEscClose";
 import { maColor, parseMaPeriods, MA_DEFAULT_PERIODS, MA_MAX_LINES, MA_MAX_PERIOD } from "../lib/indicators";
 import type { SyncRegistrar } from "../lib/useCrosshairSync";
@@ -45,6 +48,17 @@ import { loadBurstLevel, saveBurstLevel, burstThresholdWon, BURST_LEVELS, type B
 import { useTossMaintenance, getTossMaintenance } from "../lib/tossMaintenance";
 import { EtfIndicatorBlock, EtfFeeTip, EtfCompositionDialog } from "./EtfCompositionDialog";
 
+// 한 페이지 섹션(사용자 요청 2026-10-23 — 탭 대신 한 화면 스크롤, 위 칩을 누르면 그 자리로)
+//   실시간(국내 종목만 — 뉴스·공시·커뮤니티 포함) → 요약 → 실적·재무 → 차트·수급 · 실시간이 없는 종목은 맨 아래 소식·대화
+type ValSec = "live" | "summary" | "fin" | "chart" | "news";
+const VAL_SECS: { k: ValSec; label: string }[] = [
+  { k: "live", label: "⚡ 실시간" },
+  { k: "summary", label: "요약" },
+  { k: "fin", label: "실적·재무" },
+  { k: "chart", label: "차트·수급" },
+  { k: "news", label: "소식·대화" },   // 실시간이 없는 종목만
+];
+
 interface Props {
   isOpen: boolean;
   onClose: () => void;
@@ -58,6 +72,7 @@ interface Props {
   //   추가 로직을 여기 넣지 않는 이유: 어느 그룹에 넣을지·수량은 검색창이 이미 다 물어본다.
   //   주면 버튼이 뜨고, 안 주면 안 뜬다.
   onRequestSearch?: (query: string) => void;
+  initialSection?: ValSec;   // 처음 보여 줄 자리(종목정보 버튼 = live)
 }
 
 // 외부 링크 — 원래 모달 하단에 있었는데 스크롤해야 보여서 헤더로 올렸다.
@@ -78,6 +93,9 @@ function ExternalLinks({ ticker, name, onDraw, aiQuery }: { ticker: string; name
       <a href={`https://navercomp.wisereport.co.kr/v2/company/c1010001.aspx?cmp_cd=${ticker}`}
          target="_blank" rel="noopener noreferrer"
          title={`${name} Wisereport`} className={cls}>🔗 Wisereport</a>
+      {/* 📈 비교 — 이 종목으로 시작해 검색으로 더해 가며 등락률을 한 그래프로(사용자 2026-11-10) */}
+      <button type="button" onClick={() => openCompare(`${name} 등락률 비교`, [{ ticker, name }])}
+              title={`${name} 으로 시작하는 등락률 비교 차트 — 검색으로 종목을 하나씩 더해 비교`} className={cls}>📈 비교</button>
       {onDraw && (
         <button type="button" onClick={onDraw} title={`${name} 차트에 선 그리기`} className={cls}>
           ✏️ 그리기
@@ -392,9 +410,33 @@ function DisclosureSection({ ticker }: { ticker: string }) {
 }
 
 export function ValuationModal({
-  isOpen, onClose, ticker, name, curPrice, todayBar, myAvgPrice, entryPrice, onRequestSearch,
+  isOpen, onClose, ticker, name, curPrice, todayBar, myAvgPrice, entryPrice, onRequestSearch, initialSection,
 }: Props) {
   useEscClose(isOpen, onClose);
+  // 한 페이지 섹션 이동 — 칩 = 그 자리로 스크롤, 스크롤하면 지금 자리 칩에 불
+  const hasLive = canStockInfo(ticker);
+  const secs = VAL_SECS.filter(x => hasLive ? x.k !== "news" : x.k !== "live");
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [curSec, setCurSec] = useState<ValSec>(initialSection && (initialSection !== "live" || hasLive) ? initialSection : (hasLive ? "live" : "summary"));
+  const goSec = (k: ValSec) => {
+    const root = scrollRef.current, el = root?.querySelector<HTMLElement>(`[data-sec="${k}"]`);
+    if (root && el) root.scrollTo({ top: el.offsetTop - 4, behavior: "smooth" });
+  };
+  useEffect(() => {   // 처음 자리(기업가치로 열면 요약으로)
+    if (!initialSection || initialSection === "live") return;
+    const t = setTimeout(() => goSec(initialSection), 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const onScrollSec = () => {
+    const root = scrollRef.current; if (!root) return;
+    let best: ValSec = secs[0].k;
+    for (const x of secs) {
+      const el = root.querySelector<HTMLElement>(`[data-sec="${x.k}"]`);
+      if (el && el.offsetTop - root.scrollTop <= 80) best = x.k;
+    }
+    if (best !== curSec) setCurSec(best);
+  };
   // ETF(특히 채권형)는 재무·컨센서스·대차·신용·CFD·프로그램·공시가 없음 → 그 조회를 전부 건너뛰어
   //   기업가치 열 때 프록시 요청 폭주(호출수 병목)를 방지. (일봉·수급·뉴스만 조회)
   const isEtf = isEtfByName(name);
@@ -468,11 +510,12 @@ export function ValuationModal({
         throw e;
       }
     },
-    enabled: isOpen && curPrice == null && /^[\dA-Za-z]{6}$/.test(ticker),
-    staleTime: 60_000,
+    // 창이 열려 있는 동안 5초마다(사용자 2026-11-09 "종목정보의 가격이 자동 갱신 안 되는 거 같아" — 한 번만 받고 멈춰 있었다)
+    enabled: isOpen && /^[\dA-Za-z]{6}$/.test(ticker),
+    staleTime: 3_000, refetchInterval: 5_000,
     refetchOnWindowFocus: false,
   });
-  const effCurPrice = curPrice ?? livePrices?.[0]?.price;
+  const effCurPrice = livePrices?.[0]?.price ?? curPrice;   // 새로 받은 값이 우선(부모가 넘긴 값은 연 순간 값이라 멈춰 있다)
 
   // 헤더 등락 — 아래 차트가 받는 일봉과 **같은 쿼리키**라 추가 호출이 없다(캐시 공유).
   //   현재가만 있고 기준(전일 종가)이 없으면 "얼마인지" 는 알아도 "오르는 중인지" 를 모른다.
@@ -538,21 +581,24 @@ export function ValuationModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center
-                     bg-black/40 p-4"
+                     bg-black/40 p-0 sm:p-4"
          onMouseDown={e => { downOnBackdropRef.current = e.target === e.currentTarget; }}
          onClick={e => {
            if (e.target === e.currentTarget && downOnBackdropRef.current) onClose();
          }}>
-      <div className="bg-white rounded-lg shadow-xl max-w-7xl w-full
-                       max-h-[92vh] flex flex-col">
-        <header className="px-5 py-3 border-b bg-gray-50">
-          {/* 첫 줄: 기업가치 타이틀 + 닫기 (모바일은 종목명 다음 줄로) */}
+      <div className="bg-white sm:rounded-lg shadow-xl w-full h-full sm:w-[98vw] sm:h-[96vh] flex flex-col overflow-hidden">
+        {/* 📊 종목정보 공용 탭 줄 — ⚡ 실시간 창과 같은 머리(2026-10-23). 닫기(✕)도 여기 */}
+        <div className="pg-menu flex items-center gap-2 px-3 py-1.5 border-b bg-white shrink-0">
+          <span className="font-bold text-gray-900">📊 종목정보</span>
+          <span className="font-bold text-gray-800">{name}</span>
+          <span className="text-[12px] text-gray-400">{ticker}</span>
+          <button onClick={onClose} title="닫기 (Esc)" className="ml-auto p-1 rounded text-gray-500 hover:bg-gray-100 text-lg leading-none">✕</button>
+        </div>
+        <header className="px-5 py-2 border-b bg-gray-50">
+          {/* 첫 줄: 가격·링크 (모바일은 종목명 다음 줄로) */}
           <div className="flex items-baseline gap-3">
-            <h2 className="text-xl font-bold">📊 기업가치</h2>
             {/* PC: inline 으로 종목명·가격 같이 / 모바일: 다음 줄로 */}
             <span className="hidden sm:inline-flex items-baseline gap-3">
-              <span className="text-base font-bold">{name}</span>
-              <span className="text-sm text-gray-500">({ticker})</span>
               {/* ETF 구성 보기 — 종목코드 옆. 이 팝업의 ETF 지표와 짝이라 같은 줄에 둔다.
                   (구성 팝업에서 여기로 오는 📊 링크와 반대 방향 — 둘 사이를 오갈 수 있다) */}
               {isEtf && (
@@ -589,10 +635,6 @@ export function ValuationModal({
                 </span>
               )}
             </span>
-            <button onClick={onClose}
-                    className="ml-auto text-gray-400 hover:text-gray-600 text-xl">
-              ✕
-            </button>
           </div>
           {/* 모바일 — 종목명·가격을 두 번째 줄에 */}
           <div className="sm:hidden flex items-baseline gap-2 mt-1 flex-wrap">
@@ -639,12 +681,30 @@ export function ValuationModal({
           </div>
         </header>
 
-        <div className="px-5 py-4 overflow-y-auto">
+        {/* 섹션 칩 — 누르면 그 자리로(한 페이지 스크롤) */}
+        <div className="pg-menu px-5 py-1.5 border-b bg-white flex items-center gap-1 overflow-x-auto shrink-0">
+          {secs.map(x => (
+            <button key={x.k} onClick={() => goSec(x.k)}
+                    className={`px-2.5 py-0.5 text-[12px] font-bold rounded-full whitespace-nowrap transition
+                                ${curSec === x.k ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}>
+              {x.label}
+            </button>
+          ))}
+        </div>
+        <div ref={scrollRef} onScroll={onScrollSec} className="pg-bg px-5 py-4 overflow-y-auto relative">   {/* pg-bg — 야간 배경 규칙을 창 전체에(실시간 칸이 pg-bg 라 창 밝기 낮춤이 빠져 아래 기업가치가 밝았다) */}
           {error instanceof Error && (
             <div className="mb-3 p-2 bg-red-50 border border-red-200 rounded text-sm text-red-700">
               fetch 실패: {error.message}
             </div>
           )}
+          {hasLive && (
+            <section data-sec="live" className="-mx-5 -mt-4 mb-6">
+              {/* ⚡ 실시간 — 반도체 수급 화면을 이 종목 하나로(체결·호가·거래원·프로그램·새 소식·커뮤니티) */}
+              <SemiDashTab stocks={[{ code: ticker, name }]} popup />
+            </section>
+          )}
+          <section data-sec="summary" className="pt-1 mb-6">
+            <h2 className="text-[13px] font-bold text-gray-500 mb-2 border-b pb-1">요약</h2>
           {/* 기업개요 — 종목 상세 API 의 comment1~3 (출처: 에프앤가이드).
               예전엔 main.naver 의 #summary_info 였는데 그 페이지가 SPA 가 됐다. */}
           {fund.description && fund.description.length > 0 && (
@@ -662,26 +722,6 @@ export function ValuationModal({
                 ))}
               </ul>
             </section>
-          )}
-          {/* 실적 추이 — 실적 3년 + 추정 2년 (forward PER·ROE 가 여기서만 나온다).
-              외국인 지분율·상대수익률을 같은 줄에 붙여 네 칸으로 만든다(세로 절약). */}
-          {earnings && earnings.length > 0 && (
-            <div className="mb-3">
-              <EarningsTrend rows={earnings} />
-            </div>
-          )}
-          {/* 재무 추이 — Wisereport 시계열 5개 차트 */}
-          {finSeries && (
-            <div className="mb-3">
-              <FinancialCharts series={finSeries} />
-            </div>
-          )}
-          {/* 컨센서스 예상치 — 분기별 발표 vs 예상 (매출/영업이익/EPS).
-              데이터 모두 null 이라도 ConsensusCharts 가 워커 구버전 안내를 자체 표시. */}
-          {estEnabled && (
-            <div className="mb-3">
-              <ConsensusCharts revenue={estRevenue} operatingIncome={estOpIncome} eps={estEps} />
-            </div>
           )}
           {/* ETF 전용 — 가치평가·수익성·재무 같은 건 ETF 에 아예 없다. 3 컬럼 그리드를
               그대로 쓰면 왼쪽 2칸이 통째로 빈 채 오른쪽 끝에만 블록이 붙는다(실측).
@@ -704,7 +744,6 @@ export function ValuationModal({
                                         curPrice={effCurPrice}
                                         marketCapText={fund.market_cap_text}
                                         todayBar={todayBar} isEtf={isEtf} part="top" />
-                <NewsSection ticker={ticker} />
               </div>
             </div>
           ) : (
@@ -749,10 +788,37 @@ export function ValuationModal({
           </>
           )}
 
-          {/* 대화 — 종목 카드의 💬 버튼과 같은 화면(토스·네이버).
-              투자자별 순매수 **위**에 둔다: 수급 표·차트가 길어서, 아래로 밀어 두면
-              사람들이 지금 뭘 말하는지를 보려고 한참 스크롤해야 한다. */}
-          <CommunitySection ticker={ticker} />
+          </section>
+          <section data-sec="fin" className="pt-1 mb-6">
+            <h2 className="text-[13px] font-bold text-gray-500 mb-2 border-b pb-1">실적·재무</h2>
+          {/* 실적 추이 — 실적 3년 + 추정 2년 (forward PER·ROE 가 여기서만 나온다).
+              외국인 지분율·상대수익률을 같은 줄에 붙여 네 칸으로 만든다(세로 절약). */}
+          {earnings && earnings.length > 0 && (
+            <div className="mb-3">
+              {/* 오른쪽 칸 = 분기 컨센서스(예상 매출·영업이익·EPS) — 실적 표는 왼쪽 차트와 같은 내용이라 뺐다(사용자 요청 2026-10-23) */}
+              <EarningsTrend rows={earnings}
+                             right={estEnabled ? <ConsensusCharts stacked revenue={estRevenue} operatingIncome={estOpIncome} eps={estEps} /> : undefined} />
+            </div>
+          )}
+          {/* 재무 추이 — Wisereport 시계열 5개 차트 */}
+          {finSeries && (
+            <div className="mb-3">
+              <FinancialCharts series={finSeries} />
+            </div>
+          )}
+          {/* 컨센서스 예상치 — 분기별 발표 vs 예상 (매출/영업이익/EPS).
+              데이터 모두 null 이라도 ConsensusCharts 가 워커 구버전 안내를 자체 표시. */}
+          {estEnabled && !(earnings && earnings.length > 0) && (
+            <div className="mb-3">
+              <ConsensusCharts revenue={estRevenue} operatingIncome={estOpIncome} eps={estEps} />
+            </div>
+          )}
+          {(!earnings || earnings.length === 0) && !finSeries && !estEnabled && (
+            <div className="text-xs text-gray-400 py-6 text-center">실적·재무 자료가 없는 종목입니다{isEtf ? " (ETF)" : ""}.</div>
+          )}
+          </section>
+          <section data-sec="chart" className="pt-1 mb-6">
+            <h2 className="text-[13px] font-bold text-gray-500 mb-2 border-b pb-1">차트·수급</h2>
 
           {/* 투자자별 순매수 (최근 60일) */}
           {/* ETF 는 '가격대별 순매수' 한 줄만 위 오른쪽으로 올렸다 — 여기선 나머지를 그린다.
@@ -774,14 +840,18 @@ export function ValuationModal({
                                  price={effCurPrice} />
           )}
 
-          {/* 뉴스(좌) + 공시(우) — ETF 는 위 오른쪽 칸으로 올렸다(공시가 없어 반쪽만 남으므로) */}
-          {!isEtf && (
-            <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3 items-start">
-              <NewsSection ticker={ticker} />
-              <DisclosureSection ticker={ticker} />
-            </div>
+          </section>
+          {/* 실시간이 없는 종목만 — 뉴스·공시·대화(실시간 자리에 이미 있으면 맨 아래 공시는 뺀다, 사용자 요청 2026-10-23) */}
+          {!hasLive && (
+            <section data-sec="news" className="pt-1 mb-6">
+              <h2 className="text-[13px] font-bold text-gray-500 mb-2 border-b pb-1">소식·대화</h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-start mb-3">
+                <NewsSection ticker={ticker} />
+                {!isEtf && <DisclosureSection ticker={ticker} />}
+              </div>
+              <CommunitySection ticker={ticker} />
+            </section>
           )}
-
         </div>
       </div>
       <DrawingChartDialog ticker={ticker} name={name}
@@ -1139,6 +1209,7 @@ function InvestorChartsSection({
   const dailyForeign = useMemo(() => data.map(d => d.외국인), [data]);
   const dailyInst = useMemo(() => data.map(d => d.기관), [data]);
   const dailyPension = useMemo(() => data.map(d => d.연기금), [data]);
+  const dailyIndiv = useMemo(() => data.map(d => d.개인), [data]);
   const cumForeign = useMemo(() => {
     let s = 0; return data.map(d => { s += d.외국인; return s; });
   }, [data]);
@@ -1147,6 +1218,9 @@ function InvestorChartsSection({
   }, [data]);
   const cumPension = useMemo(() => {
     let s = 0; return data.map(d => { s += d.연기금; return s; });
+  }, [data]);
+  const cumIndiv = useMemo(() => {
+    let s = 0; return data.map(d => { s += d.개인; return s; });
   }, [data]);
 
   // 프로그램매매 — dates 정렬 일별/누적 순매수 (InvestorChartLight 용)
@@ -1275,11 +1349,11 @@ function InvestorChartsSection({
       )}
       {/* 수급별 평균 매수단가 — 차트에 겹치지 않고 표로 */}
       {hasInvestor && <FlowCostTable investors={data} curPrice={curPrice} />}
-      {/* 투자 유형별 — ① 순매수 행(외국인/기관계/연기금/프로그램) ② 잔고·압력 행(공매도/대차/신용/CFD) */}
+      {/* 투자 유형별 — ① 순매수 행(외국인/기관계/연기금/개인/프로그램) ② 잔고·압력 행(공매도/대차/신용/CFD) */}
       {hasInvestor ? (
         <Suspense fallback={<div className="h-[220px]" />}>
           {/* ① 순매수 (일별+누적) */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2">
+          <div className={`grid grid-cols-1 md:grid-cols-2 ${hasProgram ? "lg:grid-cols-5" : "lg:grid-cols-4"} gap-2`}>
             <InvestorChartLight
               label="외국인"
               daily={dailyForeign} cumulative={cumForeign} dates={dates}
@@ -1296,6 +1370,13 @@ function InvestorChartsSection({
               label="연기금"
               daily={dailyPension} cumulative={cumPension} dates={dates}
               barColor="#fed7aa" cumColor="#c2410c"
+              onReady={registerPanelSync}
+            />
+            {/* 개인 — 빈 넷째 칸에(사용자 요청 2026-10-22). 장중엔 토스가 개인을 0 으로 줘 오늘 막대는 장 마감 뒤에 찬다 */}
+            <InvestorChartLight
+              label="개인"
+              daily={dailyIndiv} cumulative={cumIndiv} dates={dates}
+              barColor="#fecdd3" cumColor="#be123c"
               onReady={registerPanelSync}
             />
             {hasProgram && (
@@ -1350,9 +1431,10 @@ function InvestorChartsSection({
 // ─── 1) 주가 + 거래량 + 외국인비율(%) + 목표가/평단가 가로선 ─────
 type ChartMode = "line" | "candle";
 const CHART_MODE_KEY = "price_chart_mode";
+// 기본값은 캔들·이평·공시·대금·수급단가 ON, 볼린저 OFF(사용자 결정 2026-10-23 — 저장된 선택이 있으면 그대로)
 function loadChartMode(): ChartMode {
-  try { return localStorage.getItem(CHART_MODE_KEY) === "candle" ? "candle" : "line"; }
-  catch { return "line"; }
+  try { return localStorage.getItem(CHART_MODE_KEY) === "line" ? "line" : "candle"; }
+  catch { return "candle"; }
 }
 function saveChartMode(m: ChartMode): void {
   try { localStorage.setItem(CHART_MODE_KEY, m); } catch { /* noop */ }
@@ -1360,17 +1442,17 @@ function saveChartMode(m: ChartMode): void {
 
 const DISC_TOGGLE_KEY = "price_chart_disclosures";
 function loadDiscToggle(): boolean {
-  try { return localStorage.getItem(DISC_TOGGLE_KEY) === "on"; }    // 기본 OFF
-  catch { return false; }
+  try { return localStorage.getItem(DISC_TOGGLE_KEY) !== "off"; }    // 기본 ON
+  catch { return true; }
 }
 function saveDiscToggle(on: boolean): void {
   try { localStorage.setItem(DISC_TOGGLE_KEY, on ? "on" : "off"); } catch { /* noop */ }
 }
 
 // 보조지표 토글 — 이평선 / 볼린저밴드(20, 2σ). 둘 다 기본 OFF.
-function loadOnOff(key: string): boolean {
-  try { return localStorage.getItem(key) === "on"; }
-  catch { return false; }
+function loadOnOff(key: string, def = false): boolean {
+  try { const v = localStorage.getItem(key); return v === null ? def : v === "on"; }
+  catch { return def; }
 }
 function saveOnOff(key: string, on: boolean): void {
   try { localStorage.setItem(key, on ? "on" : "off"); } catch { /* noop */ }
@@ -1421,7 +1503,7 @@ function PriceVolumeChart({
   const setModePersist = (m: ChartMode) => { setMode(m); saveChartMode(m); };
   const [showDisc, setShowDisc] = useState<boolean>(loadDiscToggle);
   const toggleDisc = () => { const v = !showDisc; setShowDisc(v); saveDiscToggle(v); };
-  const [showMA, setShowMA] = useState<boolean>(() => loadOnOff(MA_TOGGLE_KEY));
+  const [showMA, setShowMA] = useState<boolean>(() => loadOnOff(MA_TOGGLE_KEY, true));
   const toggleMA = () => { const v = !showMA; setShowMA(v); saveOnOff(MA_TOGGLE_KEY, v); };
   const [showBB, setShowBB] = useState<boolean>(() => loadOnOff(BB_TOGGLE_KEY));
   const toggleBB = () => { const v = !showBB; setShowBB(v); saveOnOff(BB_TOGGLE_KEY, v); };
@@ -1430,7 +1512,7 @@ function PriceVolumeChart({
   const [showTrades, setShowTrades] = useState<boolean>(loadTradesToggle);
   const toggleTrades = () => { const v = !showTrades; setShowTrades(v); saveOnOff(TRADES_TOGGLE_KEY, v); };
   // 거래대금 급증일 강조 — 기준은 가치표 탭과 공유(localStorage). OFF 면 강조 없음.
-  const [showBurst, setShowBurst] = useState<boolean>(() => loadOnOff(BURST_TOGGLE_KEY));
+  const [showBurst, setShowBurst] = useState<boolean>(() => loadOnOff(BURST_TOGGLE_KEY, true));
   const toggleBurst = () => { const v = !showBurst; setShowBurst(v); saveOnOff(BURST_TOGGLE_KEY, v); };
   const [burstLevel, setBurstLevel] = useState<BurstLevel>(loadBurstLevel);
   // 수급별 평균 매수단가 가로선 — 외국인·기관(금투 제외)·연기금. 기본 ON, 끄면 기억.
@@ -1663,7 +1745,7 @@ function PriceVolumeChart({
         </span>
       </div>
       <Suspense fallback={
-        <div className="w-full h-[220px] lg:h-[360px] flex items-center justify-center text-xs text-gray-400">
+        <div className="w-full h-[300px] lg:h-[520px] flex items-center justify-center text-xs text-gray-400">
           차트 로딩 중...
         </div>
       }>

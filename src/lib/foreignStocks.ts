@@ -19,7 +19,7 @@
 //   4. 검색이 빈 응답을 줄 때가 있다(연속 호출 시 스로틀). 그걸 '없음'으로 캐시하면
 //      멀쩡한 종목이 영영 안 나온다 → 후보가 0건이면 캐시하지 않는다.
 
-import { fetchProxied } from "./api";
+import { fetchProxied, fetchNaverWorld } from "./api";
 import type { Price } from "../types";
 
 // ★ 키에 버전을 붙인다. 해석 규칙을 고쳐도 옛 실패가 캐시에 박혀 있으면 영영 안 풀린다
@@ -285,11 +285,28 @@ export async function fetchForeignHoldingPrices(names: string[]): Promise<Foreig
       //   **마지막 거래일**로 주므로(일본 스포츠의 날 10/12 실측: 10/9 09:00~15:30) 장 마감·휴장을 함께 잡는다.
       const reg = res?.meta?.currentTradingPeriod?.regular;
       const nowSec = Date.now() / 1000;
-      const open = reg?.start && reg?.end ? nowSec >= reg.start && nowSec <= reg.end : undefined;
+      const inHours = reg?.start && reg?.end ? nowSec >= reg.start && nowSec <= reg.end : undefined;
+      // 장 시간이어도 **오늘 체결이 아직 없으면** 닫힌 것으로 — 야후 도쿄 시세는 20분 늦어 09:00~09:20 엔 직전 거래일 값이다
+      //   (2026-11-04 09:09 실측: 키옥시아 regularMarketTime 11/02 15:30 — 11/3 휴장 + 지연 → "−15.78%" 가 오늘 값처럼 밝게 떴다)
+      //   날짜는 봉 날짜와 같은 방식(UTC 기준 slice)으로 — 일봉 시각이 현지 개장 시각이라 아시아·유럽 모두 같은 날로 떨어진다
+      const today = reg?.start ? new Date(reg.start * 1000).toISOString().slice(0, 10) : "";
+      const open = inHours === undefined ? undefined : inHours && (!today || last.date === today);
       raw.push({ name, sym, cur: res?.meta?.currency ?? "", px, prev: prevPx, date: last.date, open });
     } catch { /* 한 종목 실패가 나머지를 막지 않는다 */ }
   }));
 
+  // 도쿄 상장 — 현재가·기준가·장 상태·날짜는 네이버(15분 지연, 장 상태 포함)로 덮는다. 차트(3개월 일봉)는 야후 그대로(사용자 2026-11-04)
+  const jp = raw.filter(r => /^[0-9A-Z]{4}\.T$/.test(r.sym));
+  if (jp.length) {
+    const nv = await fetchNaverWorld(jp.map(r => r.sym)).catch(() => new Map());
+    const today = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10);   // 도쿄 = KST 와 같은 시간대
+    for (const r of jp) {
+      const n = nv.get(r.sym);
+      if (!n) continue;
+      r.px = n.price; r.prev = n.prev; r.date = n.date || r.date;
+      r.open = n.open && n.date === today;   // 장이 열렸어도 오늘 체결이 아직 없으면(지연 15분 안) 닫힘 — 흐림·'마감 n/d'
+    }
+  }
   const rates = await fetchKrwRates(raw.map(r => r.cur).filter(Boolean));
   for (const r of raw) {
     const k = rates.get(r.cur) ?? 0;

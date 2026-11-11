@@ -81,7 +81,7 @@ function TrendChart({ rows }: { rows: EarningsRow[] }) {
     r.roe == null ? null : [PAD_L + i * slotW + slotW / 2, ry(r.roe)] as const);
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto" role="img" aria-label="실적·추정 추이">
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto max-w-[620px]" role="img" aria-label="실적·추정 추이">   {/* max-w — 98vw 창에서 글자까지 커지지 않게 */}
       <defs>
         {["2563eb", "f97316"].map(c => (
           <pattern key={c} id={`hatch-${c}`} width="5" height="5" patternTransform="rotate(45)"
@@ -186,7 +186,7 @@ function ValuationChart({ rows }: { rows: EarningsRow[] }) {
 
   const firstEst = rows.findIndex(r => r.estimate);
   return (
-    <svg viewBox={`0 0 ${VW} ${VH}`} className="w-full h-auto" role="img" aria-label="PER·PBR 추이">
+    <svg viewBox={`0 0 ${VW} ${VH}`} className="w-full h-auto max-w-[620px]" role="img" aria-label="PER·PBR 추이">
       {firstEst > 0 && (
         <rect x={V_L + firstEst * slot} y={V_T} width={innerW - firstEst * slot} height={innerH} fill="#f8fafc" />
       )}
@@ -224,7 +224,8 @@ const METRICS: { label: string; get: (r: EarningsRow) => string; cls?: (r: Earni
     cls: r => signCls(r.net_debt_ratio == null ? null : -r.net_debt_ratio) },
 ];
 
-export function EarningsTrend({ rows }: { rows: EarningsRow[] }) {
+// right — 오른쪽 칸을 바꿔 끼운다(기업가치 = 분기 컨센서스 차트, 사용자 요청 2026-10-23: 실적 표 대신). 없으면 실적 표
+export function EarningsTrend({ rows, right }: { rows: EarningsRow[]; right?: React.ReactNode }) {
   if (rows.length === 0) return null;
 
   return (
@@ -237,12 +238,14 @@ export function EarningsTrend({ rows }: { rows: EarningsRow[] }) {
 
       {/* 50/50 — 실적 추이 차트(매출·이익·ROE + PER·PBR) | 실적 표.
           수급·지분율 차트는 위쪽 '가격 축' 줄로 옮겼다(실적 이야기 중간에 수급이 끼지 않게). */}
-      <div className="grid grid-cols-1 gap-3 items-start lg:grid-cols-2">
+      {/* 오른쪽에 컨센서스를 끼우면 왼쪽은 차트 폭(최대 620px)만 — 남는 폭을 오른쪽 세 차트가 한 줄로 쓴다 */}
+      <div className={`grid grid-cols-1 gap-3 items-start ${right ? "lg:grid-cols-[minmax(0,620px)_1fr]" : "lg:grid-cols-2"}`}>
         <div className="min-w-0 space-y-1">
           <TrendChart rows={rows} />
           <ValuationChart rows={rows} />
         </div>
 
+        {right ? <div className="min-w-0">{right}</div> : (
         <div className="min-w-0 overflow-x-auto">
           <table className="w-full border-collapse">
             <thead>
@@ -273,6 +276,7 @@ export function EarningsTrend({ rows }: { rows: EarningsRow[] }) {
             </tbody>
           </table>
         </div>
+        )}
       </div>
 
 

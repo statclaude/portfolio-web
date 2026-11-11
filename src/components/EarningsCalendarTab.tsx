@@ -3,7 +3,10 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { fetchEarningsCalendar, krImpactOf, type EarningsEvent } from "../lib/earnings";
+import { fetchDartDayPreferServer } from "../lib/dartDisclosures";
 import { US_PAIRS } from "../lib/usMarketData";
+import { openExternal } from "../lib/toss";
+import { openGoogleAi, aiNowStamp } from "../lib/googleAi";
 import type { ConsensusItem } from "./ConsensusTab";
 
 const WEEKS = 3;
@@ -47,12 +50,40 @@ export function EarningsCalendarTab({ items, onOpenValuation }: {
     return m;
   }, [items]);
   const mine = useMemo(() => new Set(watch), [watch]);
+  // 지수·업종 카드에 올린 미국 종목도 시총과 상관없이 받는다 — 서버 수집은 시총 400억$ 이상만이라 코어위브(270억$) 같은 종목이 빠졌다
+  //   (사용자 2026-11-10 "코어위브 새벽에 실적 있을 건데"). ★(내 종목) 표시는 관심종목만
+  const scanList = useMemo(() => [...new Set([...watch, ...US_PAIRS.map(p => p.symbol).filter(s => /^[A-Z]{1,5}$/.test(s))])].sort(), [watch]);
 
   const q = useQuery({
-    queryKey: ["earnings-calendar", monday, watch.join(",")],
-    queryFn: () => fetchEarningsCalendar(monday, end, names, watch),
+    queryKey: ["earnings-calendar", monday, scanList.join(",")],
+    queryFn: () => fetchEarningsCalendar(monday, end, names, scanList),
     staleTime: 6 * 3600_000, gcTime: 6 * 3600_000, refetchOnWindowFocus: false, retry: 2,
   });
+
+  // 발표한 것의 공시 링크(사용자 요청 2026-10-29 "발표한건 공시 링크 걸면?").
+  //   한국 = 그 날 DART 공시(서버가 10분마다 받아 둔 날짜별 파일 — 추가 호출 0)에서 그 종목의 실적 공시(영업(잠정)실적 등)
+  //   미국 = SEC EDGAR 그 회사 최근 공시 목록(실적 발표 보도자료 8-K·외국 기업 6-K 가 맨 위) — 주소만, 호출 없음
+  //   한국은 DART 에 실적 공시가 올라왔으면 TradingView 가 '발표함' 으로 바꾸기 전에도 ✓공시(삼성전자 10/29 실측 — 스캐너가 늦다)
+  const krDays = useMemo(() => [...new Set((q.data ?? []).filter(e => e.country === "KR" && e.kstDate <= today).map(e => e.kstDate))].sort(), [q.data, today]);
+  const dartQ = useQuery({
+    queryKey: ["earnings-dart", krDays.join(",")],
+    enabled: krDays.length > 0,
+    staleTime: 10 * 60_000, refetchOnWindowFocus: false,
+    queryFn: async () => {
+      const m = new Map<string, string>();
+      const days = await Promise.all(krDays.map(d => fetchDartDayPreferServer(d).catch(() => null)));
+      for (const day of days) for (const r of day?.rows ?? []) {
+        if (!r.code || !/실적/.test(r.title) || /증권발행실적/.test(r.title)) continue;
+        const k = `${r.date}:${r.code}`;
+        // 같은 날 여러 건이면 '잠정실적' 을 먼저(정정 공시·결산 실적보다 대표)
+        if (!m.has(k) || (/잠정\)?실적/.test(r.title) && !/정정/.test(r.title))) m.set(k, r.url);
+      }
+      return m;
+    },
+  });
+  const discUrl = (e: EarningsEvent): string | undefined => e.country === "KR"
+    ? dartQ.data?.get(`${e.kstDate}:${e.code}`)
+    : e.reported ? `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${encodeURIComponent(e.code)}&owner=include&count=20` : undefined;
 
   const byDay = useMemo(() => {
     const m = new Map<string, EarningsEvent[]>();
@@ -93,7 +124,7 @@ export function EarningsCalendarTab({ items, onOpenValuation }: {
         </button>
         <span className="text-[11px] text-gray-500">
           {q.isLoading ? "불러오는 중…" : q.isError ? "불러오기 실패 — 잠시 뒤 다시" : `${q.data?.length ?? 0}건`}
-          {" · 한국 시간 · 미국 시총 400억달러↑ · 한국 시총 3조↑ · 내 관심종목"}
+          {" · 한국 시간 · 미국 시총 400억달러↑ · 한국 시총 3조↑ · 내 관심종목 · 지수·업종 카드 종목"}
         </span>
       </div>
 
@@ -107,7 +138,7 @@ export function EarningsCalendarTab({ items, onOpenValuation }: {
             <div className="px-2 py-1 bg-amber-50 border-b border-amber-100 text-[12px] font-bold text-amber-900">
               {w === 0 ? (monday > today ? "다음 주" : "이번 주") : w === 1 ? (monday > today ? "다다음 주" : "다음 주") : `${w + (monday > today ? 1 : 0)}주 뒤`} · {start.slice(5).replace("-", "/")} 주
             </div>
-            <div className={`grid grid-cols-1 ${MD_COLS[days.length] ?? "md:grid-cols-5"} divide-y md:divide-y-0 md:divide-x divide-gray-100`}>
+            <div className={`bg-white grid grid-cols-1 ${MD_COLS[days.length] ?? "md:grid-cols-5"} divide-y md:divide-y-0 md:divide-x divide-gray-100`}>   {/* bg-white — 야간 배경에서 칸이 투명해 글자가 묻히지 않게 */}
               {days.map(d => {
                 const list = byDay.get(d) ?? [];
                 const isToday = d === today;
@@ -129,11 +160,31 @@ export function EarningsCalendarTab({ items, onOpenValuation }: {
                                   className={`flex items-baseline gap-1 text-[12px] leading-tight rounded px-0.5 border-l-2 ${impact ? "border-rose-500 font-bold text-gray-900" : "border-transparent text-gray-600"} ${my ? "bg-yellow-100 font-bold" : ""}`}
                                   title={`${e.name} (${e.code}) · ${d} ${t || "시각 미정"} (한국 시간)${impact ? `\n한국 영향: ${impact}` : ""}`}>
                                 <span className="shrink-0 text-[10px]">{e.country === "US" ? "🇺🇸" : "🇰🇷"}</span>
+                                {e.logo && <img src={e.logo} alt="" loading="lazy" className="shrink-0 w-5 h-5 rounded-full self-center bg-white"
+                                                onError={ev => { (ev.currentTarget as HTMLImageElement).style.display = "none"; }} />}
                                 {e.country === "KR" && onOpenValuation
                                   ? <button onClick={() => onOpenValuation(e.code, e.name)} className="truncate text-left hover:text-blue-600">{my && "★"}{e.name}</button>
                                   : <span className="truncate">{my && "★"}{e.name}</span>}
                                 {impact && <span className="shrink-0 px-1 rounded text-[9px] font-bold text-rose-700 bg-rose-50 border border-rose-200 leading-tight">{impact}</span>}
-                                {t && <span className={`ml-auto shrink-0 text-[10px] font-normal ${e.session === "post" ? "text-violet-600" : "text-gray-500"}`}>{t}</span>}
+                                {(() => {
+                                  const url = discUrl(e);
+                                  if (!url && !e.reported) return null;
+                                  // 앱에선 stopPropagation 만 하면 창 전체 링크 가로채기까지 막혀 아무것도 안 열렸다(사용자 2026-11-03 "앱에서 공시 클릭이 안 돼")
+                                  //   → 직접 openExternal(앱 = 앱 안 보기 창, 웹 = 새 탭)
+                                  const aiQ = () => `${aiNowStamp()} 기준. ${e.name}(${e.code}) ${e.kstDate} 실적 발표 — ① 결론 한 줄(어닝 서프라이즈·쇼크·부합) ② 매출·영업이익(미국은 매출·EPS)의 컨센서스 대비 한 줄 ③ 가이던스 한 줄 ④ 발표 뒤 주가 반응 한 줄.${url ? ` 공시: ${url}` : ""}`;
+                                  return url
+                                    ? <span className="ml-auto shrink-0 flex items-center gap-0.5">
+                                        <a href={url} target="_blank" rel="noopener noreferrer"
+                                           onClick={ev => { ev.preventDefault(); ev.stopPropagation(); openExternal(url); }}
+                                           title={e.country === "US" ? "발표함 — SEC 공시 목록(실적 보도자료 8-K/6-K)" : "발표함 — DART 실적 공시 원문"}
+                                           className="text-[10px] font-bold text-emerald-700 hover:underline">✓공시</a>
+                                        <button onClick={ev => { ev.stopPropagation(); openGoogleAi(aiQ()); }}
+                                                title="구글 AI에 이 실적 발표 요약 요청"
+                                                className="px-1 rounded border border-blue-300/70 bg-blue-50 text-blue-700 text-[9.5px] font-bold leading-[14px] hover:bg-blue-100">AI</button>
+                                      </span>
+                                    : <span className="ml-auto shrink-0 text-[10px] font-normal text-emerald-600" title="발표함">✓</span>;
+                                })()}
+                                {t && <span className={`${e.reported || discUrl(e) ? "" : "ml-auto "}shrink-0 text-[10px] font-normal ${e.session === "post" ? "text-violet-600" : "text-gray-500"}`}>{t}</span>}
                               </li>
                             );
                           })}

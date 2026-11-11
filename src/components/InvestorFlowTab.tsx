@@ -11,6 +11,8 @@
 //    실측(2026-09-11 코스피 기관): 전체 −12,184억 vs 상위 100 합 −18,064억.
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
+import { isKisLinkOn } from "../lib/broker";
+import { fetchKisOrgRanking } from "../lib/kisInvestorRank";
 import {
   fetchInvestorRankingsByMarket, FLOW_RANK_MAX, fetchInvestorHistorySafe,
   type InvestorFlowGroup, type InvestorFlowRow, type FlowRankMarket, type FlowRankPeriod,
@@ -175,7 +177,7 @@ function FlowList({ rows, side, selected, onSelect, bothWay, onlyBoth, highlight
       ) : (
         <ul ref={listRef}
             className="space-y-0.5 max-h-[300px] overflow-y-auto pr-1
-                       border border-gray-100 rounded p-1">
+                       border border-gray-100 rounded p-1 pg-card pg-list">
           {items.map(({ r, rank }) => (
             <li key={r.ticker} data-ticker={r.ticker}
                 onClick={() => onSelect(selected === r.ticker ? null : r.ticker)}
@@ -245,6 +247,11 @@ function FlowColumn({ group, investor, selected, onSelect, bothBuy, bothSell, on
         {/* ★ 기준일이 투자자마다 다르다(외국인=당일 장중, 기관=직전 거래일). 각자 밝힌다. */}
         {group.basedAt && (
           <span className="text-[10px] tabular-nums text-gray-400">{ymd(group.basedAt)}</span>
+        )}
+        {group.src === "한투" && (
+          <span className="text-[10px] text-emerald-700" title="네이버 기관 순위는 하루~이틀 늦어, 앱에선 한국투자 오늘 잠정치(증권사 장중 집계)로 바꿔 보여 줍니다. 다음 날 확정치와 조금 다를 수 있고, 시장·방향마다 30종목까지입니다.">
+            한투 잠정
+          </span>
         )}
         {group.buy.some(r => r.estimated) && (
           <span className="text-[10px] text-amber-600"
@@ -327,6 +334,20 @@ export function InvestorFlowTab({ onOpenValuation }: {
     staleTime: 30 * 1000,
     placeholderData: keepPreviousData,   // 기간을 바꿀 때 목록이 사라졌다 나타나지 않게
   });
+  // 앱 + 한국투자 — 하루치·KRX 일 때 기관 칸을 한투 오늘 잠정으로(네이버 기관은 하루~이틀 늦다, 사용자 2026-11-05).
+  //   네이버 목록을 먼저 보여 주고 이건 따로 받아 덮는다(한 쿼리에 묶으니 로딩이 길어졌다)
+  const kisOrgOn = period === "DAY" && trade === "KRX" && isKisLinkOn();
+  const { data: kisOrg } = useQuery({
+    queryKey: ["kis-org-rank"],
+    queryFn: async () => ({ KOSPI: await fetchKisOrgRanking("KOSPI").catch(() => null), KOSDAQ: await fetchKisOrgRanking("KOSDAQ").catch(() => null) }),
+    enabled: kisOrgOn, refetchInterval: 60_000, staleTime: 30_000,
+  });
+  const today8 = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10).replace(/-/g, "");
+  const orgOf = (m: "KOSPI" | "KOSDAQ", g: InvestorFlowGroup): InvestorFlowGroup => {
+    const k = kisOrgOn ? kisOrg?.[m] : null;
+    if (!g || !k || g.basedAt === today8 || !(k.buy.length || k.sell.length)) return g;   // 네이버가 이미 오늘이면 그대로
+    return { ...g, basedAt: today8, src: "한투", buy: k.buy, sell: k.sell };
+  };
 
   // 시장으로 먼저 묶고 그 아래에 외국인·기관을 나란히 둔다.
   //   실제로 보는 순서가 "코스피에서 외국인과 기관이 어떻게 갈렸나" 라서,
@@ -334,11 +355,11 @@ export function InvestorFlowTab({ onOpenValuation }: {
   const sections = res ? [
     { id: "kospi",  label: "코스피", cols: [
       { investor: "외국인", group: res.kospi.groups[0] },
-      { investor: "기관",   group: res.kospi.groups[1] },
+      { investor: "기관",   group: orgOf("KOSPI", res.kospi.groups[1]) },
     ] },
     { id: "kosdaq", label: "코스닥", cols: [
       { investor: "외국인", group: res.kosdaq.groups[0] },
-      { investor: "기관",   group: res.kosdaq.groups[1] },
+      { investor: "기관",   group: orgOf("KOSDAQ", res.kosdaq.groups[1]) },
     ] },
   ].filter(s => s.cols.every(c => !!c.group)) : [];
   const data = sections.flatMap(s => s.cols.map(c => c.group));
@@ -361,8 +382,8 @@ export function InvestorFlowTab({ onOpenValuation }: {
   const range = PERIODS.find(x => x.key === period)?.label ?? "";
 
   return (
-    <div className="space-y-2 pt-2">
-      <div className="bg-blue-50/40 border border-blue-100 rounded p-2.5 text-xs text-gray-700 leading-relaxed">
+    <div className="space-y-2 pt-2 pg-render">
+      <div className="bg-blue-50/40 pg-box border border-blue-100 rounded p-2.5 text-xs text-gray-700 leading-relaxed">
         <div className="font-bold text-gray-900 mb-0.5">👥 외국인 · 기관 매매 동향</div>
         투자자별 순매수·순매도 금액 순위입니다. 종목을 클릭하면 다른 투자자 목록에서도 같이 표시됩니다.
         <br />
@@ -431,7 +452,7 @@ export function InvestorFlowTab({ onOpenValuation }: {
           <button onClick={() => void refetch()}
                   className="ml-2 px-2 py-0.5 rounded bg-gray-800 text-white text-xs">다시 시도</button>
         </div>
-      ) : isLoading && !data ? (
+      ) : isLoading && !res ? (   /* data 는 로딩 중에도 빈 배열이라 '데이터 없음'으로 갈렸다(사용자 2026-11-05 "로딩중 아냐?") */
         <div className="py-10 text-center text-sm text-gray-400">불러오는 중…</div>
       ) : !data || data.length === 0 ? (
         <div className="py-10 text-center text-sm text-gray-400">데이터가 없습니다.</div>

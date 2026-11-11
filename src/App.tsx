@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useChartRange, historyRange } from "./lib/chartRange";
 import { QueryClient, QueryClientProvider, useQueries, useQuery } from "@tanstack/react-query";
 import {
   fetchTossPrices, fetchInvestorHistory, pickTodayInvestor, fetchKrRegularPrices, verifyKrMarkets,
@@ -11,16 +12,25 @@ import { getIndependentGroupsMode } from "./lib/groupMode";
 import { StockCard } from "./components/StockCard";
 import { MemoDialog } from "./components/MemoDialog";
 import { useIncrementalRender } from "./lib/useIncrementalRender";
-import { Tabs, buildTabs, filterByTab, SYSTEM_TAB_KEYS, MY_GROUP_KEYS, MARKET_MONEY_TAB_KEY, US_MARKET_TAB_KEY, INDEX_NIGHT_TAB_KEY, SEMI_CHECK_TAB_KEY, SEMI_DASH_TAB_KEY, SECTOR_RANK_TAB_KEY, MY_STOCKS_TAB_KEY, MY_TRADES_TAB_KEY, CONSENSUS_TAB_KEY, ETF_REVERSE_TAB_KEY, ETF_RANKING_TAB_KEY, ETF_COMPARE_TAB_KEY, HEATMAP_TAB_KEY, SCREENER_TAB_KEY, CLOSE_BET_TAB_KEY, ACCUM_TAB_KEY, VALUATION_TAB_KEY, EARNINGS_TAB_KEY, ASSET_TREND_TAB_KEY } from "./components/Tabs";
+import { Tabs, buildTabs, filterByTab, realHoldingOf, SYSTEM_TAB_KEYS, MY_GROUP_KEYS, MARKET_MONEY_TAB_KEY, US_MARKET_TAB_KEY, INDEX_NIGHT_TAB_KEY, SEMI_CHECK_TAB_KEY, SEMI_DASH_TAB_KEY, SEOHAK_TAB_KEY, HOT_TAB_KEY, SECTOR_RANK_TAB_KEY, MY_STOCKS_TAB_KEY, MY_TRADES_TAB_KEY, MY_TRADES_TOSS_TAB_KEY, CONSENSUS_TAB_KEY, DISCLOSURE_TAB_KEY, ETF_REVERSE_TAB_KEY, ETF_RANKING_TAB_KEY, ETF_COMPARE_TAB_KEY, HEATMAP_TAB_KEY, SCREENER_TAB_KEY, CLOSE_BET_TAB_KEY, VALUEUP_TAB_KEY, ACCUM_TAB_KEY, VALUATION_TAB_KEY, EARNINGS_TAB_KEY, ASSET_TREND_TAB_KEY } from "./components/Tabs";
+import { DisclosureFeed } from "./components/DisclosureFeed";
 import { MyTradesTab } from "./components/MyTradesTab";
 import { EtfReverseTab } from "./components/EtfReverseTab";
 import { EtfRankingTab } from "./components/EtfRankingTab";
 import { ScreenerTab } from "./components/ScreenerTab";
 import { CloseBetTab } from "./components/CloseBetTab";
+import { ValueupTab } from "./components/ValueupTab";
+import { SeohakPage } from "./components/SeohakBox";
+import { HotNowTab } from "./components/HotNowTab";
+import { CompareHost } from "./components/CompareHost";
+import { TilePopupHost } from "./components/TilePopup";
+import { DesktopVersionBadge } from "./components/DesktopVersionBadge";
+import { startBackgroundTicks } from "./lib/tickStore";
 import { AccumTab } from "./components/AccumTab";
 import { defaultDashboardPage, INDEX_GROUP_KEYS, indexPageOf } from "./lib/dashboardGroups";
 import { EtfCompareTab } from "./components/EtfCompareTab";
 import { HeatmapTab } from "./components/HeatmapTab";
+import { FindBar } from "./components/FindBar";
 import { ValuationTableTab } from "./components/ValuationTableTab";
 import { EarningsCalendarTab } from "./components/EarningsCalendarTab";
 import { ConsensusTab, type ConsensusItem } from "./components/ConsensusTab";
@@ -55,10 +65,8 @@ import { UsMarketTab } from "./components/UsMarketTab";
 import { StockMarketTab } from "./components/StockMarketTab";
 import { SemiCheckTab } from "./components/SemiCheckTab";
 import { SemiDashTab } from "./components/SemiDashTab";
-import { MarketTickerBar } from "./components/MarketTickerBar";
-import { TICKER_BAR_H, useTickerBarOpen } from "./lib/tickerBar";
 import { RefreshIndicator } from "./components/RefreshIndicator";
-import { forceUpdate } from "./components/VersionBadge";
+import { forceUpdate, PreviewSwitch } from "./components/VersionBadge";
 import { NewVersionToast } from "./components/NewVersionToast";
 import { ProxyStatusBadge } from "./components/ProxyStatusBadge";
 import { useAdaptiveRefreshMs } from "./lib/proxyStatus";
@@ -70,17 +78,26 @@ import {
 import { SortSelector, makeSortHandlers } from "./components/SortSelector";
 import { reportRefresh, useLastRefresh } from "./lib/lastRefresh";
 import { getEffectivePollMs, getPersonalProxyUrl } from "./lib/proxyConfig";
-import { GOTO_HEATMAP_EVENT } from "./lib/heatmapNav";
 import { isNativeApp } from "./lib/nativeProxy";
 import { TRADES_CHANGED_EVENT } from "./lib/tradeEvents";
+import { HeatmapPopupHost } from "./components/HeatmapPopup";
 import { GOTO_TAB_EVENT } from "./lib/tabNav";
 import { OPEN_VALUATION_EVENT, type ValuationRequest } from "./lib/valuationNav";
 import { startAutoSync, SYNC_PULLED_EVENT } from "./lib/syncManager";
 import { SyncConflictBar } from "./components/SyncConflictBar";
+import { IndexSideDrawer } from "./components/IndexSideDrawer";
 import { ValuationModal } from "./components/ValuationModal";
 import { MobileSimpleView } from "./components/MobileSimpleView";
+import { NightToggle } from "./components/NightToggle";
+import { DimToggle, useDimSleeping } from "./components/DimToggle";
+import { isLinkedGroup, linkedGroupOf, ensureLinkedGroupsInFolder, BROKER_FOLDER } from "./lib/linkedGroups";
+import { TOSS_TRADE_ID_PREFIX } from "./lib/tossTrades";
+import { useTossAutoSync } from "./lib/tossSync";
+import { useKisAutoSync } from "./lib/kisSync";
 import { useExtensionProxyReady } from "./lib/extensionProxy";
-import { HelpDialog, markHelpSeen, shouldShowHelpFirstTime, HELP_STEP_BY_TAB } from "./components/HelpDialog";
+import { markHelpSeen, shouldShowHelpFirstTime } from "./components/HelpDialog";
+import { GuideTour } from "./components/GuideTour";
+import { startGuide } from "./lib/guide";
 import type { Stock, Memo } from "./types";
 
 // viewport 감지 — 폰 (≤ 640px) 자동 모바일 뷰
@@ -116,8 +133,12 @@ function Dashboard() {
   const [tradeCount, setTradeCount] = useState(0);
   const [allTrades, setAllTrades] = useState<Trade[]>([]);   // 오늘 매도(실현) 집계용 — 무영속, 로드시 갱신
   // 기본 페이지 = 지수 — 시간으로 주간/야간(한국 07~18시 = 주간)
-  const [activeTab, setActiveTab] = useState<string>(
-    () => defaultDashboardPage() === "night" ? INDEX_NIGHT_TAB_KEY : US_MARKET_TAB_KEY);
+  // 새로고침해도 보던 탭 그대로(사용자 2026-11-05) — sessionStorage 라 창을 새로 열면 다시 시간 기준 기본값
+  const [activeTab, setActiveTab] = useState<string>(() => {
+    try { const v = sessionStorage.getItem("pc_active_tab"); if (v) return v; } catch { /* 없음 */ }
+    return defaultDashboardPage() === "night" ? INDEX_NIGHT_TAB_KEY : US_MARKET_TAB_KEY;
+  });
+  useEffect(() => { try { sessionStorage.setItem("pc_active_tab", activeTab); } catch { /* noop */ } }, [activeTab]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchInitQuery, setSearchInitQuery] = useState("");
@@ -125,28 +146,27 @@ function Dashboard() {
   const [etfDialog, setEtfDialog] = useState<{ ticker: string; name: string } | null>(null);
   const [etfReverseDialog, setEtfReverseDialog] = useState<{ ticker: string; name: string } | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  useTossAutoSync();
+  useKisAutoSync();   // 토스 연동(데스크톱 앱) — 켤 때·5분마다 보유·예수금 갱신(바뀌면 TRADES_CHANGED 로 다시 읽음)
+  useDimSleeping();   // 흐림 설정이 바뀌면 화면 전체를 다시 그린다(헤더 💤 토글)
   // 데모 모드 — 켜져 있으면 하단에 '데모 데이터' 배너를 띄워 실제 보유와 헷갈리지 않게 한다.
   const [demoOn, setDemoOn] = useState(isDemoActive);
-  const [pendingTab, setPendingTab] = useState<string | null>(null);
+  // 새로고침으로 되살린 탭이 그룹 탭이면 목록이 늦게 와서 첫 탭으로 튕긴다 → 목록에 나타날 때까지 기다린다
+  const [pendingTab, setPendingTab] = useState<string | null>(() => { try { return sessionStorage.getItem("pc_active_tab"); } catch { return null; } });
   const [valuationTicker, setValuationTicker] = useState<string | null>(null);
   const [valuationName, setValuationName] = useState<string | null>(null);   // 비보유 종목(ETF비교 등) 이름 폴백
+  const [valuationSec, setValuationSec] = useState<"live" | "summary" | undefined>();   // 종목정보 처음 자리
   const [editing, setEditing] = useState<Stock | null>(null);
   const [editAllStock, setEditAllStock] = useState<{ ticker: string; name: string } | null>(null);
   const [memoTicker, setMemoTicker] = useState<string | null>(null);
   const [donateOpen, setDonateOpen] = useState(false);
-  const [helpOpen, setHelpOpen] = useState(false);
-  const [helpStep, setHelpStep] = useState(0);   // 사용법 열 때 시작 단계 (현재 탭 기준)
-  // 첫 방문이면 사용법(빠른 시작)을 먼저 보여주고, 닫은 뒤에 프록시 안내를 노출(겹침 방지).
-  const [onboardReady, setOnboardReady] = useState(() => !shouldShowHelpFirstTime());
+  // 첫 방문 순서 — 앱·프록시 안내(OnboardingDialog)가 먼저, 그 창이 끝나면 사용법(겹침 방지, 2026-10-23 바꿈).
+  //   공용 프록시 사용자에게 가장 중요한 건 '앱을 받으면 직접 받는다'는 안내라서.
+  //   사용법 = 실제 화면에서 종목을 검색해 담아 보는 '따라 해 보기'(lib/guide, 사용자 2026-10-30) — 설명 슬라이드 대신
+  const onboardDone = () => { if (shouldShowHelpFirstTime()) { markHelpSeen(); setTimeout(startGuide, 400); } };
   const [simpleOpen, setSimpleOpen] = useState(false);
   const [codesCopied, setCodesCopied] = useState(false);
 
-  // 첫 방문 자동 노출 — 1.5초 지연 (다른 모달과 충돌 회피)
-  useEffect(() => {
-    if (!shouldShowHelpFirstTime()) return;
-    const t = setTimeout(() => setHelpOpen(true), 1500);
-    return () => clearTimeout(t);
-  }, []);
 
   // 로그인 redirect 복귀 — 저장/불러오기 대기 동작이 있으면 설정 자동 오픈 → 자동 재개
   useEffect(() => {
@@ -220,9 +240,8 @@ function Dashboard() {
   const usePersonalProxy = useMemo(() => !!getPersonalProxyUrl(), [reloadKey, extReady]);
   const adaptiveRefreshMs = useAdaptiveRefreshMs(BASE_REFRESH_MS);
   // 하단 지수 티커바 펼침 여부 — 합계 sticky 행을 그 높이만큼 위로 올리는 데 사용
-  const tickerBarOpen = useTickerBarOpen();
   // 하단 합계 바 접기 — 합계·손익 카드·오늘 매도·샀더라면을 **한 번에**. 바가 카드들을 가린다.
-  //   접으면 바가 **왼쪽으로 밀려 들어가고** 가장자리에 '합계 ▶' 손잡이만 남는다.
+  //   접으면 바가 **아래로 내려가 숨고** 화면 아래 가장자리에 '합계 ▲' 책갈피만 남는다.
   //   모바일과 따로 기억한다(기기별로 원하는 게 다르다).
   const [totalsHidden, setTotalsHiddenState] = useState<boolean>(() => {
     try { return localStorage.getItem("pc_totals_hidden") === "1"; } catch { return false; }
@@ -264,22 +283,35 @@ function Dashboard() {
       setMemos(m);
       setTradeCount(t.length);
       setAllTrades(t);
+      // 증권사 연동 그룹이 폴더 밖에 있으면 '증권사연결' 폴더로(바뀌었을 때만 한 번 더 읽는다)
+      if (ensureLinkedGroupsInFolder()) setReloadKey(k => k + 1);
     })();
   }, [reloadKey]);
 
   // reloadKey 의존성 — 설정에서 시스템 탭 visibility 변경 시 즉시 반영
-  const tabs = useMemo(() => buildTabs(holdings, getTabVisibility(), tradeCount), [holdings, reloadKey, tradeCount]);
+  const tossTradeCount = useMemo(() => allTrades.filter(t => t.id.startsWith(TOSS_TRADE_ID_PREFIX)).length, [allTrades]);
+  const tabs = useMemo(() => buildTabs(holdings, getTabVisibility(), tradeCount, { count: tossTradeCount, linked: !!linkedGroupOf("toss") }),
+    [holdings, reloadKey, tradeCount, tossTradeCount]);
   // PC 좌우 화살표로 넘기는 순서 — 탭 줄에 **보이는 순서 그대로**(모바일 스와이프와 같은 역할).
   //   투자도구 묶음 → 내자산 묶음 → 증시 → 지수 묶음 → 사용자 그룹. 폴더 '전체' 가상 탭은 뺀다.
   const navKeys = useMemo(() => {
-    const sys = tabs.filter(t => SYSTEM_TAB_KEYS.has(t.key) && t.key !== US_MARKET_TAB_KEY && t.key !== MARKET_MONEY_TAB_KEY && t.key !== SEMI_DASH_TAB_KEY);
+    const sys = tabs.filter(t => SYSTEM_TAB_KEYS.has(t.key) && t.key !== US_MARKET_TAB_KEY && t.key !== MARKET_MONEY_TAB_KEY && t.key !== SEMI_DASH_TAB_KEY && t.key !== SEOHAK_TAB_KEY && t.key !== HOT_TAB_KEY);
     const my = tabs.filter(t => MY_GROUP_KEYS.has(t.key));
     const money = tabs.filter(t => t.key === MARKET_MONEY_TAB_KEY);
-    const idx = tabs.filter(t => INDEX_GROUP_KEYS.has(t.key) || t.key === SEMI_DASH_TAB_KEY);
+    const idx = tabs.filter(t => INDEX_GROUP_KEYS.has(t.key) || t.key === SEMI_DASH_TAB_KEY || t.key === SEOHAK_TAB_KEY || t.key === HOT_TAB_KEY);
     const rest = tabs.filter(t => !SYSTEM_TAB_KEYS.has(t.key) && !MY_GROUP_KEYS.has(t.key)
       && !INDEX_GROUP_KEYS.has(t.key) && !isFolderAllKey(t.key));
-    return [...sys, ...my, ...money, ...idx, ...rest];
-  }, [tabs]);
+    // 탭 줄과 같은 자리 — 증권사연결 폴더는 지수 바로 오른쪽, 폴더 밖 그룹, 그다음 나머지 폴더(폴더 안은 가나다).
+    //   예전엔 폴더를 무시하고 그룹 이름순으로 섞어 넘겨 증권사연결이 엉뚱한 자리에서 나왔다(사용자 2026-10-27, 모바일과 같은 문제)
+    const folders = getGroupFolders();
+    const inFolder = new Set(folders.flatMap(f => f.groups));
+    const byKey = new Map(rest.map(t => [t.key, t]));
+    const ofFolder = (f: { groups: string[] }) => [...f.groups].sort((x, y) => x.localeCompare(y, "ko")).flatMap(g => byKey.get(g) ?? []);
+    const broker = folders.filter(f => f.name === BROKER_FOLDER).flatMap(ofFolder);
+    const loose = rest.filter(t => !inFolder.has(t.key));
+    const others = folders.filter(f => f.name !== BROKER_FOLDER).flatMap(ofFolder);
+    return [...sys, ...my, ...money, ...idx, ...broker, ...loose, ...others];
+  }, [tabs, reloadKey]);
   const groupFolders = useMemo(() => getGroupFolders(), [reloadKey]);
   // 사용자 그룹 이름들 (폴더 관리용) — 빈 계좌·관심ETF 제외
   const userGroups = useMemo(() => {
@@ -301,6 +333,8 @@ function Dashboard() {
   //   pendingTab 은 '아직 없는 탭으로 가고 싶다'는 예약 — 데모 시작처럼 그룹을 만들고
   //   그리로 가는 경우, 아래 가드가 없는 탭을 첫 탭으로 되돌려 버리므로
   //   탭 목록에 실제로 나타난 뒤에 선택해야 한다. (가드보다 먼저 검사)
+  // 기다리던 탭이 끝내 안 나타나면(지운 그룹 등) 5초 뒤 포기 — 아래 가드가 첫 탭으로 돌린다
+  useEffect(() => { if (!pendingTab) return; const id = setTimeout(() => setPendingTab(p => (p === pendingTab ? null : p)), 5000); return () => clearTimeout(id); }, [pendingTab]);
   useEffect(() => {
     if (pendingTab) {
       if (tabs.find(t => t.key === pendingTab)) {
@@ -314,12 +348,7 @@ function Dashboard() {
     }
   }, [tabs, activeTab, pendingTab]);
 
-  // 밸류업 카드 등에서 히트맵 딥링크 요청 → 히트맵 탭으로 전환(소스는 HeatmapTab 이 소비).
-  useEffect(() => {
-    const h = () => setActiveTab(HEATMAP_TAB_KEY);
-    window.addEventListener(GOTO_HEATMAP_EVENT, h);
-    return () => window.removeEventListener(GOTO_HEATMAP_EVENT, h);
-  }, []);
+  // 카드의 히트맵 딥링크 → 탭 이동 대신 팝업(HeatmapPopupHost, 사용자 요청 2026-10-23 — 보던 화면으로 돌아가기 쉽게)
 
   // 거래 기록이 바뀌면 오늘 손익을 다시 계산한다 — 거래 로그가 그 계산의 뿌리다.
   useEffect(() => {
@@ -343,11 +372,15 @@ function Dashboard() {
       const d = (e as CustomEvent<ValuationRequest>).detail;
       if (!d?.ticker) return;
       setValuationName(d.name);
+      setValuationSec(d.section);
       setValuationTicker(d.ticker);
     };
     window.addEventListener(OPEN_VALUATION_EVENT, h);
     return () => window.removeEventListener(OPEN_VALUATION_EVENT, h);
   }, []);
+
+  // 앱(한국투자 연동)이면 창을 안 열어도 삼성전자·SK하이닉스 체결을 계속 받아 둔다(사용자 2026-11-10)
+  useEffect(() => { startBackgroundTicks(); }, []);
 
   // 카드 → 임의 탭 딥링크 (예: 지수 탭의 ETF 등락 제목 → ETF랭킹 탭).
   useEffect(() => {
@@ -536,10 +569,11 @@ function Dashboard() {
 
   // 일봉 차트 (3개월) 항상 fetch — 1시간 캐시, 카드 가격 박스 배경 sparkline
   // 장 중엔 옅게, 비거래일엔 진하게 (CSS opacity)
+  const chartRange = useChartRange();   // 카드 배경 3개월 | 1년 | 24시간(앱 설정) — 일봉 기간은 historyRange
   const chartQs = useQueries({
     queries: krxTickers.map(t => ({
-      queryKey: ["kr-price-history", t, "3mo"],
-      queryFn: () => fetchKrPriceHistory(t, "3mo"),
+      queryKey: ["kr-price-history", t, historyRange(chartRange)],   // 카드 배경 3개월 | 1년(앱 설정)
+      queryFn: () => fetchKrPriceHistory(t, historyRange(chartRange)),
       enabled: activeTickers.has(t),
       staleTime: 60 * 60 * 1000,
       refetchOnWindowFocus: false,
@@ -548,8 +582,8 @@ function Dashboard() {
   // 미국 종목 일봉(3개월) — 배경 sparkline + AuxIndicators 기간수익률용. 야후, 1시간 캐시.
   const usChartQs = useQueries({
     queries: usTickers.map(t => ({
-      queryKey: ["us-price-history", t, "3mo"],
-      queryFn: () => fetchYahooPriceHistory(t, "3mo"),
+      queryKey: ["us-price-history", t, historyRange(chartRange)],
+      queryFn: () => fetchYahooPriceHistory(t, historyRange(chartRange)),
       enabled: activeTickers.has(t),
       staleTime: 60 * 60 * 1000,
       refetchOnWindowFocus: false,
@@ -687,6 +721,9 @@ function Dashboard() {
   // "내꺼먼저" — 켜면 보유(shares>0) 종목을 위로
   const [heldFirst, setHeldFirstState] = useState(getHeldFirst);
   const toggleHeldFirst = () => setHeldFirstState(v => { setHeldFirst(!v); return !v; });
+  // 오늘/전체 이익·손해 표(TodayPnLTable) 접기 — 합계 카드 오른쪽 책갈피(사용자 요청 2026-10-23). 합계는 그대로
+  const [pnlOpen, setPnlOpen] = useState<boolean>(() => { try { return localStorage.getItem("pnl_tables_open") !== "0"; } catch { return true; } });
+  const togglePnl = () => setPnlOpen(v => { try { localStorage.setItem("pnl_tables_open", v ? "0" : "1"); } catch { /* 이번 화면만 */ } return !v; });
 
   // 정렬 적용 — sleeping 은 항상 맨 아래, 그 외엔 sortKey + sortDir 따라.
   //  내꺼먼저 ON 이면 보유(shares>0) 를 맨 위로(그 안에서는 기존 정렬 유지).
@@ -824,7 +861,7 @@ function Dashboard() {
   }, [tabs.length]);
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-gray-50 pg-bg">
       <NewVersionToast />
       {exitArmed && (
         <div className="fixed bottom-6 inset-x-0 mx-auto w-fit max-w-[calc(100vw-2rem)] z-[70]
@@ -850,7 +887,7 @@ function Dashboard() {
         </div>
       )}
       {!headerCollapsed && (
-      <header ref={headerRef} className="bg-white border-b border-gray-200 sticky top-0 z-30">
+      <header ref={headerRef} className="pg-menu bg-white border-b border-gray-200 sticky top-0 z-50">   {/* 카드 책갈피(z-30)보다 위 */}
         <div className="max-w-[1600px] mx-auto flex items-center gap-3 px-6 py-3">
           <button onClick={toggleHeader} title="헤더 접기 (포트폴리오~설정 숨김)"
                   className="shrink-0 p-1 rounded text-gray-500
@@ -864,6 +901,8 @@ function Dashboard() {
           <ProxyStatusBadge baseRefreshMs={BASE_REFRESH_MS}
                             usePersonalProxy={usePersonalProxy}
                             onOpenSettings={() => setSettingsOpen(true)} />
+          <DesktopVersionBadge />
+          <PreviewSwitch />   {/* 🧪 미리보기 — 배포 전 수정이 올라가 있을 때만(사용자 2026-11-04) */}
           <div className="flex items-center gap-3 ml-auto">
             <button
               onClick={() => void forceUpdate()}
@@ -875,6 +914,7 @@ function Dashboard() {
             </button>
             {/* 모바일 헤더와 통일 — 아이콘 제거, 짧은 한글 라벨 */}
             <button
+              data-guide="search-btn"
               onClick={() => setSearchOpen(true)}
               title="종목 검색 / 추가 — 검색 결과에서 수량·평단 입력 시 보유로 등록"
               className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700
@@ -882,8 +922,8 @@ function Dashboard() {
               검색
             </button>
             <button
-              onClick={() => { setHelpStep(HELP_STEP_BY_TAB[activeTab] ?? 0); setHelpOpen(true); }}
-              title="사용법 빠른 시작 — 현재 탭 설명으로 바로 이동"
+              onClick={() => startGuide()}
+              title="사용법 — 화면에서 직접 종목을 검색해 담아 보기"
               className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200
                          text-gray-700 rounded text-sm">
               사용법
@@ -895,6 +935,8 @@ function Dashboard() {
                          text-gray-700 rounded text-sm">
               설정
             </button>
+            <NightToggle className="px-2 py-1.5 text-sm" />
+            <DimToggle className="px-2 py-1.5 text-sm" />
           </div>
         </div>
       </header>
@@ -938,14 +980,15 @@ function Dashboard() {
       <main className="max-w-[1600px] mx-auto p-3">
         <div ref={tabsStickyRef}
              style={{ top: headerCollapsed ? 0 : headerH }}
-             className="sticky z-40 bg-white/95 backdrop-blur -mx-3 px-3 pt-1 mb-3 [&>nav]:!mb-0">
+             className="pg-menu sticky z-40 bg-white/95 backdrop-blur -mx-3 px-3 pt-1 mb-3 [&>nav]:!mb-0">
           <Tabs tabs={tabs} activeKey={activeTab} onChange={setActiveTab}
                  onRename={async (oldName, newName) => {
-                   await renameGroup(oldName, newName);
+                   await renameGroup(oldName, newName);   // 연동 그룹도 가능 — 연동 메타 키까지 같이 옮긴다
                    if (activeTab === oldName) setActiveTab(newName);
                    setReloadKey(k => k + 1);
                  }}
                  onDelete={async name => {
+                   if (isLinkedGroup(name)) { window.alert("토스 연동 그룹은 삭제할 수 없습니다 — 설정 → 증권사 연결에서 연동을 해제한 뒤 지우세요"); return; }
                    await deleteGroup(name);
                    if (activeTab === name) setActiveTab("");
                    setReloadKey(k => k + 1);
@@ -977,10 +1020,17 @@ function Dashboard() {
           }} />
         ) : activeTab === SEMI_DASH_TAB_KEY ? (
           <SemiDashTab />
+        ) : activeTab === HOT_TAB_KEY ? (
+          <HotNowTab />
+        ) : activeTab === SEOHAK_TAB_KEY ? (
+          <SeohakPage />
         ) : activeTab === SEMI_CHECK_TAB_KEY ? (
           <SemiCheckTab />
         ) : activeTab === MY_TRADES_TAB_KEY ? (
           <MyTradesTab holdings={holdings} pc prices={priceMap} onOpenValuation={setValuationTicker} />
+        ) : activeTab === MY_TRADES_TOSS_TAB_KEY ? (
+          <MyTradesTab holdings={holdings} pc prices={priceMap} onOpenValuation={setValuationTicker}
+                       onlyAccount={linkedGroupOf("toss")?.group ?? "토스(연동)"} defaultPeriod="all" />
         ) : activeTab === CONSENSUS_TAB_KEY ? (
           <ConsensusTab items={consensusItems} onOpenValuation={setValuationTicker}
                         onSelectGroup={setActiveTab}
@@ -988,6 +1038,8 @@ function Dashboard() {
                           const s = holdings.find(h => h.ticker === ticker);
                           if (s) setEditing(s);
                         }} />
+        ) : activeTab === DISCLOSURE_TAB_KEY ? (
+          <DisclosureFeed items={consensusItems} onSelectGroup={setActiveTab} />
         ) : activeTab === ETF_REVERSE_TAB_KEY ? (
           <EtfReverseTab holdings={holdings}
                          onOpenEtfComposition={(code, n) => setEtfDialog({ ticker: code, name: n })}
@@ -998,6 +1050,8 @@ function Dashboard() {
           <EtfCompareTab onOpenValuation={(code, n) => { setValuationName(n); setValuationTicker(code); }} />
         ) : activeTab === SCREENER_TAB_KEY ? (
           <ScreenerTab onOpenValuation={setValuationTicker} />
+        ) : activeTab === VALUEUP_TAB_KEY ? (
+          <ValueupTab />
         ) : activeTab === CLOSE_BET_TAB_KEY ? (
           <CloseBetTab onOpenValuation={(code, n) => { setValuationName(n ?? null); setValuationTicker(code); }} />
         ) : activeTab === ACCUM_TAB_KEY ? (
@@ -1067,7 +1121,7 @@ function Dashboard() {
             {/* 정렬 옵션 + 히트맵(옛 심플 보기) + 추가지표 일괄 토글 — sticky. 탭 바 바로 아래에 고정
                 (탭이 여러 줄로 wrap 되므로 top 을 헤더+탭 높이로 동적 계산) */}
             <div style={{ top: (headerCollapsed ? 0 : headerH) + tabsH }}
-                 className="sticky z-30 bg-white/95 backdrop-blur
+                 className="pg-menu sticky z-30 bg-white/95 backdrop-blur
                             flex items-center justify-end gap-2 mb-2 py-1.5
                             -mx-3 px-3 border-b border-gray-200">
               {/* 시장분리 점프바 (좌측) — 코스피/코스닥/ETF/기타 섹션으로 스크롤. 분리 OFF 면 스페이서만 */}
@@ -1138,7 +1192,7 @@ function Dashboard() {
                         .filter(g => g !== (stock.account || ""))}
                   heldGroups={tickerHeldGroupsMap.get(stock.ticker)}
                   onOpenValuation={setValuationTicker}
-                  onEdit={isAggregated ? (s => setEditAllStock({ ticker: s.ticker, name: s.name })) : (s => setEditing(s))}
+                  onEdit={isAggregated ? (s => setEditAllStock({ ticker: s.ticker, name: s.name })) : (s => setEditing(realHoldingOf(holdings, s)))}
                   onDelete={isAggregated ? undefined : (async s => {
                     await removeHolding(s.ticker, s.account || "");
                     setReloadKey(k => k + 1);
@@ -1260,43 +1314,29 @@ function Dashboard() {
             {/* 점진 렌더 sentinel — 여기가 보이면 다음 20개를 그린다 */}
             {incHasMore && <div ref={incSentinelRef} className="h-1" />}
             {/* 하단 티커바 위에 붙도록 bottom 오프셋 — 티커바 접으면 0 */}
-            {/* 합계 바 — 접으면 **왼쪽으로 밀려 들어간다**(슬라이드). 바 오른쪽 끝에 붙은
-                '합계 ▶' 손잡이가 같이 딸려 와 화면 왼쪽 가장자리에 걸린다.
-                overflow-x-clip — 펼친 상태에선 손잡이가 화면 오른쪽 밖에 있다. hidden 을 쓰면
-                세로도 잘려 위로 삐져나온 ✕·'내꺼먼저' 배지가 사라진다. clip 은 가로만 자른다. */}
-            <div style={{ bottom: tickerBarOpen ? TICKER_BAR_H : 0 }}
-                 className="sticky z-40 mt-3 w-full overflow-x-clip pointer-events-none">
-              <div className={`relative w-full flex flex-wrap items-start gap-2
+            {/* 합계 바 — 접으면 **아래로 내려가 숨는다**(서랍). 바 위쪽 왼쪽에 붙은 '합계' 책갈피가 같이 내려와
+                화면 아래 가장자리에 걸린다 — 책갈피 하나로 접고 편다(사용자 요청 2026-10-23, 옛 ◀ / 합계 ▶).
+                clip-path — 내려간 바는 잘라 숨기되 위로 삐져나온 책갈피·'내꺼먼저' 배지는 보이게 위로 40px 여유. */}
+            <div style={{ bottom: 0 }}
+                 className="sticky z-40 mt-3 w-full [clip-path:inset(-40px_0_0_0)] pointer-events-none">
+              <div className={`relative w-full flex flex-wrap items-start gap-2 pointer-events-auto
                                transition-transform duration-300 ease-out
-                               ${totalsHidden ? "-translate-x-full" : "translate-x-0 pointer-events-auto"}`}>
-                {/* 한 번에 다 접기 — 왼쪽 위(오른쪽 위엔 '내꺼먼저' 배지와 샀더라면이 있다).
-                    ◀ — 바가 왼쪽으로 밀려 들어가는 방향 그대로. 펼치는 손잡이 '합계 ▶' 와 짝이다. */}
-                <button type="button" onClick={() => setTotalsHidden(true)}
-                        title="합계 바 왼쪽으로 접기"
-                        tabIndex={totalsHidden ? -1 : 0}
-                        // left-0 — 바깥 컨테이너가 overflow-x-clip 이라 -left-2 로 빼면 반쯤 잘린다.
-                        className="absolute -top-2 left-0 z-10 w-5 h-5 rounded-full bg-white
-                                   border border-gray-300 shadow text-[10px] leading-none text-gray-500
-                                   hover:text-gray-800">
-                  ◀
-                </button>
-                {/* 손잡이 — 바의 오른쪽 끝 바로 바깥. 접히면 바와 함께 왼쪽으로 와서 가장자리에 걸린다. */}
-                <button type="button" onClick={() => setTotalsHidden(false)}
-                        title="합계 다시 보기"
-                        tabIndex={totalsHidden ? 0 : -1}
-                        className={`absolute left-full bottom-1 ml-1 px-2.5 py-1 rounded-r-full
-                                    bg-white/95 border border-l-0 border-gray-300 shadow
-                                    text-xs font-bold text-gray-700 whitespace-nowrap hover:bg-gray-50
-                                    ${totalsHidden ? "pointer-events-auto" : "pointer-events-none"}`}>
-                  합계 ▶
+                               ${totalsHidden ? "translate-y-full" : "translate-y-0"}`}>
+                <button type="button" onClick={() => setTotalsHidden(!totalsHidden)}
+                        title={totalsHidden ? "합계 다시 보기" : "합계 바 아래로 접기"}
+                        className={`absolute bottom-full left-3 px-2.5 py-0.5 rounded-t-md text-[11px] font-bold
+                                    border border-b-0 shadow-sm whitespace-nowrap
+                                    ${totalsHidden ? "bg-indigo-50 text-indigo-700 border-indigo-300" : "bg-gray-100 text-gray-500 border-gray-300 hover:bg-gray-200"}`}>
+                  합계 {totalsHidden ? "▲" : "▼"}
                 </button>
                 <TotalRow holdings={visible} prices={priceMap}
                           account={activeTab}
                           aggregated={activeTab === MY_STOCKS_TAB_KEY}
                           scopeAccounts={folderScope}
                           heldFirst={heldFirst} onToggleHeldFirst={toggleHeldFirst}
+                          pnlOpen={pnlOpen} onTogglePnl={togglePnl}
                           onDepositChange={() => setReloadKey(k => k + 1)} />
-                <TodayPnLTable holdings={visible} prices={priceMap} />
+                {pnlOpen && <TodayPnLTable holdings={visible} prices={priceMap} />}
                 <TodayRealizedCard trades={allTrades} account={activeTab}
                                    aggregated={activeTab === MY_STOCKS_TAB_KEY}
                                    scopeAccounts={folderScope}
@@ -1308,20 +1348,15 @@ function Dashboard() {
       </main>
 
       {/* 하단 고정 지수 티커바 (S&P500·선물·러셀·다우·필반·VIX) — 폴링 주기마다 자동 갱신 */}
-      <MarketTickerBar refreshMs={REFRESH_MS} />
 
       {/* 자동 동기화 충돌 — 양쪽 다 바뀌었을 때만 뜬다 */}
       <SyncConflictBar onChanged={() => setReloadKey(k => k + 1)} />
+      {/* 지수 서랍 — 어느 탭에서든 지금 탭을 둔 채 오른쪽에서 꺼내 본다(사용자 2026-11-09) */}
+      <IndexSideDrawer />
 
-      {onboardReady && (
-        <OnboardingDialog onOpenSettings={() => setSettingsOpen(true)} />
-      )}
+      <OnboardingDialog onOpenSettings={() => setSettingsOpen(true)} onDone={onboardDone} />
 
-      <HelpDialog
-        isOpen={helpOpen}
-        initialStep={helpStep}
-        onClose={() => { markHelpSeen(); setHelpOpen(false); setOnboardReady(true); }}
-      />
+      <GuideTour />
 
       <SettingsDialog
         isOpen={settingsOpen}
@@ -1407,6 +1442,8 @@ function Dashboard() {
                               }} />
       )}
 
+      <CompareHost />
+      <TilePopupHost />
       {valuationTicker && (() => {
         // 보유종목이면 평단/이름 사용, 비보유(예: ETF비교에서 연 ETF)면 전달받은 이름 폴백.
         const s = holdings.find(h => h.ticker === valuationTicker);
@@ -1414,7 +1451,7 @@ function Dashboard() {
         return (
           <ValuationModal
             isOpen={true}
-            onClose={() => { setValuationTicker(null); setValuationName(null); }}
+            onClose={() => { setValuationTicker(null); setValuationName(null); setValuationSec(undefined); }}
             ticker={valuationTicker}
             name={nm}
             curPrice={priceMap.get(valuationTicker)?.price}
@@ -1422,6 +1459,7 @@ function Dashboard() {
             myAvgPrice={s && s.shares > 0 ? s.avg_price : undefined}
             entryPrice={memos.get(valuationTicker)?.entryPrice}
             onRequestSearch={(q) => { setSearchInitQuery(q); setSearchOpen(true); }}
+            initialSection={valuationSec ?? "live"}   // 첫 화면 = 실시간(사용자 요청 2026-10-23)
           />
         );
       })()}
@@ -1469,7 +1507,7 @@ function AppRoot() {
   }, []);
 
   if (!ready) return null;
-  return isMobile ? <MobileSimpleView /> : <Dashboard />;
+  return <>{isMobile ? <MobileSimpleView /> : <Dashboard />}<HeatmapPopupHost /><FindBar /></>;   // FindBar = 데스크톱 앱 Ctrl+F·⌘F 찾기   // 🗺️ 히트맵 팝업(카드 딥링크)
 }
 
 function App() {

@@ -1,12 +1,12 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { buildDashboardPage, defaultDashboardPage, sortedRows, PAGE_IDS, DASHBOARD_PAGES, INDEX_GROUP_KEYS, indexPageOf, type DashboardPage } from "../dashboardGroups";
-import { US_MARKET_TAB_KEY, INDEX_NIGHT_TAB_KEY, INDEX_ROT_TAB_KEY, INDEX_US_TAB_KEY, INDEX_SEMI_TAB_KEY, INDEX_LEADERS_TAB_KEY } from "../../components/Tabs";
+import { US_MARKET_TAB_KEY, INDEX_NIGHT_TAB_KEY, INDEX_ROT_TAB_KEY, INDEX_SOBU_TAB_KEY, INDEX_US_TAB_KEY, INDEX_SEMI_TAB_KEY, INDEX_LEADERS_TAB_KEY } from "../../components/Tabs";
 import { US_PAIRS } from "../usMarketData";
 import { STAGES } from "../rotation";
 
 // 지수 탭 — 나라가 아니라 **지금 움직이는 시장** 으로 나눈 세 페이지.
 //   ⚠️ 기대값을 코드에 맞춰 베끼지 말 것. 각 테스트 이름의 **의도**가 먼저다.
-const PAGES: DashboardPage[] = ["day", "night", "rot"];
+const PAGES: DashboardPage[] = ["day", "night", "sobu"];
 const ids = (p: DashboardPage) => buildDashboardPage(p).map(s => s.id);
 
 describe("지수 탭 페이지 구성", () => {
@@ -23,7 +23,7 @@ describe("지수 탭 페이지 구성", () => {
     expect(d[0]).toBe("kr");
     // 미국 지수 선물 4종은 환율 바로 아래 '선물' 그룹 (야간 페이지와 같은 모양)
     expect(d.indexOf("dayfut")).toBe(d.indexOf("krfx") + 1);   // 환율 바로 아래
-    expect(buildDashboardPage("day", false).find(s => s.id === "dayfut")!.rows[0].slice(0, 3)).toEqual(["NQ=F", "ES=F", "SOX=F"]);
+    expect(buildDashboardPage("day", false).find(s => s.id === "dayfut")!.rows[0].slice(0, 3)).toEqual(["NQ=F", "ES=F", "SKHY-PERP"]);
     expect(d).not.toContain("krnight");
   });
 
@@ -34,7 +34,7 @@ describe("지수 탭 페이지 구성", () => {
     expect(row(true)).not.toContain("^KS200N");
     expect(row(true)).not.toContain("^KQ150N");
     // 주간 시장은 한 줄(6칸) — 지수·KODEX·밸류업·V-KOSPI
-    expect(buildDashboardPage("day", false).find(s => s.id === "kr")!.rows).toEqual([["^KS11", "^KQ11", "069500.KS", "229200.KS", "VKOSPI", "^N225", "^HSI", "000001.SS"]]);
+    expect(buildDashboardPage("day", false).find(s => s.id === "kr")!.rows).toEqual([["^KS11", "^KQ11", "069500.KS", "252650.KS", "229200.KS", "VKOSPI", "^N225", "000001.SS"]]);
     // 야간 페이지 '밤의 한국' 은 반대 — 밤엔 야간선물이 있고, 낮(주간선물 시간)엔 안 보인다
     const nightRow = (krNight: boolean) => buildDashboardPage("night", krNight).find(s => s.id === "krnight")!.rows.flat();
     expect(nightRow(true)).toContain("^KS200N");
@@ -49,7 +49,7 @@ describe("지수 탭 페이지 구성", () => {
     // 미국 지수 선물(거의 24h)은 야간에도 — 환율 바로 아래 '선물' 그룹 첫 줄
     expect(n.indexOf("krnight")).toBe(n.indexOf("krfx") + 1);   // 환율 바로 아래
     const fut = buildDashboardPage("night").find(s => s.id === "krnight")!.rows[0];
-    expect(fut.slice(0, 3)).toEqual(["NQ=F", "ES=F", "SOX=F"]);
+    expect(fut.slice(0, 3)).toEqual(["NQ=F", "ES=F", "SKHY-PERP"]);
     expect(n).not.toContain("etftop");   // 한국 ETF 랭킹은 밤엔 멈춰 있다
   });
 
@@ -61,16 +61,16 @@ describe("지수 탭 페이지 구성", () => {
   });
 
   it("주간·야간 모두 지수 바로 아래는 같은 한 세트(환율·금리·투심 → 선물 → 현물) — 어느 페이지든 같은 자리에서 찾는다 (사용자 결정 2026-10-08)", () => {
-    expect(ids("day").slice(0, 5)).toEqual(["kr", "krfx", "dayfut", "spot", "mem"]);        // 메모리 현물가 = 현물 바로 아래(2026-10-20)
+    expect(ids("day").slice(0, 4)).toEqual(["kr", "krfx", "dayfut", "spot"]);        // 메모리 현물가 줄은 뺐다(2026-11-02)
     expect(ids("night").slice(0, 4)).toEqual(["macro", "krfx", "krnight", "spot"]);   // 메모리 현물가는 주간에만
   });
 
   it("순환매 = 반도체 지수 → 일본 반도체 → AI 순환매 → ETF TOP → 한·미 섹터 — 환율·선물은 한국·미국 탭에 (2026-10-12)", () => {
-    expect(ids("rot")).toEqual(["semi", "jpsemi", "rotflow", "etftop", "sector"]);
+    expect(ids("sobu").slice(0, 5)).toEqual(["semi", "jpsemi", "rotflow", "etftop", "sector"]);   // 옛 순환매 = 업종의 한눈에
   });
 
   it("순환매 = 큰 블록 하나에 단계별 줄 11개(AI 8 + 2차전지 + 방산 + 로봇) — 줄마다 책갈피 이름, 앞 2~3칸 미국 대장주, 나머지 한국 쪽", () => {
-    const g = buildDashboardPage("rot").find(s => s.id === "rotflow")!;
+    const g = buildDashboardPage("sobu").find(s => s.id === "rotflow")!;
     expect(g.note).toBeTruthy();                                  // 미국→한국 영향이라는 설명 한 줄
     expect(g.rows).toHaveLength(11);
     expect(g.rowLabels).toEqual(["반도체", "전공정", "후공정", "CPU·기판", "광통신", "전력기기", "원자력", "친환경", "2차전지", "방산", "로봇"]);
@@ -87,7 +87,7 @@ describe("지수 탭 페이지 구성", () => {
   });
 
   it("순환매 카드 줄과 순환매 통계(lib/rotation STAGES)가 같은 단계·같은 대장주·같은 종목이다 (어긋나면 카드와 통계가 딴소리)", () => {
-    const g = buildDashboardPage("rot").find(s => s.id === "rotflow")!;
+    const g = buildDashboardPage("sobu").find(s => s.id === "rotflow")!;
     expect(g.rowLabels).toEqual(STAGES.map(st => st.label));
     g.rows.forEach((row, i) => {
       const n = g.leadByRow?.[i] ?? g.lead!;
@@ -103,13 +103,13 @@ describe("지수 탭 페이지 구성", () => {
   });
 
   it("반도체 그룹엔 순환매 블록에 있는 종목이 없다 (같은 카드가 한 화면에 두 번 나오지 않게)", () => {
-    const page = buildDashboardPage("rot");
+    const page = buildDashboardPage("sobu");
     const rot = new Set(page.find(s => s.id === "rotflow")!.rows.flat());
     for (const id of ["semi", "jpsemi"]) expect(page.find(s => s.id === id)!.rows.flat().filter(x => rot.has(x))).toEqual([]);
   });
 
   it("주간 = 옛 대장주 페이지를 합쳤다 — 공통 세트 아래에 섹터 대장주 6묶음, 그다음 ETF TOP (사용자 결정 2026-10-08)", () => {
-    expect(ids("day").slice(5)).toEqual(["ldtech", "ldpower", "ldind", "ldfin", "ldlife", "ldcont"]);   // 4번째 = 메모리 현물가(현물 아래)   // ETF TOP·한·미 섹터는 순환매 탭으로
+    expect(ids("day").slice(4)).toEqual(["ldtech", "ldpower", "ldind", "ldfin", "ldlife", "ldcont"]);   // ETF TOP·한·미 섹터는 순환매 탭으로
   });
 
   it("섹터 대장주 = 섹터 줄마다 [섹터 ETF] ➜ [대장주](한 줄 8칸 이내, 반도체·2차전지 등 모든 섹터 — 야간의 반도체 묶음과 겹쳐도 된다)", () => {
@@ -161,13 +161,13 @@ describe("대장주 줄 정렬", () => {
 
 describe("지수 탭 키 ↔ 페이지", () => {
   it("lib 의 키 문자열이 Tabs.tsx 상수와 같다 (어긋나면 탭을 눌러도 엉뚱한 페이지가 뜬다)", () => {
-    expect([...INDEX_GROUP_KEYS].sort()).toEqual([US_MARKET_TAB_KEY, INDEX_NIGHT_TAB_KEY, INDEX_ROT_TAB_KEY].sort());
+    expect([...INDEX_GROUP_KEYS].sort()).toEqual([US_MARKET_TAB_KEY, INDEX_NIGHT_TAB_KEY, INDEX_SOBU_TAB_KEY].sort());
     expect(indexPageOf(INDEX_LEADERS_TAB_KEY)).toBe("day");   // 폐지된 대장주 탭 — 주간으로
     expect(indexPageOf(US_MARKET_TAB_KEY)).toBe("day");
     expect(indexPageOf(INDEX_NIGHT_TAB_KEY)).toBe("night");
     expect(indexPageOf(INDEX_US_TAB_KEY)).toBe("night");   // 폐지된 미국순환 탭 — 미국(옛 야간)으로
-    expect(indexPageOf(INDEX_SEMI_TAB_KEY)).toBe("rot");     // 폐지된 반도체 탭 — 지금은 순환매로
-    expect(indexPageOf(INDEX_ROT_TAB_KEY)).toBe("rot");
+    expect(indexPageOf(INDEX_SEMI_TAB_KEY)).toBe("sobu");     // 폐지된 반도체 탭 — 지금은 순환매로
+    expect(indexPageOf(INDEX_ROT_TAB_KEY)).toBe("sobu");
   });
 });
 
@@ -178,11 +178,11 @@ describe("처음 여는 페이지 — 시간으로", () => {
     vi.setSystemTime(new Date(Date.UTC(2026, 8, 30, kstHour - 9, 0)));   // KST = UTC+9
     return defaultDashboardPage();
   };
-  it("한국 낮(07~18시)은 주간", () => {
-    expect(at(7)).toBe("day"); expect(at(10)).toBe("day"); expect(at(17)).toBe("day");
+  it("한국 07~20시(NXT 애프터까지)는 주간", () => {
+    expect(at(7)).toBe("day"); expect(at(10)).toBe("day"); expect(at(18)).toBe("day"); expect(at(19)).toBe("day");
   });
   it("그 외는 야간", () => {
-    expect(at(18)).toBe("night"); expect(at(23)).toBe("night"); expect(at(30)).toBe("night");   // 30 = 다음날 06시
+    expect(at(20)).toBe("night"); expect(at(23)).toBe("night"); expect(at(30)).toBe("night");   // 30 = 다음날 06시
   });
 });
 
@@ -195,7 +195,7 @@ describe("지수(미국) — 옛 야간 + 미국순환 (2026-10-12)", () => {
     expect(n).not.toContain("usetf");
   });
   it("뺀 블록의 종목은 미국순환 줄로 옮겼다 — 빠진 카드가 없다", () => {
-    const all = new Set([...buildDashboardPage("night"), ...buildDashboardPage("rot")].flatMap(s => s.rows.flat()));
+    const all = new Set([...buildDashboardPage("night"), ...buildDashboardPage("sobu")].flatMap(s => s.rows.flat()));
     for (const sym of ["GOOGL", "META", "AMZN", "NFLX", "NVDA", "AVGO", "CRWV", "NBIS", "MSFT", "ORCL", "PLTR", "CRM", "TSLA", "SPCX", "AAPL", "DELL",
                        "TLT", "SOXX", "TQQQ", "SOXL", "SCHD", "JEPQ"]) expect(all.has(sym)).toBe(true);
   });
@@ -213,5 +213,27 @@ describe("지수(미국) — 옛 야간 + 미국순환 (2026-10-12)", () => {
   it("같은 탭 안에 같은 카드가 두 번 나오지 않는다(블록이 따로 그리는 폴백 목록은 제외)", () => {
     const all = buildDashboardPage("night").filter(s => !s.render).flatMap(s => s.rows.flat());
     expect(all.filter((x, i) => all.indexOf(x) !== i)).toEqual([]);
+  });
+});
+
+describe("sortedRows — 흐린(장 안 열린) 카드는 줄 뒤로", () => {
+  it("열린 카드끼리 등락률순, 흐린 카드는 그 뒤에 등락률순 — 대장(lead) 자리는 그대로", async () => {
+    const { sortedRows } = await import("../dashboardGroups");
+    const s = { id: "t", short: "t", label: "t", sortable: true, lead: 1, extras: [], rows: [["LEAD", "A", "B", "C", "D"]] } as unknown as Parameters<typeof sortedRows>[0];
+    const pct: Record<string, number> = { A: 8, B: 4, C: 6, D: 2 };
+    const dim = new Set(["A", "C"]);   // 프리장에 체결 없는 종목(대덕전자·원익IPS 같은)
+    expect(sortedRows(s, "pct", x => pct[x], x => dim.has(x))[0]).toEqual(["LEAD", "B", "D", "A", "C"]);
+    expect(sortedRows(s, "pct", x => pct[x])[0]).toEqual(["LEAD", "A", "C", "B", "D"]);   // dimOf 없으면 예전 그대로
+  });
+});
+
+// 국내 주식선물 근월물 코드 — 한투 종목마스터 실측(삼성전자 A11611, SK하이닉스 A50611), 만기 = 둘째 목요일
+import { frontMonthCode } from "../kisFutures";
+describe("주식선물 근월물 코드", () => {
+  it("만기(둘째 목요일) 전엔 이번 달, 지나면 다음 달", () => {
+    expect(frontMonthCode("11", "2026-11-02")).toBe("A11611");
+    expect(frontMonthCode("50", "2026-11-12")).toBe("A50611");   // 11/12 = 둘째 목요일(만기일 당일)
+    expect(frontMonthCode("50", "2026-11-13")).toBe("A50612");
+    expect(frontMonthCode("11", "2026-12-11")).toBe("A11701");   // 12/10 만기 뒤 → 2027년 1월물
   });
 });

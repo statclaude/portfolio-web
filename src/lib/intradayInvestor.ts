@@ -1,14 +1,14 @@
 // 시간별 투자자 순매수 — 공통 정의 (차트 컴포넌트 lazy 로드와 무관하게 토글 UI 에서 사용).
 import type { IntradayFlowPoint } from "./api";
 
-export type IntradayKey = keyof Omit<IntradayFlowPoint, "time" | "gross">;   // gross(총 매수·매도)는 선이 아니라 별도 표기용
+export type IntradayKey = keyof Omit<IntradayFlowPoint, "time" | "gross" | "gs">;   // gross(총 매수·매도)는 선이 아니라 별도 표기용
 
 // 투자자 정의 — 공통 토글(Section)과 차트(Chart)가 공유. on=기본 표시.
 export const INTRADAY_SERIES: { key: IntradayKey; label: string; color: string; on: boolean }[] = [
   { key: "individuals",         label: "개인",     color: "#7c3aed", on: true },
   { key: "foreigners",          label: "외국인",   color: "#ea580c", on: true },
-  { key: "institutions",        label: "기관계",   color: "#2563eb", on: true },
-  { key: "financialInvestment", label: "금융투자", color: "#0891b2", on: true },
+  { key: "institutions",        label: "기관계",   color: "#2563eb", on: false },   // 기본은 개인·외국인 둘만(사용자 결정 2026-10-21)
+  { key: "financialInvestment", label: "금융투자", color: "#0891b2", on: false },
   { key: "pensionFund",         label: "연기금",   color: "#c2410c", on: false },
   { key: "trust",               label: "투신",     color: "#db2777", on: false },
   { key: "insurance",           label: "보험",     color: "#ca8a04", on: false },

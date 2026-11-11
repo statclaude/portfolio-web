@@ -21,7 +21,7 @@
 import { Browser } from "@capacitor/browser";
 import { App as CapApp } from "@capacitor/app";
 import { Capacitor } from "@capacitor/core";
-import { isNativeApp } from "./nativeProxy";
+import { isNativeApp, isDesktopApp } from "./nativeProxy";
 import { getInstalledAppVersion } from "./appRelease";
 import {
   isExtensionProxyReady, getGoogleTokenViaExtension, clearGoogleTokenViaExtension,
@@ -32,6 +32,41 @@ const SCOPE = "https://www.googleapis.com/auth/drive.appdata";
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const REVOKE_URL = "https://oauth2.googleapis.com/revoke";
 const STATE_VALUE = "drive_auth_v1";
+
+// ─── 데스크톱 앱(맥·윈도우) ──────────────────────────────────────
+//   구글은 앱 웹뷰 안 로그인을 막는다 → 기본 브라우저 + 127.0.0.1 루프백(desktop/src-tauri google_login).
+//   refresh_token 을 받아 둬서 만료돼도 브라우저 없이 새 토큰을 받는다. 보안 비밀번호는 Rust 쪽에만 있다.
+const DESKTOP_REFRESH_KEY = "gdrive_desktop_refresh";
+type DesktopToken = { access_token: string; expires_in: number; refresh_token?: string | null };
+function desktopInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const t = (window as unknown as { __TAURI_INTERNALS__: { invoke: (c: string, a?: unknown) => Promise<T> } }).__TAURI_INTERNALS__;
+  return t.invoke(cmd, args);
+}
+async function desktopAuthToken(interactive: boolean): Promise<string | null> {
+  try {
+    const rt = localStorage.getItem(DESKTOP_REFRESH_KEY);
+    if (rt) {
+      try {
+        const t = await desktopInvoke<DesktopToken>("google_refresh", { refreshToken: rt });
+        clearAuthDiag();
+        saveToken(t.access_token, t.expires_in);
+        return t.access_token;
+      } catch (e) {
+        noteAuthFailure("desktop-refresh", e);
+        if (String(e).includes("invalid_grant")) localStorage.removeItem(DESKTOP_REFRESH_KEY);   // 권한 해제됨 — 다시 로그인
+        if (!interactive) return null;
+      }
+    } else if (!interactive) return null;
+    const t = await desktopInvoke<DesktopToken>("google_login");
+    if (t.refresh_token) localStorage.setItem(DESKTOP_REFRESH_KEY, t.refresh_token);
+    clearAuthDiag();
+    saveToken(t.access_token, t.expires_in);
+    return t.access_token;
+  } catch (e) {
+    noteAuthFailure("desktop-login", e);
+    return null;
+  }
+}
 
 // ─── silent refresh 진단 ──────────────────────────────────────
 // 왜 필요한가 — GIS 의 실패 사유가 전부 삼켜지고 있어서 1시간마다 로그아웃되는 원인을
@@ -341,6 +376,7 @@ function scheduleExtensionRefresh(): void {
 // silent refresh 호출 — 사용자 동의 + Google 세션 있으면 hidden iframe 으로 새 토큰 발급
 // 첫 로그인은 redirect 로 처리하므로 여기선 prompt: '' (interactive 없음) 만 사용
 function requestSilentRefresh(): Promise<string | null> {
+  if (isDesktopApp()) return Promise.resolve(null);   // 데스크톱은 GIS 를 안 쓴다(웹뷰 로그인 차단, upstream)
   if (!wasSignedIn()) return Promise.resolve(null);
   return new Promise((resolve) => {
     let settled = false;
@@ -380,6 +416,14 @@ function requestSilentRefresh(): Promise<string | null> {
 }
 
 function scheduleSilentRefresh(): void {
+  // 데스크톱 앱 — refresh_token 으로 만료 5분 전에 조용히 갱신(upstream)
+  if (isDesktopApp()) {
+    if (refreshTimer !== null) { window.clearTimeout(refreshTimer); refreshTimer = null; }
+    if (!accessToken) return;
+    refreshTimer = window.setTimeout(() => { refreshTimer = null; void desktopAuthToken(false); },
+      Math.max(0, tokenExpiresAt - Date.now() - SILENT_REFRESH_LEAD_MS));
+    return;
+  }
   if (refreshTimer !== null) {
     window.clearTimeout(refreshTimer);
     refreshTimer = null;
@@ -437,6 +481,9 @@ export async function signIn(): Promise<void> {
   try {
     localStorage.setItem(PRE_AUTH_PATH_KEY, window.location.pathname + window.location.search);
   } catch { /* noop */ }
+
+  // 데스크톱 앱 — 기본 브라우저로 로그인(루프백). 웹 경로(리다이렉트)는 웹뷰라 구글이 막는다(upstream)
+  if (isDesktopApp()) { await desktopAuthToken(true); return; }
 
   if (isNativeApp()) {
     if (await canUseNativeAuth()) {
@@ -558,6 +605,7 @@ export async function getAccessToken(
     clearAuthDiag();
     return accessToken;
   }
+  if (isDesktopApp()) return await desktopAuthToken(false);   // refresh_token 으로 — 브라우저 없이(upstream)
   // 앱이고 네이티브 인증이 되는 버전이면 최우선 — 팝업 없이 새 토큰(1시간 로그아웃 해결 지점).
   if (isNativeApp()) {
     if (await canUseNativeAuth()) {
@@ -584,6 +632,12 @@ export async function signOut(): Promise<void> {
   const t = accessToken;
   const useNative = isNativeApp() && (await canUseNativeAuth());
   clearToken();
+  if (isDesktopApp()) {   // 데스크톱 — refresh_token 을 폐기해야 앱 연결이 실제로 끊긴다(upstream)
+    const rt = localStorage.getItem(DESKTOP_REFRESH_KEY);
+    localStorage.removeItem(DESKTOP_REFRESH_KEY);
+    if (rt) { try { await fetch(`${REVOKE_URL}?token=${encodeURIComponent(rt)}`, { method: "POST" }); } catch { /* noop */ } }
+    return;
+  }
   if (!t) return;
 
   if (useNative) {
@@ -616,6 +670,7 @@ export async function signOut(): Promise<void> {
 export async function recoverFromUnauthorized(): Promise<string | null> {
   const dead = accessToken;
   clearToken();
+  if (isDesktopApp()) return await desktopAuthToken(false);
   if (!isNativeApp() || !(await canUseNativeAuth())) return null;
   if (dead) { try { await nativePlugin()?.clearToken?.({ token: dead }); } catch { /* noop */ } }
   return await nativeAuthToken(false);

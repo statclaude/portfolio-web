@@ -1,4 +1,7 @@
 import { DriveRestorePanel } from "./DriveRestorePanel";
+import { ProxyFallbackNote, ProxyDownNote } from "./ProxyListNotes";
+import { BrokerLinkSection } from "./BrokerLinkSection";
+import { KisLinkSection } from "./KisLinkSection";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Settings, Cpu } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -18,6 +21,9 @@ import {
 import { getTodayProxyCalls, getRecentProxyCalls } from "../lib/usageCounter";
 import { resetProxyStats } from "../lib/proxyStatus";
 import { useExtensionProxyVersion, EXPECTED_EXTENSION_VERSION, compareVersion } from "../lib/extensionProxy";
+import { appConfirm } from "../lib/appDialog";
+import { setNightBg, useNightBg } from "../lib/nightBg";
+
 
 const UPDATE_GUIDE_URL = "https://github.com/statclaude/portfolio-web/blob/main/workers/proxy/UPDATE-POST-SUPPORT.md";
 const LOCAL_GUIDE_URL = "https://github.com/statclaude/portfolio-web/blob/main/workers/local-proxy/README.md";
@@ -30,6 +36,9 @@ const CF_GUIDE_URL = "https://github.com/statclaude/portfolio-web/blob/main/work
 import { getIndependentGroupsMode, setIndependentGroupsMode } from "../lib/groupMode";
 import { getTabVisibility, setTabVisibility, getMarketSplit, setMarketSplit, TAB_VIS_ITEMS, type TabVisibility } from "../lib/tabVisibility";
 import { getGroupFolders, setGroupFolders, type GroupFolder } from "../lib/groupFolders";
+import { FolderMembersEditor } from "./FolderMembersEditor";
+import { SettingsTabBar } from "./SettingsTabBar";
+import { getLastSettingsTab, setLastSettingsTab, type SettingsTabKey } from "../lib/settingsTabs";
 import { findTickerConflicts, type TickerConflict } from "../lib/db";
 import { GroupConflictDialog } from "./GroupConflictDialog";
 import { detectPortfolioJson } from "../lib/portfolioImport";
@@ -72,13 +81,17 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncBusyMsg, setSyncBusyMsg] = useState("");   // 진행 중 오버레이 메시지
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(getLastSyncedAt());
-  const [signedIn, setSignedIn] = useState(isSignedIn());  // 구글 로그인 여부 (UI 반응형)
-  const authDiag = getAuthDiag();  // 마지막 자동 로그인 갱신 실패 진단 (있으면 표시)
+  const [signedIn, setSignedIn] = useState(isSignedIn());
+  const nightBg = useNightBg();   // 헤더 🌙 와 같은 값  // 구글 로그인 여부 (UI 반응형)
+  // 자동 갱신 실패 기록 — 설정을 열 때 한 번 읽는다(성공하면 googleAuth 가 지운다).
+  const authDiag = getAuthDiag();
   const [independentMode, setIndependent] = useState(getIndependentGroupsMode());
   const [conflicts, setConflicts] = useState<TickerConflict[] | null>(null);
   const [tabVis, setTabVis] = useState(getTabVisibility());
   const [folders, setFolders] = useState<GroupFolder[]>([]);
   const [newFolderName, setNewFolderName] = useState("");
+  const [tab, setTab] = useState<SettingsTabKey>(getLastSettingsTab());
+  const pickTab = (t: SettingsTabKey) => { setTab(t); setLastSettingsTab(t); };
 
   const persistFolders = (next: GroupFolder[]) => {
     setFolders(next);
@@ -91,17 +104,6 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
     persistFolders([...folders, { name: n, groups: [] }]);
     setNewFolderName("");
   };
-  const toggleGroupInFolder = (folderName: string, group: string, checked: boolean) => {
-    // 한 그룹은 한 폴더만 — 체크 시 다른 폴더에서 제거
-    const next = folders.map(f => {
-      if (f.name === folderName) {
-        return { ...f, groups: checked ? Array.from(new Set([...f.groups, group])) : f.groups.filter(g => g !== group) };
-      }
-      return checked ? { ...f, groups: f.groups.filter(g => g !== group) } : f;
-    });
-    persistFolders(next);
-  };
-
   const toggleTab = (key: keyof TabVisibility, v: boolean) => {
     const next = { ...tabVis, [key]: v };
     setTabVis(next);
@@ -115,11 +117,11 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
   const handleIndependentToggle = async (next: boolean) => {
     if (next) {
       // ON 으로 토글 — 즉시 적용 (확인창)
-      if (!window.confirm(
+      if (!(await appConfirm(
         "그룹별 독립 보유(다중 계좌) 모드를 켤까요?\n\n"
         + "같은 종목을 그룹마다 다른 수량·평단으로 따로 관리합니다.\n"
         + "※ 즉시 적용됩니다 (하단 '적용' 버튼과 무관)."
-      )) return;   // 취소 시 체크박스 원복
+      ))) return;   // 취소 시 체크박스 원복
       setIndependentGroupsMode(true);
       setIndependent(true);
       window.alert("✅ 그룹별 독립 보유 모드 ON (적용됨)");
@@ -128,11 +130,11 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
       // OFF 로 토글 — 충돌 검사 후 모달 (있으면)
       const list = await findTickerConflicts();
       if (list.length === 0) {
-        if (!window.confirm(
+        if (!(await appConfirm(
           "그룹별 동기화 모드로 바꿀까요?\n\n"
           + "같은 종목은 모든 그룹에서 동일한 수량·평단을 갖습니다.\n"
           + "※ 즉시 적용됩니다."
-        )) return;
+        ))) return;
         setIndependentGroupsMode(false);
         setIndependent(false);
         window.alert("✅ 그룹별 동기화 모드 (적용됨)");
@@ -216,7 +218,7 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
   }, [handleSyncAuthError]);
 
   const doDownload = useCallback(async () => {
-    if (!confirm("Drive 의 데이터로 이 기기를 덮어씁니다. 계속할까요?")) return;
+    if (!(await appConfirm("Drive 의 데이터로 이 기기를 덮어씁니다. 계속할까요?"))) return;
     setSyncBusy(true);
     setSyncBusyMsg("Drive 에서 불러오는 중...");
     try {
@@ -239,6 +241,10 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
       setStatusMsg(`⚠️ ${msg}`);
     } finally { setSyncBusy(false); setSyncBusyMsg(""); }
   }, [handleSyncAuthError, onChanged, onClose]);
+
+  // 데스크톱 앱 로그인이 끝나면 바로 잇는 동작 — startLoginThen 은 deps 가 비어 최신 함수를 ref 로 본다
+  const doUploadRef = useRef(doUpload); doUploadRef.current = doUpload;
+  const doDownloadRef = useRef(doDownload); doDownloadRef.current = doDownload;
 
   // 미로그인 시 — 동작 저장 후 로그인 redirect. 돌아오면 resume 효과가 자동 실행.
   const startLoginThen = useCallback((action: PendingSyncAction) => {
@@ -332,7 +338,7 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
       const results = await Promise.all(enabled.map(p => verifyOne(p.url)));
       const failed = enabled.filter((_, i) => !results[i]).map(p => p.url);
       if (failed.length > 0) {
-        const ok = confirm(`⚠️ 응답 확인 실패한 프록시:\n${failed.join("\n")}\n\n그래도 저장할까요? (오타·미배포 가능)`);
+        const ok = await appConfirm(`⚠️ 응답 확인 실패한 프록시:\n${failed.join("\n")}\n\n그래도 저장할까요? (오타·미배포 가능)`);
         if (!ok) { setStatusMsg(""); return; }
       }
     }
@@ -384,11 +390,11 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
       alert(`❌ 불러올 수 없는 파일입니다\n\n${result?.kind === "error" ? result.error : ""}`);
       return;
     }
-    if (!window.confirm(
+    if (!(await appConfirm(
       "이 파일로 덮어쓸까요?\n\n"
       + "⚠️ 현재 보유·예수금·그룹·폴더·탭 등 모든 데이터/설정이 교체됩니다.\n"
       + "되돌릴 수 없습니다."
-    )) return;
+    ))) return;
     setBusy(true);
     try {
       if (result.kind === "holdings" || result.kind === "combined") await replaceAllHoldings(result.stocks);
@@ -479,8 +485,10 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
           <button onClick={onClose}
                   className="text-gray-400 hover:text-gray-600 text-xl">✕</button>
         </header>
+        <SettingsTabBar tab={tab} onChange={pickTab} />
 
         <div className="px-5 py-3 space-y-3 flex-1 flex flex-col min-h-0 overflow-y-auto">
+          {tab === "sync" && (<>
           {/* Google Drive 동기화 */}
           <div className="border border-gray-200 rounded p-2.5 bg-emerald-50/40 space-y-1.5">
             <div className="text-xs font-bold text-gray-700">
@@ -525,6 +533,30 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
               </span>
             </label>
             <div className="space-y-1.5">
+              {/* 최근 충돌 — 알림을 넘겨도 무엇이 바뀌었었는지 */}
+              {(() => {
+                try {
+                  const c = JSON.parse(localStorage.getItem("gdrive_last_conflict") ?? "null") as { at: string; local: string[]; remote: string[] | null } | null;
+                  return c && (
+                    <div className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded px-1.5 py-1 leading-snug">
+                      최근 충돌 {new Date(c.at).toLocaleString("ko-KR")}<br />
+                      이 기기: {c.local.length ? c.local.join(" · ") : "바뀐 내용 없음"}<br />
+                      Drive: {c.remote == null ? "확인 못 함" : c.remote.length ? c.remote.join(" · ") : "바뀐 내용 없음"}
+                    </div>
+                  );
+                } catch { return null; }
+              })()}
+              {/* 최근 자동 올림 이유 — 아무것도 안 했는데 갱신 알림이 뜰 때 원인 확인용(사용자 2026-11-07 "log 있어?") */}
+              {(() => {
+                try {
+                  const r = JSON.parse(localStorage.getItem("gdrive_last_push_reason") ?? "null") as { at: string; why: string[] } | null;
+                  return r && (
+                    <div className="text-[11px] text-gray-500 leading-snug">
+                      최근 자동 올림 {new Date(r.at).toLocaleString("ko-KR")} — {r.why.length ? r.why.join(" · ") : "바뀐 항목 없음(기준이 비어 있었음)"}
+                    </div>
+                  );
+                } catch { return null; }
+              })()}
               {signedIn && lastSyncedAt && (
                 <div className="text-[11px] text-gray-500">
                   마지막 동기화: {new Date(lastSyncedAt).toLocaleString("ko-KR")}
@@ -566,7 +598,7 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
                 {signedIn && (
                   <button disabled={syncBusy}
                     onClick={async () => {
-                      if (!confirm("로그아웃 + 동기화 설정 해제?")) return;
+                      if (!(await appConfirm("로그아웃 + 동기화 설정 해제?"))) return;
                       setSyncBusy(true);
                       try {
                         await disableSync();
@@ -605,7 +637,16 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
             </div>
           </div>
 
+          </>)}
+
+          {tab === "broker" && (<>
+          {/* 증권사 연결(토스 Open API) — 데스크톱 앱만 실제 연결, 웹은 안내 */}
+          <BrokerLinkSection />
+          <KisLinkSection />
+          </>)}
+
           {/* 전용 프록시 URL */}
+          {tab === "proxy" && (
           <div className="border border-gray-200 rounded p-2.5 bg-blue-50/30 space-y-1">
             <div className="text-xs font-bold text-gray-700">
               🔧 내 전용 프록시 (여러 개 가능)
@@ -661,8 +702,10 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
                      className="text-blue-600 underline">↓ 내려받기</a>
                 </div>
               )}
+              {/* 포크: 데스크톱 앱 내려받기 링크는 두지 않는다(작업 원칙 5 — 앱은 본인 빌드만) */}
             </div>
             <div className="space-y-1.5">
+              {extReady && proxies.length > 0 && <ProxyFallbackNote via="확장" anyEnabled={proxies.some(p => p.enabled)} />}
               {proxies.length === 0 && (
                 <div className="text-[11px] text-gray-400 py-1">
                   등록된 전용 프록시 없음 — 공개 4-way 사용 중
@@ -689,6 +732,7 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
                         ✕
                       </button>
                     </div>
+                    <ProxyDownNote url={url} enabled={p.enabled} />
                     {/* 로컬 프록시 — 한도 개념이 없어 별도 안내. 사용량 조회 전(방금 추가해
                         아직 저장 안 함)에도 반드시 무언가 그린다: u 로 감싸면 행이 통째로 비어
                         가이드 링크에 닿을 방법이 없어진다. */}
@@ -768,8 +812,12 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
                 </a>
               </div>
             )}
-            {/* 폴링 주기 — 공개는 5분 고정·수동만. 그보다 빠른 주기는 전용 프록시 또는 확장일 때.
-                확장은 브라우저가 직접 요청하므로 워커 호출 한도가 아예 없다. */}
+          </div>)}
+
+          {tab === "general" && (
+          <div className="border border-gray-200 rounded p-2.5 bg-blue-50/30 space-y-1">
+            {/* 폴링 주기 — 공개는 5분·수동만. 그보다 빠른 건 전용 전송(확장·앱·개인 워커)일 때만.
+                확장·앱은 브라우저/폰이 직접 요청하므로 워커 호출 한도가 아예 없다. */}
             {/* 폭이 좁으면 버튼이 눌려 글자가 세로로 쪼개졌다("수\n동", "5\n초") →
                 버튼은 줄바꿈 금지·축소 금지로 두고, 대신 줄 자체가 넘어가게 한다. */}
             <div className="flex items-center gap-1 mt-1 flex-wrap">
@@ -837,6 +885,25 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
               </span>
             </label>
 
+            {/* 야간 배경 — 카드 바깥만 어둡게(카드는 흐림 기능 그대로) */}
+            <label className="flex items-start gap-2 mt-2 cursor-pointer select-none">
+              <input type="checkbox" checked={nightBg}
+                     onChange={e => {
+                       setNightBg(e.target.checked);
+                       setStatusMsg(`✅ 야간 배경: ${e.target.checked ? "ON" : "OFF"}`);
+                     }}
+                     className="mt-0.5 w-4 h-4 accent-blue-600 shrink-0" />
+              <span className="flex-1">
+                <span className="text-[11px] text-gray-700 font-medium block">
+                  🌙 야간 배경 (카드 바깥만 어둡게)
+                </span>
+                <span className="text-[10px] text-gray-500">
+                  페이지 바탕과 그룹 상자만 어둡게 합니다. 카드는 그대로 — 장 마감으로 흐려진 카드는
+                  어두운 바탕에 가라앉고 열린 시장 카드만 밝게 보입니다.
+                </span>
+              </span>
+            </label>
+
             {/* 코스피/코스닥 분리 보기 */}
             <label className="flex items-start gap-2 mt-2 cursor-pointer select-none">
               <input type="checkbox" defaultChecked={getMarketSplit()}
@@ -900,29 +967,18 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
               </div>
             </div>
 
-            {/* 그룹 폴더 — 그룹을 폴더로 묶어 탭 단순화 */}
+          </div>)}
+
+          {/* 그룹 폴더 — 그룹을 폴더로 묶어 탭 단순화 */}
+          {tab === "folders" && (
+          <div className="border border-gray-200 rounded p-2.5 space-y-1">
+            {groups.length === 0 && (
+              <div className="text-xs text-gray-400">그룹이 아직 없습니다 — 검색으로 종목을 그룹에 넣으면 여기서 폴더로 묶을 수 있습니다.</div>
+            )}
             {groups.length > 0 && (
-              <div className="mt-3 pt-2 border-t border-gray-200">
+              <div>
                 <div className="text-[11px] text-gray-700 font-medium mb-1.5">📁 그룹 폴더</div>
-                {folders.map(f => (
-                  <div key={f.name} className="mb-2 p-2 border border-gray-200 rounded">
-                    <div className="flex items-center mb-1">
-                      <span className="text-xs font-bold text-gray-800">📁 {f.name}</span>
-                      <button onClick={() => persistFolders(folders.filter(x => x.name !== f.name))}
-                              className="ml-auto text-[10px] text-rose-500 hover:underline">폴더 삭제</button>
-                    </div>
-                    <div className="flex flex-wrap gap-x-3 gap-y-1">
-                      {groups.map(g => (
-                        <label key={g} className="flex items-center gap-1 cursor-pointer select-none">
-                          <input type="checkbox" checked={f.groups.includes(g)}
-                                 onChange={e => toggleGroupInFolder(f.name, g, e.target.checked)}
-                                 className="w-3.5 h-3.5 accent-blue-600" />
-                          <span className="text-[11px] text-gray-700">{g}</span>
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-                ))}
+                <FolderMembersEditor folders={folders} groups={groups} onChange={persistFolders} />
                 <div className="flex items-center gap-1.5 mt-1">
                   <input value={newFolderName} onChange={e => setNewFolderName(e.target.value)}
                          onKeyDown={e => { if (e.key === "Enter") addFolder(); }}
@@ -935,11 +991,11 @@ export function SettingsDialog({ isOpen, onClose, onChanged, groups = [] }: Prop
                   </button>
                 </div>
                 <div className="text-[10px] text-gray-500 mt-1">
-                  그룹을 폴더에 담으면 상단 탭에서 "📁 폴더 ▾" 드롭다운으로 합쳐 보입니다. (그룹은 한 폴더에만)
+                  그룹을 폴더에 담으면 상단 탭에서 "📁 폴더 ▾" 드롭다운으로 합쳐 보입니다. 그룹은 한 폴더에만 — 다른 폴더의 그룹을 고르면 옮겨집니다.
                 </div>
               </div>
             )}
-          </div>
+          </div>)}
 
         </div>
 

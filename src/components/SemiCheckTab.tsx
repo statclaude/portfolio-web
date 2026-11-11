@@ -8,7 +8,7 @@ import { allYahooSymbols, US_PAIRS } from "../lib/usMarketData";
 import { Sparkline } from "./Sparkline";
 import { useAdaptiveRefreshMs } from "../lib/proxyStatus";
 import { reportRefresh } from "../lib/lastRefresh";
-import { handleTossLinkClick, TOSS_SYMBOL_URL } from "../lib/toss";
+import { handleTossLinkClick, TOSS_SYMBOL_URL, worldQuoteUrl } from "../lib/toss";
 import { getDimSleepingEnabled, getEffectivePollMs } from "../lib/proxyConfig";
 import { isSymbolSleeping, marketOfSymbol, fmtAgo, isUsExtendedTradingOpen, isQuoteStale } from "../lib/format";
 import type { UsIndex } from "../lib/api";
@@ -19,7 +19,7 @@ function quoteUrl(symbol: string): string {
   // 지수/환율/미국 ETF 토스 매핑 (lib/toss.ts 공통 맵)
   if (TOSS_SYMBOL_URL[symbol]) return TOSS_SYMBOL_URL[symbol];
   // 그 외 미국 종목은 Yahoo Finance
-  return `https://finance.yahoo.com/quote/${encodeURIComponent(symbol)}`;
+  return worldQuoteUrl(symbol);   // 도쿄 상장·닛케이 = 네이버, 그 밖 = 야후
 }
 
 type Mood = "good" | "warn" | "bad" | "neutral";
@@ -65,14 +65,10 @@ interface MiniProps {
   direction?: Direction;
   dimEnabled?: boolean;
 }
-// direction === "inverse" 면 상승 = 한국 위험 → 색 반전 (상승=파랑, 하락=빨강)
-function colorFor(pct: number | null, direction: Direction = "direct"): string {
+// 색 반전 없음 — inverse 도 상승=빨강·하락=파랑(사용자 결정 2026-10-21). direction 인자는 호출 호환용
+function colorFor(pct: number | null, _direction: Direction = "direct"): string {
   if (pct == null) return "text-gray-500";
-  const isUp = pct > 0, isDown = pct < 0;
-  if (direction === "inverse") {
-    return isUp ? "text-blue-600" : isDown ? "text-rose-600" : "text-gray-700";
-  }
-  return isUp ? "text-rose-600" : isDown ? "text-blue-600" : "text-gray-700";
+  return pct > 0 ? "text-rose-600" : pct < 0 ? "text-blue-600" : "text-gray-700";
 }
 function Mini({ symbol, name, desc, q, chart, direction = "direct", dimEnabled = false }: MiniProps) {
   // 메인 가격/변동률 — 한국 입장 누적 변동률 (정규장 + 시간외 합산):
@@ -121,7 +117,7 @@ function Mini({ symbol, name, desc, q, chart, direction = "direct", dimEnabled =
       {/* 마감가 책갈피 — 카드 위로 올림(-top-2). 노란 배경(살짝 투명) + 흐림 제외(z-20) */}
       {q && sleeping && closeVal != null && (
         <div className="absolute -top-2 right-1 z-20 px-1.5 py-0
-                        border rounded bg-yellow-200/25 border-yellow-400/40
+                        border rounded bg-yellow-50 border-yellow-400/60
                         text-[10px] font-medium leading-tight whitespace-nowrap">
           <span className={`tabular-nums ${regSign}`}>
             {closeVal < 1000 ? closeVal.toFixed(2) : Math.round(closeVal).toLocaleString()}
