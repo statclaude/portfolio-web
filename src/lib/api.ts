@@ -1,12 +1,16 @@
 import type { Price, Investor, Consensus } from "../types";
+import { fetchLive, preferServer } from "./liveServer";
 import {
   reportProxySuccess, reportProxyFailure, isProxyDown,
   noteHostFailure, noteHostSuccess, isHostBlocked,
 } from "./proxyStatus";
 import {
-  getEnabledPersonalProxies, isLocalProxyUrl, isExtensionProxyUrl, isSyntheticProxyUrl,
+  getEnabledPersonalProxies, isLocalProxyUrl, isExtensionProxyUrl, isNativeProxyUrl, isSyntheticProxyUrl,
 } from "./proxyConfig";
+import { cached, NOT_FOUND, isNotFound } from "./marketCache";
+import { tossCandleSymbol, tossCandlesUsable, fetchTossDailyCandles, TOSS_RANGE_BARS } from "./tossCandles";
 import { isExtensionProxyReady, fetchViaExtension } from "./extensionProxy";
+import { isDirectApp, fetchViaNative } from "./nativeProxy";
 import { incrementProxyCall, cleanupOldProxyCalls } from "./usageCounter";
 import { isKrNightSession, krFuturesName, isKrFuturesTradingNow, isUsAfterMarketOpen, isUsExtendedTradingOpen, nowKstDateStr, isMarketOpen, isKrAfterRegularClose, isUsOvernightNow } from "./format";
 import { rememberTossCode, getTossCode } from "./toss";
@@ -127,6 +131,7 @@ function buildProxyUrl(base: string, targetUrl: string): string {
 //   403(워커 origin/host 차단)·429·5xx·408 만 "이 프록시 문제일 수 있다"로 보고 넘긴다.
 // 프록시 URL → egress 공급자. 같은 공급자면 나가는 IP 풀이 같아 스로틀 결과도 같다.
 function proxyProvider(base: string): string {
+  if (isNativeProxyUrl(base)) return "native";         // 앱이 직접 = 자체 egress (폰의 통신망 IP)
   if (isExtensionProxyUrl(base)) return "extension";   // 브라우저 직접 = 자체 egress
   try {
     const h = new URL(base).hostname;
@@ -159,7 +164,17 @@ export async function fetchProxied(
   // 호출 카운트 — 이 브라우저 일자별 (논리적 fetch 1회로 집계, 재시도 무관)
   incrementProxyCall();
 
-  // 확장이 있으면 최우선 — 브라우저가 직접 보내므로 호출 한도가 없고,
+  // 네이티브 앱이면 그 무엇보다 먼저 — 네이티브 HTTP 에는 CORS 가 없어 프록시가 아예 필요 없다.
+  //   실패하면 삼키고 아래 경로로 계속한다(앱이 단일 실패점이 되지 않게).
+  //   Yahoo 는 여기서 429 가 날 수 있다 — OkHttp 는 브라우저가 아니라서. 그때도 폴백이 받는다.
+  if (isDirectApp()) {   // 안드로이드 앱 또는 데스크톱 앱(맥·윈도우)
+    try {
+      const r = await fetchViaNative(targetUrl, init);
+      if (r.ok || r.status === 490) return r;   // 490 = 토스 점검, 다른 경로로 물어도 답이 같다
+    } catch { /* 네이티브 실패 → 아래 확장·프록시로 폴백 */ }
+  }
+
+  // 확장이 있으면 그다음 — 브라우저가 직접 보내므로 호출 한도가 없고,
   //   토스(클라우드 IP 차단)와 Yahoo(비브라우저 차단)를 동시에 만족하는 유일한 경로다.
   //   Yahoo 의 crumb 은 확장이 직접 처리한다(background.js).
   //   확장이 실패하면 삼키고 기존 프록시 경로로 계속한다(확장이 단일 실패점이 되지 않게).
@@ -328,7 +343,7 @@ export async function fetchTossUsStockCandles(symbol: string, count = 120): Prom
 //   빈 결과는 던진다 — 일시적 0건이 staleTime 동안 굳지 않게(빈 캐시 금지).
 // 토스 분봉을 '그날 처음'까지 이어받기 — 한 번에 450개가 상한이라 모자라면
 //   응답의 nextDateTime 을 from 으로 넘겨 더 받는다(최대 maxPages). 반환은 최신 → 과거 순(토스 응답과 같다).
-type TossBar = { dt: string; close: number; base?: number };
+type TossBar = { dt: string; close: number; base?: number; volume?: number };
 //   5분봉 — 토스·야후 **둘 다 있는 간격**으로 통일(사용자 결정 2026-10-21). 어제+오늘 이틀:
 //   한국 288개 = 1콜, 미국 576개 = 2콜(450개 상한 → 이어받기).
 const TOSS_DAY_MIN = 5;
@@ -358,36 +373,119 @@ export const TWO_DAY_GAP = 0.04;
 export const TWO_DAY_HALF = (1 - TWO_DAY_GAP) / 2;   // 하루가 차지하는 폭
 /** 오늘 하루 안 위치(0~1) → 어제+오늘 축의 x(오른쪽 칸) */
 export const twoDayTodayX = (f: number) => 1 - TWO_DAY_HALF + f * TWO_DAY_HALF;
-function buildTwoDaySeries(rows: TossBar[], isKr: boolean): DaySeries | null {
-  const [startMin, spanMin, openHHMM, closeHHMM] = isKr ? [8 * 60, 12 * 60, "09:00", "15:30"] : [0, 24 * 60, "09:30", "16:00"];
+
+// ── 최근 하루치 '밀어 보기'(사용자 결정 2026-10-21, C안) ──
+//   어제 50%·오늘 50% 고정 대신, 오른쪽 끝 = 지금, 왼쪽 끝 = 거래 시간으로 하루 전. 시간이 갈수록 어제는 왼쪽으로 밀려 줄고
+//   오늘이 늘어난다(장 초반에도 비지 않는다). 벽시계 24시간이 아니라 **거래 시간** 하루치 — 한국 밤 12시간이 통째로 비지 않게.
+//   g = 하루 안 위치(0~1, 어제) 또는 1+GAP+위치(오늘), 창 = [fNow, 1+GAP+fNow]. fNow = 오늘 거래 시간 중 지금 위치(오늘이 끝났거나
+//   최신 날이 오늘이 아니면 1 → 최신 하루가 꽉 찬다).
+const ROLL_GAP = TWO_DAY_GAP / (1 - TWO_DAY_GAP);   // 두 날 사이 빈칸(창 폭의 약 4%)
+export interface RollIdx { volumes?: number[]; breakIdx?: number; openIdx?: number; closeIdx?: number; prevOpenIdx?: number; prevCloseIdx?: number; todayTimes?: string[] }
+// 정규장 시작·종가 세로선 — **봉 번호가 아니라 시장 시간표로** 위치를 정한다(사용자 결정 2026-10-27: "같은 분류는 다 동일하지 않아?").
+//   예전엔 카드마다 '09:30 이후 첫 봉'을 찾아 그 점에 그어, 봉이 늦게 오거나 빠지거나 출처가 바뀌면 카드마다 시가만·종가만
+//   보였다(앱에서만 들쭉날쭉). 시각은 시장마다 같으니(미국 09:30·16:00 ET, 한국 09:00·15:30 KST …) 같은 시장 카드는 같은 x 에 선다.
+//   open·close = 하루 안 위치(0~1, 그 빌더의 축 기준). today*/prev* = 그 선을 그릴지(시각이 지났는지·그날 장이 열렸는지).
+export interface SessionMarks { open: number; close?: number; todayOpen: boolean; todayClose: boolean; prevOpen: boolean; prevClose: boolean }
+export interface MarkX { x: number; close?: boolean }   // x = 카드 가로 위치(0~1)
+export function rollDay<T extends { closes: number[] } & RollIdx>(s: T, fr: number[], bi: number, fNow: number, sess?: SessionMarks): T & { xs: number[]; rolling: true; markXs?: MarkX[] } {
+  const g = fr.map((f, i) => (bi > 0 && i < bi ? f : 1 + ROLL_GAP + f));
+  const full = fNow >= 1;
+  const start = full ? 1 + ROLL_GAP : fNow, W = full ? 1 : 1 + ROLL_GAP;
+  let k = g.findIndex(v => v >= start - 1e-9); if (k < 0) k = g.length;
+  const sh = (i?: number) => (i == null || i - k <= 0 ? undefined : i - k);
+  let markXs: MarkX[] | undefined;
+  if (sess) {
+    const at = (g: number, close?: boolean) => { const x = (g - start) / W; return x > 0.002 && x <= 1 + 1e-9 ? [{ x: Math.min(1, x), close }] : []; };
+    const today = (f: number) => 1 + ROLL_GAP + f;
+    markXs = [
+      ...(sess.prevOpen ? at(sess.open) : []),
+      ...(sess.prevClose && sess.close != null ? at(sess.close, true) : []),
+      ...(sess.todayOpen ? at(today(sess.open)) : []),
+      ...(sess.todayClose && sess.close != null ? at(today(sess.close), true) : []),
+    ];
+  }
+  return {
+    ...s,
+    closes: s.closes.slice(k), volumes: s.volumes?.slice(k), xs: g.slice(k).map(v => Math.min(1, Math.max(0, (v - start) / W))),
+    breakIdx: bi > 0 && bi > k ? bi - k : undefined,
+    openIdx: sh(s.openIdx), closeIdx: sh(s.closeIdx), prevOpenIdx: sh(s.prevOpenIdx), prevCloseIdx: sh(s.prevCloseIdx),
+    rolling: true, markXs,
+  };
+}
+export function buildTwoDaySeries(rows: TossBar[], isKr: boolean, axis?: [number, number]): DaySeries | null {
+  // axis = [시작 분, 폭 분] — 지수·ETF 처럼 정규장만 거래되는 것은 좁혀 준다(08:00~20:00 이면 가운데가 거의 비었다, 사용자 2026-11-02)
+  const [startMin, spanMin, openHHMM, closeHHMM] = isKr ? [axis?.[0] ?? 8 * 60, axis?.[1] ?? 12 * 60, "09:00", "15:30"] : [0, 24 * 60, "09:30", "16:00"];
   const frac = (dt: string) => Math.min(1, Math.max(0, (Number(dt.slice(11, 13)) * 60 + Number(dt.slice(14, 16)) - startMin) / spanMin));
   const days = [...new Set(rows.map(c => c.dt.slice(0, 10)))];         // 최신 날짜 먼저
   const barsOf = (d?: string) => d ? rows.filter(c => c.dt.slice(0, 10) === d && c.close > 0).reverse() : [];
   const li = days.findIndex(d => barsOf(d).length > 0);
   if (li < 0) return null;
-  const latest = barsOf(days[li]), prev = barsOf(days[li + 1]);
+  // '어제' = 정규장이 있던 가장 가까운 전날. 미국 5분봉엔 **일요일 밤 오버나이트**(20:00~24:00 ET) 봉이 일요일 날짜로 섞여 와서
+  //   월요일 아침엔 어제가 일요일이 되고(정규장 없음) 어제 시작·종가 세로선이 사라졌다(2026-10-26 "앱에서만 세로선이 안 보여" —
+  //   앱은 야후 spark 가 429 라 이 토스 폴백을 탄다). 정규장 봉이 하나라도 있는 날을 어제로 삼는다.
+  // 거래량 0 봉 = 체결 없음 — 거래정지 종목도 토스는 같은 값(어제 종가)으로 빈 봉을 채워 보낸다(유니슨 2026-10-21~27, 5거래일 전부 1,044·거래량 0).
+  //   그대로면 선이 기준선과 겹쳐 사라지고, 시간표 세로선만 섰다(사용자 2026-10-27). 거래량이 없는 응답(undefined)은 체결로 본다.
+  const traded = (c: TossBar) => (c.volume ?? 1) > 0;
+  if (!rows.some(traded)) return null;   // 체결이 하나도 없다(거래정지 등) → 24시간 대신 3개월 그래프로
+  const inRegular = (c: TossBar) => { const hm = c.dt.slice(11, 16); return traded(c) && hm >= openHHMM && hm <= closeHHMM; };
+  const prevDay = days.slice(li + 1).find(d => barsOf(d).some(inRegular)) ?? days[li + 1];
+  const latest = barsOf(days[li]), prev = barsOf(prevDay);
   const oi = latest.findIndex(c => c.dt.slice(11, 16) >= openHHMM);
   // 정규장 종가 봉 — 토스 봉 시각은 '끝나는 시각'이라 15:30(미국 16:00) 이하인 마지막 봉. 정규장이 끝난 뒤에만.
   const ended = latest.some(c => c.dt.slice(11, 16) >= closeHHMM);
   const ci = ended ? latest.map(c => c.dt.slice(11, 16) <= closeHHMM).lastIndexOf(true) : -1;
-  const base = latest[latest.length - 1].base;
-  const pb = prev.length ? prev[prev.length - 1].base : undefined;   // 어제의 기준(그저께 종가) — 왼쪽 기준선
-  return {
+  // 오늘 칸 색 기준 = 오늘 정규장 봉의 base(어제 종가). 마지막 봉으로 잡으면 20:00 ET 오버나이트부터 토스가 base 를
+  //   '오늘 종가' 로 바꿔서 오늘 정규장 전체가 오늘 종가 기준으로 칠해졌다(사용자 2026-10-29 "그제·어제 종가 점선이 이상해").
+  const latestReg = latest.filter(inRegular);
+  const base = (latestReg.length ? latestReg[latestReg.length - 1] : latest[latest.length - 1]).base;
+  // 어제의 기준(그저께 종가) — 왼쪽 기준선. **어제 정규장 봉의 base** 로 잡는다: 토스 미국 5분봉은 20:00 ET 오버나이트부터
+  //   base 를 다음 거래일 기준(= 어제 종가)으로 바꿔서, 마지막 봉으로 잡으면 오늘 기준선과 같은 값이 되어 두 점선이 한 높이로
+  //   겹쳤다(사용자 2026-10-27 "엇그제 종가와 어제 종가가 같아?" — NVDA 월 23:55 봉 base 216 = 월 종가, 정규장 봉은 210.96).
+  const prevReg = prev.filter(inRegular);
+  const pb = prev.length ? (prevReg.length ? prevReg[prevReg.length - 1] : prev[prev.length - 1]).base : undefined;
+  // 지금 위치(그 시장 현지 날짜·시각) — 최신 날이 오늘이 아니면 1
+  const tz = isKr ? "Asia/Seoul" : "America/New_York";
+  const pp = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })
+    .formatToParts(new Date()).reduce<Record<string, string>>((a, p) => { a[p.type] = p.value; return a; }, {});
+  const latestIsToday = `${pp.year}-${pp.month}-${pp.day}` === days[li];
+  const nowMin = (Number(pp.hour) % 24) * 60 + Number(pp.minute);
+  const fNow = latestIsToday ? Math.min(1, Math.max(0, (nowMin - startMin) / spanMin)) : 1;
+  // 세로선 — 위치는 시간표, 그릴지는: 오늘이면 시각이 지났는지 + 그날 장이 열렸는지(개장 뒤 봉이 하나라도), 지난 날이면 정규장 봉이 있었는지(휴장 제외)
+  const hm2min = (hm: string) => Number(hm.slice(0, 2)) * 60 + Number(hm.slice(3, 5));
+  const fHM = (hm: string) => Math.min(1, Math.max(0, (hm2min(hm) - startMin) / spanMin));
+  const opened = latest.some(c => traded(c) && c.dt.slice(11, 16) >= openHHMM);
+  const sess: SessionMarks = {
+    open: fHM(openHHMM), close: fHM(closeHHMM),
+    todayOpen: latestIsToday ? opened && nowMin >= hm2min(openHHMM) : latest.some(inRegular),
+    todayClose: latestIsToday ? opened && nowMin >= hm2min(closeHHMM) : latest.some(inRegular) && latest.some(c => c.dt.slice(11, 16) >= closeHHMM),
+    prevOpen: prev.some(inRegular), prevClose: prev.some(inRegular),
+  };
+  // 미국 — 오늘 정규장이 끝나면 카드 % 는 오늘 종가 기준(애프터·오버나이트, 토스식)이라 그 값을 점선으로 오늘 종가 세로선부터 더 긋는다.
+  //   20:00 ET 뒤엔 토스가 마지막 봉 base 로 공식 종가를 주고, 그 전엔 16:00 봉 종가.
+  const lastBase = latest[latest.length - 1].base ?? 0;
+  const nextBase = !isKr && sess.todayClose
+    ? (lastBase > 0 && lastBase !== base ? lastBase : ci > 0 ? latest[ci].close : undefined) : undefined;
+  return rollDay({
+    nextBase,
     closes: [...prev.map(c => c.close), ...latest.map(c => c.close)],
+    volumes: [...prev.map(c => c.volume ?? 0), ...latest.map(c => c.volume ?? 0)],   // 카드 아래 거래량 막대
     xs: [...prev.map(c => frac(c.dt) * TWO_DAY_HALF), ...latest.map(c => twoDayTodayX(frac(c.dt)))],
     base: base && base > 0 ? base : undefined,
     prevBase: pb && pb > 0 ? pb : undefined,
     openIdx: oi >= 0 ? prev.length + oi : undefined,
     closeIdx: ci > 0 ? prev.length + ci : undefined,
+    // 어제 구간의 정규장 시작·종가 세로선(사용자 요청)
+    prevOpenIdx: (() => { const i = prev.findIndex(c => c.dt.slice(11, 16) >= openHHMM); return i > 0 ? i : undefined; })(),
+    prevCloseIdx: (() => { const i = prev.map(c => c.dt.slice(11, 16) <= closeHHMM).lastIndexOf(true); return i > 0 && i < prev.length - 1 ? i : undefined; })(),
     date: days[li], twoDay: true, breakIdx: prev.length > 0 ? prev.length : undefined,
-  };
+  }, [...prev.map(c => frac(c.dt)), ...latest.map(c => frac(c.dt))], prev.length, fNow, sess);
 }
 
 // 종목 카드 배경 '24시간' 그래프용 당일 시계열 — 시간 축(xs)·어제 종가(base)·정규장 시작(openIdx) 포함.
 //   지수 카드(KrDaySparkline·야후 spark)와 같은 모양(어제 종가선 위 빨강·아래 파랑, 정규장 시작 세로선)으로 그리려고
 //   종가만 주던 걸 넓혔다(2026-10-21). 한국 = 08:00~20:00 KST(정규 09:00), 미국 = 00:00~24:00 ET(정규 09:30).
 //   오늘 봉이 1개라도 있으면 오늘(실시간 끝점과 이어 선이 된다), 없을 때만 직전 날. 값 단위는 한국 원·미국 **달러**(카드 원화와 다름 — 실시간 끝점은 priceUsd).
-export interface DaySeries { closes: number[]; xs?: number[]; base?: number; openIdx?: number; closeIdx?: number; date?: string; twoDay?: boolean; breakIdx?: number; prevBase?: number; todayTimes?: string[] }   // prevBase = 어제(왼쪽) 기준선   // breakIdx = 오늘 첫 봉(어제와 선을 잇지 않는다)   // twoDay = 어제(왼쪽 절반)+오늘(오른쪽 절반)
+export interface DaySeries { nextBase?: number; halted?: boolean; markXs?: MarkX[]; rolling?: boolean; closes: number[]; volumes?: number[]; xs?: number[]; base?: number; openIdx?: number; closeIdx?: number; prevOpenIdx?: number; prevCloseIdx?: number; date?: string; twoDay?: boolean; breakIdx?: number; prevBase?: number; todayTimes?: string[] }   // prevBase = 어제(왼쪽) 기준선   // breakIdx = 오늘 첫 봉(어제와 선을 잇지 않는다)   // twoDay = 어제(왼쪽 절반)+오늘(오른쪽 절반)
 export async function fetchTossIntraday(ticker: string): Promise<DaySeries | null> {
   const isKr = /^[\dA-Za-z]{6}$/.test(ticker) && /\d/.test(ticker);
   const code = isKr ? `A${ticker}` : (TOSS_US_STOCK_CODE[ticker] ?? getTossCode(ticker));
@@ -396,6 +494,20 @@ export async function fetchTossIntraday(ticker: string): Promise<DaySeries | nul
   const rows = await fetchTossMinuteBars(`${isKr ? "kr-s" : "us-s"}/${code}`, isKr ? 1 : 2);
   if (rows.length === 0) throw new Error(`toss intraday ${ticker}: empty`);
   return buildTwoDaySeries(rows, isKr);
+}
+
+// 24시간 카드의 자료 출처 계획 — **앱(안드로이드·데스크톱)은 토스 5분봉을 1순위**(사용자 결정 2026-10-27), 웹은 야후 spark 1순위.
+//   앱은 네이티브 요청이라 야후가 429 를 자주 내고(쿠키 없음), 그때그때 묶음이 빠져 세로선이 들쭉날쭉했다. 토스 c-chart 5분봉은
+//   종목당 2콜이지만 115종목을 한꺼번에 던져도 전부 정상(실측)이라 앱에선 처음부터 토스로 간다. 토스 분봉이 없는 심볼
+//   (지수·환율·금리·선물·코인)만 야후. 웹은 야후가 20종목 1콜이라 그대로(토스는 실패 폴백).
+export function hasTossIntraday(symbol: string): boolean {
+  const isKr = /^[\dA-Za-z]{6}$/.test(symbol) && /\d/.test(symbol);
+  return isKr || !!(TOSS_US_STOCK_CODE[symbol] ?? getTossCode(symbol));
+}
+export function daySparkPlan(symbols: string[]): { yahoo: string[]; toss: string[] } {
+  if (!isDirectApp()) return { yahoo: symbols, toss: [] };
+  const toss = symbols.filter(hasTossIntraday);
+  return { yahoo: symbols.filter(s => !toss.includes(s)), toss };
 }
 
 // 토스 내부코드를 이미 아는 경우(TICS 구성종목 등) — 심볼→코드 변환을 건너뛴다.
@@ -765,12 +877,18 @@ function obvSum(closes: number[], volumes: number[], lookback: number): number |
 }
 
 // chart endpoint — close + volume 둘 다 추출 (시간순 정렬)
+// 일봉(종가·거래량) — 기기에 6시간 저장(섹터 ETF 순위 22종 × 매번 받던 것)
 async function fetchYahooChartCV(symbol: string, range = "2mo"): Promise<{ closes: number[]; volumes: number[] }> {
+  return cached(`yhcv:${symbol}:${range}`, 6 * 3600_000, () => fetchYahooChartCVRaw(symbol, range), v => v.closes.length === 0);
+}
+async function fetchYahooChartCVRaw(symbol: string, range = "2mo"): Promise<{ closes: number[]; volumes: number[] }> {
   const target = `https://query1.finance.yahoo.com/v8/finance/chart/`
               + `${encodeURIComponent(symbol)}?interval=1d&range=${range}`;
   try {
+    if (yahooCoolingDown()) throw new Error(`yahoo chart ${symbol}: cooling down`);
     const resp = await fetchProxied(target);
-    if (!resp.ok) return { closes: [], volumes: [] };
+    noteYahooStatus(resp.status);
+    if (!resp.ok) { if (resp.status === 404) return { closes: [], volumes: [] }; throw new Error(`yahoo chart ${symbol}: ${resp.status}`); }   // 일시적 실패는 빈 값으로 굳히지 않는다
     const data = await resp.json() as {
       chart?: { result?: Array<{ indicators?: { quote?: Array<{
         close?: (number | null)[]; volume?: (number | null)[];
@@ -791,15 +909,17 @@ async function fetchYahooChartCV(symbol: string, range = "2mo"): Promise<{ close
       }
     }
     return { closes, volumes };
-  } catch {
+  } catch (e) {
+    if (e instanceof Error && e.message.startsWith("yahoo chart")) throw e;   // 일시적 실패 — 부른 쪽이 판단
     return { closes: [], volumes: [] };
   }
 }
 
 export async function fetchKrSectorEtfRanking(): Promise<KrSectorEtfRank[]> {
+  let failed = 0;
   const results = await Promise.all(
     KR_SECTOR_ETFS.map(async etf => {
-      const { closes, volumes } = await fetchYahooChartCV(`${etf.ticker}.KS`, "2mo");
+      const { closes, volumes } = await fetchYahooChartCV(`${etf.ticker}.KS`, "2mo").catch(() => { failed++; return { closes: [] as number[], volumes: [] as number[] }; });
       if (closes.length < 2) {
         return {
           ticker: etf.ticker, name: etf.name, fullName: etf.fullName, isMarket: etf.isMarket,
@@ -827,6 +947,8 @@ export async function fetchKrSectorEtfRanking(): Promise<KrSectorEtfRank[]> {
       } as KrSectorEtfRank;
     })
   );
+  // 절반 넘게 일시적 실패면 던진다 — 빈 순위표를 캐시하지 않고 다시 묻게(그래프·표가 통째로 비던 것, 사용자 제보 2026-10-23)
+  if (failed > KR_SECTOR_ETFS.length / 2) throw new Error(`sector etf ranking: ${failed}/${KR_SECTOR_ETFS.length} failed`);
   return results;
 }
 
@@ -1092,7 +1214,8 @@ export async function fetchNaverBoard(ticker: string): Promise<NaverBoardPost[]>
         comments: p.commentCount ?? 0,
         up: p.recommendCount ?? 0,
         down: p.notRecommendCount ?? 0,
-        url: `https://stock.naver.com/domestic/stock/${ticker}/discussion`,
+        // 글 하나로 — 목록으로 가던 것(사용자 지적 2026-10-23). id 없으면 목록
+        url: `https://stock.naver.com/domestic/stock/${ticker}/discussion${p.id ? `/${p.id}` : ""}`,
       });
     }
     return out;
@@ -1253,6 +1376,46 @@ export async function fetchTossCodeInfo(code: string): Promise<{ symbol: string;
   } catch {
     return null;
   }
+}
+
+// 미국 히트맵 토스 시세(사용자 2026-10-30 "미국장은? 프리장에서? 여기도 토스로") — 티커 → 토스 내부코드(기억된 것 먼저,
+//   없으면 code-or-symbol 1콜씩 찾아 기억) → 시세 200종목/콜. 처음 한 번만 코드를 찾고 그다음부터는 시세만(500종목 ≈ 3콜).
+//   토스에 없는 티커는 이번 실행 동안 다시 찾지 않는다. 돌려주는 Price 는 ticker = 티커, base·prevClose = 직전 정규장 종가.
+const tossUsMiss = new Set<string>();
+async function resolveTossUsCode(symbol: string): Promise<string | null> {
+  const known = getTossCode(symbol);
+  if (known) return known;
+  if (tossUsMiss.has(symbol)) return null;
+  try {
+    const r = await fetchProxied(`https://wts-info-api.tossinvest.com/api/v2/stock-infos/code-or-symbol/${encodeURIComponent(symbol)}`);
+    const j = r.ok ? await r.json() as { result?: { code?: string } } : null;
+    const code = j?.result?.code;
+    if (code && /^(US|NAS|NYS|AMX)/.test(code)) { rememberTossCode(symbol, code); return code; }
+  } catch { /* 아래에서 기억 */ }
+  tossUsMiss.add(symbol);
+  return null;
+}
+export async function fetchTossUsPricesBySymbol(symbols: string[]): Promise<Price[]> {
+  const codeOf = new Map<string, string>();
+  const todo = [...new Set(symbols)];
+  for (let i = 0; i < todo.length; i += 8) {   // 코드 찾기는 8개씩(처음 한 번만 많다)
+    const batch = todo.slice(i, i + 8);
+    const codes = await Promise.all(batch.map(resolveTossUsCode));
+    batch.forEach((s, k) => { if (codes[k]) codeOf.set(s, codes[k]!); });
+  }
+  const bySymbol = new Map([...codeOf].map(([s, c]) => [c, s]));
+  const codes = [...codeOf.values()];
+  const out: Price[] = [];
+  for (let i = 0; i < codes.length; i += 200) {
+    const m = await fetchTossUsPrices(codes.slice(i, i + 200));
+    for (const [code, p] of m) {
+      const ticker = bySymbol.get(code);
+      if (!ticker) continue;
+      out.push({ ticker, price: p.close, base: p.base, prevClose: p.base, open: 0, volume: 0,
+        trade_date: p.tradeDateTime ? toKstDateString(p.tradeDateTime) : "" });
+    }
+  }
+  return out;
 }
 
 // 종목명 재취득 — 토스 JSON(UTF-8, 인코딩 안전·시세와 같은 출처라 확실히 닿음) 우선, 실패 시 네이버 HTML.
@@ -1517,6 +1680,9 @@ interface TossInvestorItem {
   baseDate: string;
   netIndividualsBuyVolume: number;
   netForeignerBuyVolume: number;
+  individualsBuyVolume?: number; individualsSellVolume?: number;
+  foreignerBuyVolume?: number; foreignerSellVolume?: number;
+  institutionBuyVolume?: number; institutionSellVolume?: number;
   netInstitutionBuyVolume: number;
   netPensionFundBuyVolume: number;
   netFinancialInvestmentBuyVolume: number;
@@ -1552,7 +1718,14 @@ function mapInvestorItem(item: TossInvestorItem): Investor {
     기타금융: Number(item.netOtherFinancialInstitutionsBuyVolume || 0),
     기타법인: Number(item.netOtherCorporationBuyVolume || 0),
     외국인비율: Number(item.foreignerRatio || 0),
+    갱신: (item as { updatedAt?: string }).updatedAt,
+    개인있음: (item as { hasIndividual?: boolean }).hasIndividual,
     종가: Number(item.close || 0) || undefined,
+    매수매도: {
+      개인: [Number(item.individualsBuyVolume || 0), Number(item.individualsSellVolume || 0)],
+      외국인: [Number(item.foreignerBuyVolume || 0), Number(item.foreignerSellVolume || 0)],
+      기관: [Number(item.institutionBuyVolume || 0), Number(item.institutionSellVolume || 0)],
+    },
   };
 }
 
@@ -1684,16 +1857,50 @@ async function fetchPriceHistoryFor(
   return r.prices;
 }
 
-// 가격 + 배당 + 액면분할 이벤트 통합 fetch
+// 가격 + 배당 + 액면분할 이벤트 통합 fetch — 일봉이라 기기에 6시간 저장(marketCache). 앱을 다시 켜도 다시 받지 않는다.
+//   404(그 거래소에 없음)도 '없음'으로 저장 — .KS/.KQ 양쪽을 묻는 절반이 404 라 그걸 매번 다시 묻던 것
+const DAILY_CACHE_MS = 6 * 3600_000;
+// 야후가 '너무 많다(429)'로 거절하면 2분 동안 야후 일봉 요청을 보내지 않는다 — 막혔는데 화면마다 다시 묻고(React Query
+//   재시도 3번) 또 거절당해 막힌 시간이 길어졌다(2026-10-23 실측: 화면 하나에 632건). 쉬는 동안은 저장된 값으로.
+let yahooCooldownUntil = 0;
+function yahooCoolingDown(): boolean { return Date.now() < yahooCooldownUntil; }
+function noteYahooStatus(status: number) { if (status === 429) yahooCooldownUntil = Date.now() + 120_000; }
+// wantEvents — 배당·분할 이벤트가 꼭 필요하면 true(야후만 준다). 아니면 데스크톱 앱+토스 연동일 때 토스 공식 일봉을 먼저 쓴다
+//   (야후 429 회피, tossCandles.ts). 토스가 못 주는 심볼·실패는 그대로 야후로.
 async function fetchPriceHistoryWithEventsFor(
-  symbol: string, range: string,
+  symbol: string, range: string, wantEvents = false,
 ): Promise<{ prices: PricePoint[]; dividends: DividendEvent[]; splits: SplitEvent[] }> {
+  const empty = { prices: [] as PricePoint[], dividends: [] as DividendEvent[], splits: [] as SplitEvent[] };
+  if (!wantEvents && TOSS_RANGE_BARS[range]) {
+    const ts = tossCandleSymbol(symbol);
+    if (ts && tossCandlesUsable()) {
+      try {
+        // .KS/.KQ 를 따로 물어도 키가 같아(코드만) 한 번만 받는다(cached 가 동시 호출도 합친다)
+        const tv = await cached(`tc:${ts}:${range}`, DAILY_CACHE_MS,
+          async () => (await fetchTossDailyCandles(ts, range)) ?? NOT_FOUND,
+          x => !isNotFound(x) && x.length === 0);
+        if (!isNotFound(tv)) return { prices: tv, dividends: [], splits: [] };
+      } catch { /* 토스 실패(한도·토큰) → 야후 */ }
+    }
+  }
+  const v = await cached(`yh:${symbol}:${range}`, DAILY_CACHE_MS,
+    async () => (await fetchPriceHistoryWithEventsRaw(symbol, range)) ?? NOT_FOUND,
+    x => !isNotFound(x) && x.prices.length === 0);
+  return isNotFound(v) ? empty : v;
+}
+async function fetchPriceHistoryWithEventsRaw(
+  symbol: string, range: string,
+): Promise<{ prices: PricePoint[]; dividends: DividendEvent[]; splits: SplitEvent[] } | null> {
   const target =
     `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}` +
     `?range=${range}&interval=1d&events=div%2Csplit`;
   const empty = { prices: [] as PricePoint[], dividends: [] as DividendEvent[], splits: [] as SplitEvent[] };
+  if (yahooCoolingDown()) throw new Error(`yahoo chart ${symbol}: cooling down`);
   const resp = await fetchProxied(target);
-  if (!resp.ok) return empty;
+  noteYahooStatus(resp.status);
+  // 404(그 거래소에 없는 종목) 만 '없음'. 429·5xx 같은 일시적 실패는 던진다 — 빈 값으로 돌려주면 React Query 가
+  //   1시간(staleTime) 동안 빈 그래프로 들고 있었다(ETF 구성·검색 그래프 안 나옴, 사용자 제보 2026-10-23)
+  if (!resp.ok) { if (resp.status === 404) return null; throw new Error(`yahoo chart ${symbol}: ${resp.status}`); }   // null = '없음' 확정
   const data = await resp.json() as YahooChartResp;
   const res = data.chart?.result?.[0];
   if (!res) return empty;
@@ -1781,11 +1988,15 @@ async function fetchKrEitherExchange<T>(
     const one = await fetchOne(`${ticker}${suffix}`);
     if (countOf(one) > 0) return one;   // 빈 응답이면 아래 양쪽 조회로 폴백
   }
-  const [ks, kq] = await Promise.all([
+  // 한쪽이 일시적 실패(던짐)여도 다른 쪽이 받았으면 그걸로. 둘 다 실패면 던진다(빈 값을 캐시하지 않게)
+  const [ks, kq] = await Promise.allSettled([
     fetchOne(`${ticker}.KS`),
     fetchOne(`${ticker}.KQ`),
   ]);
-  return countOf(ks) >= countOf(kq) ? ks : kq;
+  if (ks.status === "rejected" && kq.status === "rejected") throw ks.reason;
+  if (ks.status === "rejected") return (kq as PromiseFulfilledResult<T>).value;
+  if (kq.status === "rejected") return ks.value;
+  return countOf(ks.value) >= countOf(kq.value) ? ks.value : kq.value;
 }
 
 export async function fetchKrPriceHistory(
@@ -1932,7 +2143,7 @@ export async function fetchKrPriceHistoryWithEvents(
   const empty = { prices: [] as PricePoint[], dividends: [] as DividendEvent[], splits: [] as SplitEvent[] };
   if (!/^[\dA-Za-z]{6}$/.test(ticker)) return empty;
   // 노이즈 봉 문제(fetchKrPriceHistory 참조) — 둘 다 받아 봉 많은 쪽 선택.
-  return fetchKrEitherExchange(ticker, sym => fetchPriceHistoryWithEventsFor(sym, range), v => v.prices.length);
+  return fetchKrEitherExchange(ticker, sym => fetchPriceHistoryWithEventsFor(sym, range, true), v => v.prices.length);
 }
 
 // 공시 fetch — Naver 모바일 API (인증 불필요, m.stock.naver.com 이미 워커 화이트리스트)
@@ -2093,7 +2304,8 @@ async function fetchTossMdsTrend<T extends { date: string }>(
   const out: T[] = [];
   let key: string | null = null;
   for (let i = 0; i < 5; i++) {
-    let url = `https://wts-info-api.tossinvest.com/api/v1/mds/info/${endpoint}?stockCode=A${ticker}&size=100`;
+    // endpoint 가 http 로 시작하면 완성된 주소(프로그램 매매처럼 mds/info 밖으로 옮겨간 것). 페이지네이션(pagingParam.key)은 같다
+    let url = endpoint.startsWith("http") ? endpoint : `https://wts-info-api.tossinvest.com/api/v1/mds/info/${endpoint}?stockCode=A${ticker}&size=100`;
     if (key) url += `&key=${encodeURIComponent(key)}`;
     let resp: Response;
     try { resp = await fetchProxied(url); }
@@ -2127,8 +2339,10 @@ export interface ProgramTradingPoint {
   nonArbitrageNet: number;  // 비차익 순매수 (주)
   totalNet: number;         // 합계 순매수 (주)
 }
+// ★ 2026-10-23: mds/info/program-trading 이 404 — 토스 웹이 쓰는 새 주소 stock-infos/trade/trend/program-trading(productCode) 로.
+//   필드 이름은 그대로(arbitrage/nonArbitrage/total NetBuyQuantity). 기업가치 프로그램 차트가 이걸로 되살아난다.
 export function fetchKrProgramTrading(ticker: string, months = 12): Promise<ProgramTradingPoint[]> {
-  return fetchTossMdsTrend("program-trading", ticker, months, r => ({
+  return fetchTossMdsTrend(`https://wts-info-api.tossinvest.com/api/v1/stock-infos/trade/trend/program-trading?productCode=A${ticker}&size=100`, ticker, months, r => ({
     date: r.baseDate as string,
     arbitrageNet: (r.arbitrageNetBuyQuantity as number) ?? 0,
     nonArbitrageNet: (r.nonArbitrageNetBuyQuantity as number) ?? 0,
@@ -2410,6 +2624,8 @@ export interface IntradayFlowPoint {
   bank: number; otherFinancial: number; pensionFund: number; otherCorp: number;
   // 그 시각까지의 **총 매수·총 매도**(선물=계약, 현물=억원) — 순매수만으론 안 보이는 '당일 회전'(사고판 양) 계산용
   gross?: { fBuy: number; fSell: number; iBuy: number; iSell: number };
+  // 투자자별 [누적 매수, 누적 매도] — 키는 위 숫자 필드와 같다(foreigners·individuals·…). 매수/매도 막대 차트용
+  gs?: Partial<Record<string, [number, number]>>;
 }
 export interface IntradayFlow {
   unit: "억원" | "계약"; points: IntradayFlowPoint[];
@@ -2441,8 +2657,16 @@ function mapTrendRow(row: TrendRow, futures: boolean) {
     fBuy: g([GUBUN.foreigners, GUBUN.otherForeigners], "buy"), fSell: g([GUBUN.foreigners, GUBUN.otherForeigners], "sell"),
     iBuy: g([GUBUN.individuals], "buy"), iSell: g([GUBUN.individuals], "sell"),
   };
+  const GS: Record<string, string[]> = {
+    individuals: [GUBUN.individuals], foreigners: [GUBUN.foreigners, GUBUN.otherForeigners],
+    institutions: [GUBUN.financialInvestment, GUBUN.insurance, GUBUN.trust, GUBUN.privateEquity, GUBUN.bank, GUBUN.otherFinancial, GUBUN.pensionFund, GUBUN.stateLocal],
+    financialInvestment: [GUBUN.financialInvestment], insurance: [GUBUN.insurance], trust: [GUBUN.trust, GUBUN.privateEquity],
+    bank: [GUBUN.bank], otherFinancial: [GUBUN.otherFinancial], pensionFund: [GUBUN.pensionFund], otherCorp: [GUBUN.otherCorp],
+  };
+  const gs: Record<string, [number, number]> = {};
+  for (const [k, codes] of Object.entries(GS)) gs[k] = [g(codes, "buy"), g(codes, "sell")];
   return {
-    gross,
+    gross, gs,
     individuals: scale(v(GUBUN.individuals)),
     foreigners: scale(v(GUBUN.foreigners) + v(GUBUN.otherForeigners)),
     institutions: scale(institutions),
@@ -2461,7 +2685,7 @@ function mapTrendRow(row: TrendRow, futures: boolean) {
 //   오늘 수급이 그 날짜인 척 그려진다 → 그래서 날짜 인자를 아예 받지 않는다.
 //   시간별 과거 수급은 무료 소스가 없다(옛 investorDealTrendTime 은 410, KRX 는 로그인 필수).
 //   과거를 보려면 fetchKrDailyInvestorFlow(일별)를 쓴다.
-export async function fetchKrIntradayInvestorFlow(market: IntradayMarket): Promise<IntradayFlow> {
+export async function fetchKrIntradayInvestorFlow(market: IntradayMarket, nxtOnly = false): Promise<IntradayFlow> {
   const mkt = TREND_MARKET[market];
   const futures = market === "futures";
   const bd = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10).replace(/-/g, "");
@@ -2493,6 +2717,11 @@ export async function fetchKrIntradayInvestorFlow(market: IntradayMarket): Promi
     return { rowDate, points: [...byTime.values()].sort((a, b) => a.time.localeCompare(b.time)) };
   };
   const iso = (d: string) => d.length === 8 ? `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}` : undefined;
+  // nxtOnly — 넥스트레이드만(프리장 08:00~09:00 결과를 정규장 뒤에도 따로 보려고, 사용자 요청 2026-10-22)
+  if (nxtOnly) {
+    const n = await load("NXT");
+    return { unit, points: n.points, date: iso(n.rowDate), pre: true };
+  }
   const krx = await load("KRX");
   // ★ 프리장(08:00~09:00) — KRX 는 09:01 첫 행이 나올 때까지 **어제 행(~20:04)** 을 그대로 준다.
   //   그 사이 넥스트레이드(tradeType=NXT)는 오늘 08:00 부터 프리장 수급을 준다(실측 2026-10-14 08:45:
@@ -3380,6 +3609,19 @@ const TOSS_US_STOCK_CODE: Record<string, string> = {
   "AVGO": "US20090806002",
   "ORCL": "US19860312001",
   "INTC": "US19711013001",
+  "MX": "US20110311001",   // 매그나칩 — 업종 탭 점검(2026-11-05)
+  "TSEM": "US19941025001",   // 타워세미컨덕터 — 업종 탭 점검(2026-11-05)
+  "AAOI": "US20130925001",   // AAOI — 업종 탭 점검(2026-11-05)
+  "FN": "US20100625003",   // 패브리넷 — 업종 탭 점검(2026-11-05)
+  "GLW": "US19450521001",   // 코닝 — 업종 탭 점검(2026-11-05)
+  "ENPH": "US20120330001",   // 엔페이즈 — 업종 탭 점검(2026-11-05)
+  "PLUG": "US19991029003",   // 플러그파워 — 업종 탭 점검(2026-11-05)
+  "VST": "US20170510003",   // 비스트라 — 업종 탭 점검(2026-11-05)
+  "LEU": "US20150316002",   // 센트러스 — 업종 탭 점검(2026-11-05)
+  "LHX": "US20190701004",   // L3해리스 — 업종 탭 점검(2026-11-05)
+  "GFS":  "US20211027013",   // 글로벌파운드리스 — 반도체 탭 파운드리(토스 검색 2026-11-05)
+  "UMC":  "US20000919001",   // UMC(ADR) — 대만 2위 파운드리
+  "SNPS": "US19920303005",   // 시놉시스 — 반도체 설계 도구
   "QCOM": "US19911213001",
   "TSM":  "US19971008002",   // TSMC (파운드리) — 원화 시세용
   // 미국 ETF
@@ -3477,11 +3719,14 @@ async function fetchTossUsIndexMap(
   const priceByCode = await fetchTossUsPrices(items.map(i => i.code));
   const afterOpen = isUsAfterMarketOpen();
   const closeIsLive = isUsExtendedTradingOpen() && !afterOpen;   // 오버나잇·프리마켓 — close 가 라이브
+  const allClosed = !isUsExtendedTradingOpen() && !isMarketOpen("US_INDEX");   // 정규·애프터·오버나잇·프리 다 닫힘(주말·휴장)
   for (const it of items) {
     const tp = priceByCode.get(it.code);
     if (!tp) continue;
     const regClose = closeIsLive ? tp.base : tp.close;            // 정규장 종가(마감 책갈피)
-    const useAfter = afterOpen && tp.afterClose > 0;
+    // 애프터가 끝난 뒤 장이 다 닫힌 동안(주말 등)도 애프터 마감가 — 정규장 종가로 돌아가 금요일 애프터 결과가 주말 내내 안 보였다
+    //   (사용자 2026-11-07 "미국 종목 애프터 마감 가격"). 실측 토요일 낮 TSLA: close 358.22 · afterMarketClose 359.40
+    const useAfter = (afterOpen || allClosed) && tp.afterClose > 0;
     const price = useAfter ? tp.afterClose : tp.close;
     const base = tp.base;                                         // 어제 종가(오버나잇은 머지에서 다시 맞춘다)
     const diff = price - base;
@@ -3546,7 +3791,11 @@ function mapTossOverview(data: TossOverviewResp | null): Map<string, UsIndex> {
         const sparkline = Array.isArray(candles)
           ? candles.map(c => c.price).filter((v): v is number => typeof v === "number" && Number.isFinite(v))
           : [];
+        // 마지막 캔들 끝 시각 = 토스 실측 갱신 시각 — 카드 흐림(90분 정체) 판정용. 없으면 야후 시각이 남아, 장이 막 열린 월요일 아침
+        //   야후가 아직 금요일 시각이라 코스피·코스닥이 흐렸다(사용자 2026-11-02 "장 열렸는데 흐림?")
+        const lastEnd = Array.isArray(candles) && candles.length ? Date.parse((candles[candles.length - 1] as { endDate?: string }).endDate ?? "") : NaN;
         out.set(sym, {
+          ...(Number.isFinite(lastEnd) ? { freshTime: Math.floor(lastEnd / 1000) } : {}),
           symbol: sym, name: sym === "KRW=X" ? "USD/KRW" : sym,  // name 은 merge 시 pairs(야후) 쪽 우선
           price: close, prev: base, prevClose: base,
           diff, pct, currency: "KRW",
@@ -3714,8 +3963,8 @@ interface CnbcQuote {
   last_time?: string;
 }
 // 현재가 — 가볍다(~1KB). 폴링 주기마다 호출되는 경로라 차트(43KB) 대신 이쪽을 쓴다.
-async function fetchCnbcIndexPrice(symbol: string, name: string): Promise<UsIndex | null> {
-  const cnbcSym = CNBC_SYMBOL[symbol];
+async function fetchCnbcIndexPrice(symbol: string, name: string, cnbcOverride?: string): Promise<UsIndex | null> {
+  const cnbcSym = cnbcOverride ?? CNBC_SYMBOL[symbol];
   if (!cnbcSym) return null;
   const url = "https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol"
     + `?symbols=${encodeURIComponent(cnbcSym)}`
@@ -3756,10 +4005,10 @@ interface CnbcBar {
   tradeTime?: string;        // "20260710000000" — 당일 미완성 봉도 항상 채워짐
   tradeTimeinMills?: string | null;   // 당일 미완성 봉은 null → 날짜 산출에 쓰면 안 됨
 }
-async function fetchCnbcBars(symbol: string): Promise<CnbcBar[]> {
-  const cnbcSym = CNBC_SYMBOL[symbol];
+async function fetchCnbcBars(symbol: string, timeRange = "1M", cnbcOverride?: string): Promise<CnbcBar[]> {
+  const cnbcSym = cnbcOverride ?? CNBC_SYMBOL[symbol];
   if (!cnbcSym) return [];
-  const variables = JSON.stringify({ symbol: cnbcSym, timeRange: "1M" });
+  const variables = JSON.stringify({ symbol: cnbcSym, timeRange });
   const extensions = JSON.stringify({ persistedQuery: { version: 1, sha256Hash: CNBC_CHART_HASH } });
   const url = "https://webql-redesign.cnbcfm.com/graphql?operationName=getQuoteChartData"
     + `&variables=${encodeURIComponent(variables)}`
@@ -3776,19 +4025,31 @@ async function fetchCnbcBars(symbol: string): Promise<CnbcBar[]> {
 //   받는 함수도 하나여야 캐시가 어긋나지 않는다(예전엔 PC 는 CNBC 지수를 CNBC 로, 모바일은 같은 키를
 //   야후로 채워 먼저 부른 쪽이 이겼다).
 //   한국 6자리(.KS)는 토스 일봉 — 야후는 코스닥이 .KQ 라 '240810.KS' 로는 빈 차트가 온다.
-export async function fetchDashboardChart(sym: string): Promise<number[]> {
+export async function fetchDashboardChart(sym: string, range: "3mo" | "1y" = "3mo"): Promise<number[]> {
+  const r = await fetchDashboardChartRaw(sym, range);
+  // 빈 결과는 던진다 — 캐시(staleTime 1시간)에 '빈 차트'가 굳지 않고 바로 다시 받게(빈 캐시 금지).
+  //   APK 에서 리튬·니켈 시세는 고쳐진 뒤 살아났는데 배경 그래프는 빈 값이 1시간 남아 안 나왔다(2026-10-22).
+  if (!r.length) throw new Error(`빈 차트: ${sym}`);
+  return r;
+}
+async function fetchDashboardChartRaw(sym: string, range: "3mo" | "1y" = "3mo"): Promise<number[]> {
   const kr = /^([\dA-Za-z]{6})\.KS$/.exec(sym);
-  if (kr) return (await fetchKrPriceHistory(kr[1], "3mo")).map(p => p.close);
-  if (isCnbcIndex(sym)) return fetchCnbcChart(sym);
-  if (sym === CNN_FG_SYMBOL) return fetchCnnFgChart();
+  const n = range === "1y" ? 252 : 63;   // 거래일 수 — 일봉을 직접 자르는 출처(CNBC·CNN·머니랜드)용
+  if (kr) return (await fetchKrPriceHistory(kr[1], range)).map(p => p.close);
+  if (isCnbcIndex(sym)) return (await fetchCnbcChart(sym, 252)).slice(-n);
+  // 미국 2년물 — 야후에 일봉이 없어 토스 당일 10분봉(몇 개)이 3개월 칸에 그려져 이상했다(사용자 2026-11-02). CNBC 일봉 3개월로
+  if (sym === "^US2Y") return (await fetchCnbcBars(sym, "1M", "US2Y")).map(b => cnbcNum(b.close)).filter((v): v is number => v !== null && v > 0).slice(-n);
+  if (sym === CNN_FG_SYMBOL) return (await fetchCnnFgChart(252)).slice(-n);
+  if (sym === HY_SPREAD_SYMBOL) return ((await loadHySpread()) ?? []).map(p => p[1]).slice(-n);
   if (isSinaMetal(sym)) return fetchSinaMetalChart(sym);
-  if (isMemPrice(sym)) return fetchMemChart(sym);
-  return fetchYahooChart(sym, "3mo");
+  if (isMemPrice(sym)) return (await fetchMemChart(sym, 252)).slice(-n);
+  return fetchYahooChart(sym, range);
 }
 
-export async function fetchCnbcChart(symbol: string): Promise<number[]> {
+// 카드 3개월 그래프 — CNBC 1M 범위는 실제로 약 1년(244봉)이라 다른 카드(63거래일)·반도체 수급 칸과 기간이 달랐다(사용자 2026-11-02)
+export async function fetchCnbcChart(symbol: string, n = 63): Promise<number[]> {
   const bars = await fetchCnbcBars(symbol);
-  return bars.map(b => cnbcNum(b.close)).filter((v): v is number => v !== null);
+  return bars.map(b => cnbcNum(b.close)).filter((v): v is number => v !== null).slice(-n);
 }
 
 // 일자 정렬용 종가 시계열 (PricePoint[]) — VKOSPI 등 오버레이용.
@@ -3883,11 +4144,107 @@ async function fetchCnnFgIndex(name: string): Promise<UsIndex | null> {
     marketState: "",
   };
 }
+// ─── 미국 하이일드 스프레드(ICE BofA US HY OAS, FRED BAMLH0A0HYM2) ───────────
+//   크롤러(portfolio-etf-index/scripts/hy-spread.js)가 매일 받아 둔 파일 — 0콜, 프록시 허용 목록 변경 없음(사용자 2026-11-07 "하이일드 스프레드?").
+//   값 = %(국채 대비 가산금리). 일별·하루 늦다. 카드 %는 스프레드 자체의 변화율이 아니라 **%p 변화**(diff)를 쓰게 pct 에도 diff 를 넣는다.
+export const HY_SPREAD_SYMBOL = "HYSPREAD";
+const HY_SPREAD_URL = "https://raw.githubusercontent.com/hanjungwoo3/portfolio-etf-index/main/data/hy-spread.json";
+let hyMemo: { at: number; p: Promise<[string, number][] | null> } | null = null;
+function loadHySpread(): Promise<[string, number][] | null> {
+  if (hyMemo && Date.now() - hyMemo.at < 30 * 60_000) return hyMemo.p;
+  const p = fetch(HY_SPREAD_URL, { cache: "no-cache" })
+    .then(r => (r.ok ? r.json() as Promise<{ points?: [string, number][] }> : null))
+    .then(j => (j?.points?.length ? j.points : null))
+    .catch(() => null);
+  hyMemo = { at: Date.now(), p };
+  p.then(v => { if (!v) hyMemo = null; });   // 실패·빈 값은 메모하지 않는다
+  return p;
+}
+async function fetchHySpreadIndex(name: string): Promise<UsIndex | null> {
+  const pts = await loadHySpread();
+  if (!pts || pts.length < 2) return null;
+  const [d, v] = pts[pts.length - 1], prev = pts[pts.length - 2][1];
+  const diff = v - prev;
+  const ms = Date.parse(`${d}T21:00:00Z`);   // 미국 장 마감 무렵
+  return {
+    symbol: HY_SPREAD_SYMBOL, name, price: v, prev, prevClose: prev,
+    diff, pct: diff,   // 카드 큰 % = %p 변화(스프레드 자체 변화율은 읽기 어렵다)
+    currency: "", tradeDate: d, regularMarketTime: Math.floor(ms / 1000), marketState: "",
+  };
+}
+
 // 스파크라인 — 다른 카드와 같은 3개월(약 63거래일). CNN 은 1년치 일별을 준다.
-async function fetchCnnFgChart(): Promise<number[]> {
+async function fetchCnnFgChart(n = 63): Promise<number[]> {
   const d = await loadCnnFg();
   const pts = d?.fear_and_greed_historical?.data ?? [];
-  return pts.map(p => p.y).filter(v => Number.isFinite(v)).slice(-63);
+  return pts.map(p => p.y).filter(v => Number.isFinite(v)).slice(-n);
+}
+
+// 24시간 카드 — CNBC 5일 분봉(timeRange 5D, ~1,500개). 미국 10년 실질금리(^TIPS10) 처럼 야후·토스에 분봉이 없는 심볼
+//   (사용자 2026-11-02). tradeTime "YYYYMMDDHHMM…" 는 뉴욕 시각. 지난 24시간(마지막 봉이 24시간보다 오래면 그 봉에서 끝나는 24시간),
+//   기준선 = 카드 %와 같은 전일 종가(CNBC previous_day_closing).
+//   미국 2년물(^US2Y)도 — 값은 토스지만 토스는 당일 10분봉뿐이라 월요일 아침엔 그래프가 평평했다(2026-11-02). V-KOSPI 는 5D 가 빈 응답.
+//   10·30년물(^TNX·^TYX)도 같은 세션 그래프로 — 야후는 정규장 시간만 줘서 2년물과 모양이 달랐다(사용자 2026-11-02)
+const CNBC_DAY_SYM: Record<string, string> = { "^TIPS10": "US10YTIP", "^US2Y": "US2Y", "^TNX": "US10Y", "^TYX": "US30Y" };
+export const CNBC_DAY_SYMBOLS = Object.keys(CNBC_DAY_SYM);
+function nyLocalToEpoch(y: number, mo: number, d: number, h: number, mi: number): number {
+  const guess = Date.UTC(y, mo - 1, d, h, mi);
+  // 그 시각의 뉴욕 오프셋(서머타임 자동) — 같은 순간을 뉴욕 벽시계로 다시 읽어 차이를 뺀다
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour12: false,
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).formatToParts(new Date(guess)).map(x => [x.type, x.value]));
+  const asNy = Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), Number(p.hour) % 24, Number(p.minute));
+  return guess + (guess - asNy);
+}
+export async function fetchCnbcDay(symbol: string): Promise<DaySeries | null> {
+  if (!CNBC_DAY_SYMBOLS.includes(symbol)) return null;
+  const cs = CNBC_DAY_SYM[symbol];
+  const [bars, quote] = await Promise.all([fetchCnbcBars(symbol, "5D", cs), fetchCnbcIndexPrice(symbol, symbol, cs)]);
+  const pts: [number, number][] = [];
+  for (const b of bars) {
+    const t = b.tradeTime ?? "", c = cnbcNum(b.close);
+    if (t.length < 12 || c == null || !(c > 0)) continue;
+    pts.push([nyLocalToEpoch(+t.slice(0, 4), +t.slice(4, 6), +t.slice(6, 8), +t.slice(8, 10), +t.slice(10, 12)), c]);
+  }
+  pts.sort((a, b) => a[0] - b[0]);
+  if (pts.length < 2) return null;
+  // 세션 반반(사용자 2026-11-02 "세션이나 48시간 적용") — 미국 국채는 선물처럼 뉴욕 18:00 개장 ~ 다음 날 17:00 마감.
+  //   왼쪽 = 직전 세션, 오른쪽 = 지금(최근) 세션. 각 칸 안 = 세션 시작(18:00)부터의 시각(23시간 폭).
+  //   세로선: 직전 세션 마감(실선)·지금 세션 시작(점선). 기준선: 오른쪽 = 전일 종가(카드 % 기준), 왼쪽 = 그 전 세션 마감가.
+  const nyFmt = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", hour12: false, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  const sessOf = (t: number) => {   // 세션 날짜(18:00 뒤는 다음 날) + 세션 안 위치(0~1)
+    const p = Object.fromEntries(nyFmt.formatToParts(new Date(t + 6 * 3600_000)).map(x => [x.type, x.value]));
+    const min = (Number(p.hour) % 24) * 60 + Number(p.minute);   // 18:00 → 0
+    return { key: `${p.year}-${p.month}-${p.day}`, f: Math.min(1, min / (23 * 60)) };
+  };
+  const tagged = pts.map(([t, c]) => ({ c, ...sessOf(t) }));
+  const keys = [...new Set(tagged.map(x => x.key))];
+  const curKey = keys[keys.length - 1], prevKey = keys[keys.length - 2], prev2Key = keys[keys.length - 3];
+  const cur = tagged.filter(x => x.key === curKey), prev = prevKey ? tagged.filter(x => x.key === prevKey) : [];
+  if (cur.length + prev.length < 2) return null;
+  const prev2Last = prev2Key ? tagged.filter(x => x.key === prev2Key).pop()?.c : undefined;
+  // 환율·달러 인덱스 카드와 같은 '밀어 보기'(rollDay) — 오른쪽 끝 = 지금, 직전 세션 마감선·지금 세션 시작선(사용자 2026-11-02
+  //   "달러 환율이나 인덱스처럼"). 고정 반반이면 월요일 아침 오른쪽 칸이 거의 비었다.
+  const nowSess = sessOf(Date.now());
+  const fNow = nowSess.key === curKey ? nowSess.f : 1;
+  const sess: SessionMarks = { open: 0, close: 1, todayOpen: true, todayClose: fNow >= 1, prevOpen: false, prevClose: prev.length > 0 };
+  return rollDay({
+    closes: [...prev.map(x => x.c), ...cur.map(x => x.c)],
+    ...(prev.length ? { breakIdx: prev.length, prevBase: prev2Last ?? prev[0].c } : {}),
+    ...(quote?.prevClose && quote.prevClose > 0 ? { base: quote.prevClose } : {}),
+  }, [...prev.map(x => x.f), ...cur.map(x => x.f)], prev.length, fNow, sess);
+}
+
+// 코스피·코스닥 지수 24시간 — 토스 5분봉(kr-s/KGG01P·QGG01P, 종목과 같은 경로). 야후 ^KS11 은 장이 열려도 한동안 지난 거래일에
+//   머물러 오늘 시가선이 안 나왔다(사용자 2026-11-02 "종가만 있고 시가가 안 나와"). 종목 카드와 같은 어제+오늘 빌더.
+// 국내 정규장 축 08:30~16:00(09:00~15:30 앞뒤 30분) — 지수·ETF·NXT 미상장 종목
+const KR_REGULAR_AXIS: [number, number] = [8 * 60 + 30, 7.5 * 60];
+const KR_INDEX_TOSS: Record<string, string> = { "^KS11": "KGG01P", "^KQ11": "QGG01P" };
+export const KR_INDEX_DAY_SYMBOLS = Object.keys(KR_INDEX_TOSS);
+export async function fetchKrIndexDay(symbol: string): Promise<DaySeries | null> {
+  const code = KR_INDEX_TOSS[symbol];
+  if (!code) return null;
+  const rows = await fetchTossMinuteBars(`kr-s/${code}`, 1);
+  return rows.length ? buildTwoDaySeries(rows, true, KR_REGULAR_AXIS) : null;
 }
 
 // ─── 리튬·니켈 — 시나 금융 (가상 심볼 LITHIUM=F · NICKEL=F) ─────────────
@@ -3943,6 +4300,56 @@ async function fetchSinaMetalChart(symbol: string): Promise<number[]> {
   } catch { return []; }
 }
 
+// 24시간 카드 — 시나 분봉(리튬 = 광저우 5분봉, 니켈 = LME 당일 1분봉), 사용자 2026-10-30 "24시간 적용 안 되는 그래프?".
+//   지난 24시간만(마지막 봉이 24시간보다 오래면 그 봉에서 끝나는 24시간) 가로 위치 = 시각. 기준선 = 전일 정산가·종가(시세 hq 1콜).
+//   세로선(시가·종가)은 없다 — 거래소마다 세션이 여러 토막이라. 시나 시각은 베이징(UTC+8).
+const SINA_METAL_MIN: Record<string, string> = {
+  "LITHIUM=F": "https://stock2.finance.sina.com.cn/futures/api/jsonp.php/x=/InnerFuturesNewService.getFewMinLine?symbol=LC0&type=5",
+  "NICKEL=F": "https://stock2.finance.sina.com.cn/futures/api/jsonp.php/x=/GlobalFuturesService.getGlobalFuturesMinLine?symbol=NID",
+};
+export const SINA_DAY_SYMBOLS = Object.keys(SINA_METAL_MIN);
+/** 시나 분봉 응답 → [시각 ms, 가격]. 내보내는 건 테스트용. */
+export function parseSinaMinLine(text: string): [number, number][] {
+  const body = text.slice(text.indexOf("(") + 1, text.lastIndexOf(")"));
+  const j = JSON.parse(body) as unknown;
+  const out: [number, number][] = [];
+  const bj = (dt: string) => Date.parse(`${dt.replace(" ", "T")}+08:00`);
+  if (Array.isArray(j)) {   // 국내 선물 5분봉: [{ d:"YYYY-MM-DD HH:MM:SS", c }]
+    for (const r of j as { d?: string; c?: string }[]) { const t = bj(r.d ?? ""), c = Number(r.c); if (Number.isFinite(t) && c > 0) out.push([t, c]); }
+  } else {                  // 해외 선물 당일 1분봉: { minLine_1d: [[날짜·HH:MM…|HH:MM, 가격, …, "YYYY-MM-DD HH:MM:SS"]] }
+    for (const r of ((j as { minLine_1d?: unknown[][] }).minLine_1d ?? [])) {
+      const t = bj(String(r[r.length - 1] ?? "")), c = Number(r[1]);
+      if (Number.isFinite(t) && c > 0) out.push([t, c]);
+    }
+  }
+  return out.sort((a, b) => a[0] - b[0]);
+}
+export async function fetchSinaMetalDay(symbol: string): Promise<DaySeries | null> {
+  const url = SINA_METAL_MIN[symbol];
+  if (!url) return null;
+  try {
+    const [rm, quote] = await Promise.all([fetchProxied(url), fetchSinaMetals([{ symbol, name: symbol }])]);
+    if (!rm.ok) return null;
+    // 니켈(LME 당일 1분봉)은 새 날 장이 열리기 전(월요일 아침·휴장)엔 빈 배열 — 마지막으로 받은 봉을 기억해 두고 그걸 그린다
+    //   (여러 날 분봉 엔드포인트는 2024년 값만 준다, 2026-11-02 실측). 아래 창 계산이 마지막 봉에서 끝나는 24시간으로 맞춘다.
+    const KEY = `sina_min_${symbol}`;
+    let pts = parseSinaMinLine(await rm.text());
+    if (pts.length >= 2) { try { localStorage.setItem(KEY, JSON.stringify(pts)); } catch { /* 이번만 */ } }
+    else { try { const c = JSON.parse(localStorage.getItem(KEY) ?? "[]") as [number, number][]; if (Array.isArray(c)) pts = c; } catch { /* 없음 */ } }
+    if (pts.length < 2) return null;
+    // 지난 24시간 — 마지막 봉이 24시간보다 오래면(주말·휴장) 그 마지막 봉에서 끝나는 24시간. 예전엔 창을 '마지막 봉 뒤 24시간'으로
+    //   잡아 점이 하나만 남고 3개월로 떨어졌다(사용자 2026-11-02 월요일 아침).
+    const last = pts[pts.length - 1][0];
+    const end = Date.now() - last > 24 * 3600_000 ? last : Date.now();
+    const start = end - 24 * 3600_000;
+    const win = pts.filter(([t]) => t >= start);
+    if (win.length < 2) return null;
+    const prev = quote[0]?.prev;
+    return { closes: win.map(p => p[1]), xs: win.map(([t]) => (t - start) / (24 * 3600_000)), rolling: true,
+      ...(prev && prev > 0 ? { base: prev } : {}) };
+  } catch { return null; }
+}
+
 // ─── 메모리 현물가 — 머니랜드 DRAM 대시보드 JSON (가상 심볼 *=ML) ─────────────
 //   https://moneyland.co.kr/moneyweb/api/dram_dashboard.json 한 콜에 DRAM 현물지수(2025-06-23=기준)·DDR5/DDR4 일별 이력(~300일)·
 //   RDIMM·GDDR6·NAND 웨이퍼 주간 이력이 다 있다(원 출처 DRAMeXchange — 거기선 이력이 유료라 못 받는다).
@@ -3986,9 +4393,32 @@ async function fetchMemPrices(pairs: { symbol: string; name: string }[]): Promis
   }
   return out;
 }
-async function fetchMemChart(symbol: string): Promise<number[]> {
+async function fetchMemChart(symbol: string, n = 63): Promise<number[]> {
   const s = (await loadMemSeries())?.[MEM_SERIES[symbol]];
-  return (s?.v ?? []).filter(x => x > 0).slice(-63);   // 다른 카드와 같은 3개월(일별 품목 기준 63점)
+  return (s?.v ?? []).filter(x => x > 0).slice(-n);   // 다른 카드와 같은 기간(3개월 = 일별 품목 기준 63점)
+}
+
+// 시간대의 그 시각 시차(초) — 서머타임 경계를 넘는 이틀치 봉을 한 시차로 계산하면 지난 날 봉이 1시간 어긋난다. 시간 단위로 메모.
+const tzOffMemo = new Map<string, number>();
+export function tzOffSec(tz: string, t: number): number {
+  const key = `${tz}|${Math.floor(t / 3600)}`;
+  const hit = tzOffMemo.get(key);
+  if (hit != null) return hit;
+  let v = 0;
+  try {
+    const p = new Intl.DateTimeFormat("en-US", { timeZone: tz, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric" })
+      .formatToParts(new Date(t * 1000)).reduce<Record<string, string>>((a, x) => { a[x.type] = x.value; return a; }, {});
+    v = Math.round((Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour % 24, +p.minute, +p.second) / 1000 - t) / 60) * 60;
+  } catch { /* 모르는 시간대 — 0 */ }
+  if (tzOffMemo.size > 20000) tzOffMemo.clear();
+  tzOffMemo.set(key, v);
+  return v;
+}
+
+// 선물·환율 세션 경계 — 뉴욕 **18:00**(CME·ICE, 환율은 17:00)을 자정으로 미는 시차(초). 예전엔 UTC+2 고정이라 서머타임이 바뀐 주엔
+//   지난 금요일 세션 끝과 이번 세션 시작 사이가 한 시간 더 벌어졌다(사용자 2026-11-02 "선물 현물도 섬머타임 이슈?")
+function futSessOff(sym: string, t: number): number {
+  return tzOffSec("America/New_York", t) + (/=X$/.test(sym) ? 7 : 6) * 3600;
 }
 
 // ─── 미국 종목 24시간(당일) 차트 — 야후 spark 배치 ─────────────
@@ -3997,29 +4427,77 @@ async function fetchMemChart(symbol: string): Promise<number[]> {
 //   includePrePost 면 프리(04:00 ET)~애프터(20:00 ET)까지 들어 있다. 오버나잇(20:00~04:00)은 없다.
 const SPARK_CHUNK = 20;
 //   openIdx = 오늘 정규장 시작(09:30 ET) 첫 봉의 인덱스 — 카드 차트에 '시작가' 표시선(meta.currentTradingPeriod.regular.start).
-export interface DaySpark { closes: number[]; openIdx?: number; closeIdx?: number; prevClose?: number; breakIdx?: number; prevBase?: number }   // prevBase = 어제 칸 기준선(그저께 종가 = 2d 범위의 chartPreviousClose)   // prevClose = 어제 정규장 종가(달러 — closes 와 같은 단위)
+export interface DaySpark { nextBase?: number; markXs?: MarkX[]; rolling?: boolean; closes: number[]; xs?: number[]; openIdx?: number; closeIdx?: number; prevOpenIdx?: number; prevCloseIdx?: number; prevClose?: number; breakIdx?: number; prevBase?: number }   // prevBase = 어제 칸 기준선(그저께 종가 = 2d 범위의 chartPreviousClose)   // prevClose = 어제 정규장 종가(달러 — closes 와 같은 단위)
 export async function fetchYahooSparkDay(symbols: string[]): Promise<Map<string, DaySpark>> {
   const out = new Map<string, DaySpark>();
+  // 선물·환율·달러인덱스(세션이 일요일 저녁에 시작)는 **5일** 범위로 따로 — 2d 면 월요일엔 이번 세션 하나만 와서
+  //   직전 세션(금요일)이 없어 왼쪽 칸 기준선이 오늘 기준선과 같은 높이로 그어졌다(사용자 2026-11-02 "여기도 가로 점선이 동일해").
+  //   받은 뒤 아래에서 마지막 두 세션만 남긴다.
+  const isFutLike = (sym: string) => /=F$/.test(sym) || sym === "DX-Y.NYB" || /=X$/.test(sym);
+  // 지수(^…)도 5일 — 야후 chartPreviousClose 가 지수에선 엉뚱한 날 값이다(^VIX 2d 범위 = 금·월인데 cpc 가 금요일 종가 19.42 →
+  //   왼쪽 기준선이 오늘 기준선과 같은 높이, 사용자 2026-11-02 "vix move 는 가로선이 일치해"). 5일로 받아 잘라낸 날의 마지막 값을 쓴다.
+  const wide = (sym: string) => isFutLike(sym) || sym.startsWith("^");
   const chunks: string[][] = [];
-  for (let i = 0; i < symbols.length; i += SPARK_CHUNK) chunks.push(symbols.slice(i, i + SPARK_CHUNK));
+  for (const grp of [symbols.filter(x => !wide(x)), symbols.filter(wide)])
+    for (let i = 0; i < grp.length; i += SPARK_CHUNK) chunks.push(grp.slice(i, i + SPARK_CHUNK));
   await Promise.all(chunks.map(async c => {
     try {
-      const r = await fetchProxied(`https://query1.finance.yahoo.com/v7/finance/spark?symbols=${encodeURIComponent(c.join(","))}&range=2d&interval=5m&includePrePost=true`);   // 어제+오늘, 토스 카드와 같은 5분봉
-      if (!r.ok) return;
+      // 묶음 하나가 가끔 실패한다(야후 429 등) — 그러면 그 묶음 종목만 세로선 없는 다른 그래프로 그려져
+      //   줄마다 시작 점선이 있다 없다 했다(사용자 지적 2026-10-23). 한 번 더 묻고, 그래도 안 되면 지난번 성공분으로
+      const url = `https://query1.finance.yahoo.com/v7/finance/spark?symbols=${encodeURIComponent(c.join(","))}&range=${wide(c[0]) ? "5d" : "2d"}&interval=5m&includePrePost=true`;   // 어제+오늘, 토스 카드와 같은 5분봉
+      let r = yahooCoolingDown() ? null : await fetchProxied(url).catch(() => null);
+      if (r) noteYahooStatus(r.status);
+      if (r && !r.ok && r.status !== 429) { await new Promise(res => setTimeout(res, 1500)); r = await fetchProxied(url).catch(() => null); }   // 429 면 다시 묻지 않는다
+      if (!r?.ok) {
+        for (const sym of c) { const g = sparkLastGood.get(sym); if (g) out.set(sym, g); }
+        return;
+      }
       const j = await r.json() as { spark?: { result?: { symbol?: string; response?: {
-        timestamp?: number[]; meta?: { currentTradingPeriod?: { regular?: { start?: number; end?: number } }; gmtoffset?: number; previousClose?: number; chartPreviousClose?: number };
+        timestamp?: number[]; meta?: { currentTradingPeriod?: { regular?: { start?: number; end?: number } }; gmtoffset?: number; exchangeTimezoneName?: string; previousClose?: number; chartPreviousClose?: number };
         indicators?: { quote?: { close?: (number | null)[] }[] } }[] }[] } };
       for (const x of j.spark?.result ?? []) {
         const resp = x.response?.[0];
         const ts = resp?.timestamp ?? [], raw = resp?.indicators?.quote?.[0]?.close ?? [];
         const closes: number[] = [], times: number[] = [];
+        let noToday = false, dropLast: number | undefined, trimmedPrev: number | undefined;
         raw.forEach((v, i) => { if (v != null && v > 0) { closes.push(v); times.push(ts[i] ?? 0); } });   // 빈 봉은 시각과 같이 뺀다
         if (!x.symbol || closes.length < 2) continue;
+        // 마지막 두 날만 — 24시간 거래(환율 등)는 2d 범위가 날짜 경계로는 사흘에 걸쳐(10/19 밤·10/20·10/21),
+        //   셋째 날 점이 '오늘' 칸 앞쪽으로 되돌아가 긴 직선이 그어졌다(2026-10-22 USD/KRW 실측).
+        {
+          const off0 = /^\^(K[SQ]|N225|HSI|TWII)|\.(K[SQ]|SS|T|HK)$/.test(x.symbol) ? 9 : isFutLike(x.symbol) ? 2 : -4;
+          const o0 = (t: number) => (off0 === -4 ? tzOffSec("America/New_York", t) : isFutLike(x.symbol ?? "") ? futSessOff(x.symbol ?? "", t) : off0 * 3600);   // 미국·선물은 그날 실제 시차(서머타임)
+          const dk = (t: number) => Math.floor((t + o0(t)) / 86400);
+          // 선물·환율 — 금요일 마감 봉(17:00 ET 정각)이 날짜 경계(UTC+2 자정)를 넘어 **토요일 봉 1개**로 떨어져, 월요일엔 그 1개가
+          //   '직전 세션'이 됐다(달러환율 실측 2026-11-02). 토요일 봉은 버린다.
+          if (isFutLike(x.symbol)) {
+            for (let i = times.length - 1; i >= 0; i--) if (new Date((times[i] + o0(times[i])) * 1000).getUTCDay() === 6) { times.splice(i, 1); closes.splice(i, 1); }
+          }
+          const days = [...new Set(times.map(dk))];
+          if (days.length > 2) {
+            const keepFrom = times.findIndex(t => dk(t) === days[days.length - 2]);
+            if (keepFrom > 0) trimmedPrev = closes[keepFrom - 1];   // 잘라낸 날의 마지막 값 = 남긴 '어제' 칸의 기준(chartPreviousClose 는 범위 맨 앞 기준이라 틀린다)
+            closes.splice(0, keepFrom); times.splice(0, keepFrom);
+          }
+          // 오늘 봉이 아직 없다(평일) — 마지막 하루만 남겨 '어제'로 쓴다. 이틀을 남긴 채 어제로 보면 그저께 끝 → 어제 시작으로
+          //   되돌아가는 사선이 카드를 가로질렀다(지수·금리, 2026-10-23)
+          const nowS0 = Date.now() / 1000;
+          const wd = new Date((nowS0 + o0(nowS0)) * 1000).getUTCDay();
+          if (times.length && dk(nowS0) > dk(times[times.length - 1]) && wd >= 1 && wd <= 5) {
+            noToday = true;
+            const keepFrom = times.findIndex(t => dk(t) === dk(times[times.length - 1]));
+            if (keepFrom > 0) dropLast = closes[keepFrom - 1];   // 잘라낸 날의 마지막 값 = 남긴 하루의 기준(그저께 종가)
+            closes.splice(0, keepFrom); times.splice(0, keepFrom);
+          }
+        }
         // 정규장 시작·종가 봉 — currentTradingPeriod 는 '지금 기준 다음/현재' 세션이라, 장이 끝난 뒤엔
         //   차트의 마지막 날과 날짜가 어긋나 선이 사라졌다. 그래서 하루 중 시각(거래소 현지)만 뽑아 마지막 날에 적용한다.
-        const reg = resp?.meta?.currentTradingPeriod?.regular, gmt = resp?.meta?.gmtoffset ?? 0;
-        const tod = (t: number) => (((t + gmt) % 86400) + 86400) % 86400;   // 거래소 현지 하루 중 초
-        const dayOf = (t: number) => Math.floor((t + gmt) / 86400);
+        const reg = resp?.meta?.currentTradingPeriod?.regular, gmt0 = resp?.meta?.gmtoffset ?? 0, tzName = resp?.meta?.exchangeTimezoneName;
+        // 거래소 시차는 **봉마다 그날 값** — gmtoffset 은 '지금' 시차라, 서머타임이 끝난 주엔 지난 금요일 봉이 1시간 어긋나
+        //   어제 그래프가 종가 세로선 앞에서 끊겼다(VIX, 사용자 2026-11-02)
+        const gmt = (t: number) => (tzName ? tzOffSec(tzName, t) : gmt0);
+        const tod = (t: number) => (((t + gmt(t)) % 86400) + 86400) % 86400;   // 거래소 현지 하루 중 초
+        const dayOf = (t: number) => Math.floor((t + gmt(t)) / 86400);
         const lastDay = times.length ? dayOf(times[times.length - 1]) : 0;
         // 한국은 야후가 마감을 아직 15:00 으로 준다(실제 15:30 — 2026-10-21 실측). 한국 지수·종목은 15:30 으로 고정하고,
         //   15:30 봉(종가 단일가 체결)까지가 정규장이라 그 봉을 종가로 친다(<= 로).
@@ -4032,20 +4510,93 @@ export async function fetchYahooSparkDay(symbols: string[]): Promise<Map<string,
         const lastTod = times.length ? tod(times[times.length - 1]) : 0;
         const ci = eTod != null && eTod > (sTod ?? 0) && lastTod >= eTod - 300
           ? times.map((t, i) => inLast(i) && tod(t) < eTod).lastIndexOf(true) : -1;
-        const pc = resp?.meta?.previousClose ?? resp?.meta?.chartPreviousClose;
-        const cpc = resp?.meta?.previousClose ? resp?.meta?.chartPreviousClose : undefined;   // previousClose 없으면 cpc 가 어제 종가라 어제 기준으론 못 쓴다
+        // 기준선은 **차트 자료로** 정한다 — 야후 previousClose 는 미국 프리마켓 동안 그저께 종가로 남아 있다
+        //   (2026-10-21 LRCX: previousClose = chartPreviousClose = 272.20(10/17), 실제 어제 10/20 종가 263.45).
+        //   오늘 기준 = 어제 구간의 정규장 마지막 봉, 어제 기준 = chartPreviousClose(2d 범위 첫날 직전 종가).
+        const metaPc = resp?.meta?.previousClose ?? resp?.meta?.chartPreviousClose;
+        const cpc = resp?.meta?.chartPreviousClose;
         // 날짜(뉴욕)가 바뀌는 첫 봉 — 어제와 선을 잇지 않는다
         //   아시아 지수·종목은 한국 날짜로 — 뉴욕 날짜면 아시아 장중(한국 13:00)에 끊긴다
         //   선물(=F)은 거래일이 뉴욕 18:00 에 시작 — 그 시각을 날짜 경계로(UTC+2 로 보면 18:00 ET 가 자정)
-        const off = /^\^(K[SQ]|N225|HSI)|\.(K[SQ]|SS|T|HK)$/.test(x.symbol) ? 9 : /=F$/.test(x.symbol) ? 2 : -4;   // 아시아 장(한국·일본·홍콩·상해)은 한국 날짜로
-        const etDay = (t: number) => new Date((t + off * 3600) * 1000).toISOString().slice(0, 10);   // 대략 EDT/KST(일자 경계만 필요)
-        const bi = times.findIndex((t, i) => i > 0 && etDay(t) !== etDay(times[i - 1]));
-        out.set(x.symbol, { closes, openIdx: oi > 0 ? oi : undefined, closeIdx: ci > 0 ? ci : undefined, prevClose: pc && pc > 0 ? pc : undefined, breakIdx: bi > 0 ? bi : undefined, prevBase: bi > 0 && cpc && cpc > 0 ? cpc : undefined });   // 0 이면(프리 없음) 왼쪽 끝이라 표시 안 함
+        //   달러 인덱스(DX-Y.NYB)도 ICE 선물식 세션(뉴욕 18:00~17:00)이라 선물과 같이 — 자정으로 자르면 월요일 아침엔 일요일 밤
+        //   몇 분짜리 칸만 남아 그래프가 비었다(사용자 2026-11-02)
+        //   환율(=X)도 — 외환은 뉴욕 일 17:00 개장 ~ 금 17:00, 하루 경계 17:00(서머타임 끝난 지금 UTC+2 자정과 같다). 월요일 아침 달러환율·엔화 그래프가 비었다
+        const futLike = /=F$/.test(x.symbol) || x.symbol === "DX-Y.NYB" || /=X$/.test(x.symbol);
+        const off = /^\^(K[SQ]|N225|HSI|TWII)|\.(K[SQ]|SS|T|HK)$/.test(x.symbol) ? 9 : futLike ? 2 : -4;   // 아시아 장(한국·일본·홍콩·상해)은 한국 날짜로
+        const offS = (t: number) => (off === -4 ? tzOffSec("America/New_York", t) : futLike ? futSessOff(x.symbol ?? "", t) : off * 3600);   // 미국·선물은 그날 실제 시차(EDT/EST)
+        const etDay = (t: number) => new Date((t + offS(t)) * 1000).toISOString().slice(0, 10);
+        let bi = times.findIndex((t, i) => i > 0 && etDay(t) !== etDay(times[i - 1]));
+        // 오늘 봉이 아직 없다(프리장 거래가 드문 종목 — 디지털리얼티·에퀴닉스 등, 지수) — 그대로면 '어제 하루 전체' 축으로 그려져
+        //   다른 카드(지금 기준 24시간)와 가로 위치·세로선 자리가 어긋났다(사용자 지적 2026-10-23).
+        //   평일이면 남긴 하루(위에서 자름)를 '어제'로 보고 오늘 칸은 비운다 → 같은 24시간 축. (주말엔 그대로 — 금요일 하루 전체)
+        if (noToday) bi = times.length;
+        // 어제 칸 끝을 **종가 세로선까지** 잇는다 — 야후 분봉이 마감보다 일찍 끝나는 지수(VIX 는 16:00 봉이 끝인데 마감 16:15)는
+        //   선이 세로선 앞에서 끊겼다(사용자 2026-11-02 "어제 그래프가 종가까지 이어지지 않아?"). 마지막 값으로 마감 시각에 점 하나.
+        if (bi > 0 && sTod != null && eTod != null && eTod > sTod) {
+          const lt = times[bi - 1], gap = eTod - tod(lt);
+          if (gap >= 60 && gap <= 3600) { times.splice(bi, 0, lt + gap); closes.splice(bi, 0, closes[bi - 1]); bi++; }
+        }
+        // 어제 구간의 정규장 시작·종가 봉(세로선 — 사용자 요청) + 어제 정규장 종가 = 오늘 기준선
+        const inPrev = (i: number) => bi > 0 && i < bi;
+        const poi = sTod != null ? times.findIndex((t, i) => inPrev(i) && tod(t) >= sTod) : -1;
+        const pci = eTod != null && eTod > (sTod ?? 0) ? times.map((t, i) => inPrev(i) && tod(t) < eTod).lastIndexOf(true) : -1;
+        const pc = pci >= 0 ? closes[pci] : metaPc;
+        // 가로축 — 어제 50%·오늘 50% 고정, 각 칸 안은 시간 축(사용자 요청: 봉 개수로 나누면 어제가 78% 를 차지했다).
+        //   하루 안 시각은 날짜 경계(off)로 민 시각 — 미국 주식 04:00~20:00, 한국 09:00~15:30, 선물 18:00~17:00
+        const todS = (t: number) => (((t + offS(t)) % 86400) + 86400) % 86400;
+        const span = bi > 0 ? times.slice(0, bi) : times;   // 어제(완결된 하루)의 시각 폭을 기준으로
+        // 미국 주식·ETF 는 04:00~20:00(뉴욕) 고정 — 자료로 정하면 프리·애프터 거래가 드문 종목(에퀴닉스는 09:30~19:45)만
+        //   축이 좁아져 다른 카드와 세로선 자리가 어긋났다(사용자 지적 2026-10-23). 지수·선물·아시아는 자료대로.
+        const usEq = off === -4 && /^[A-Z][A-Z.-]{0,5}$/.test(x.symbol);
+        let lo = usEq ? 4 * 3600 : Math.min(...span.map(todS), ...times.slice(Math.max(0, bi)).map(todS));
+        let hi = usEq ? 20 * 3600 : Math.max(...span.map(todS), ...times.slice(Math.max(0, bi)).map(todS));
+        // 미국 지수·금리·VIX·MOVE 처럼 정규장 동안만 값이 있는 지수 — 자료 폭 = 장 시간이라 시가·종가 세로선이 칸 양 끝에 붙어
+        //   안 보였다(사용자 2026-11-02 "미국채, vix, move 도"). 앞뒤로 30분씩 여유를 둬 선이 칸 안에 선다.
+        if (off === -4 && !usEq && reg?.start != null && sTod != null && eTod != null && eTod > sTod) {
+          lo = Math.min(lo, todS(reg.start) - 1800);
+          hi = Math.max(hi, todS(reg.start - sTod + eTod) + 1800);
+        }
+        const fr = (t: number) => (hi > lo ? (todS(t) - lo) / (hi - lo) : 0);
+        const nowS = Date.now() / 1000;
+        const lastIsToday = times.length > 0 && etDay(nowS) === etDay(times[times.length - 1]);
+        const fNow = times.length && (noToday || lastIsToday) ? Math.min(1, Math.max(0, fr(nowS))) : 1;
+        // 세로선 — 위치는 거래소 시간표(regular 시작·마감의 하루 중 시각), 봉 번호와 무관. 그릴지: 오늘 = 개장 뒤 봉이 있고 시각이 지났는지,
+        //   지난 날 = 그날 정규장 봉이 있었는지. 프리장 없는 지수도(개장 봉이 첫 봉) 이제 시작선이 선다.
+        let sess: SessionMarks | undefined;
+        if (reg?.start != null && sTod != null) {
+          const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
+          const hasClose = eTod != null && eTod > sTod;
+          sess = {
+            open: clamp01(fr(reg.start)), close: hasClose ? clamp01(fr(reg.start - sTod + eTod!)) : undefined,
+            todayOpen: !noToday && oi >= 0 && (!lastIsToday || tod(nowS) >= sTod),
+            todayClose: !noToday && hasClose && oi >= 0 && (lastIsToday ? tod(nowS) >= eTod! : lastTod >= eTod! - 300),
+            prevOpen: poi >= 0, prevClose: hasClose && pci >= 0,
+          };
+        }
+        // 지수·원자재 선물(=F) — CME 세션 = 뉴욕 18:00 시작 ~ 다음 날 17:00 마감. 날짜 경계(off=2)로 자른 하루가 곧 한 세션이라
+        //   세로선은 세션 시작(칸 맨 앞)·직전 세션 마감(어제 칸 마지막 봉 끝), 기준선 = 직전 세션 마감가 = 카드 %(토스 basePrice) 기준.
+        //   예전엔 야후 regular(주식 정규장 시각)로 그어 선도 기준선도 카드 %와 안 맞았다(사용자 2026-11-02).
+        let prevCloseBase = pc;
+        if (futLike && bi > 0 && !noToday) {
+          prevCloseBase = closes[bi - 1];
+          const step = hi > lo ? 300 / (hi - lo) : 0;
+          sess = { open: 0, close: Math.min(1, fr(times[bi - 1]) + step),
+            todayOpen: true, todayClose: !lastIsToday, prevOpen: false, prevClose: true };
+        }
+        out.set(x.symbol, rollDay({
+          closes, openIdx: oi > 0 && !noToday ? oi : undefined, closeIdx: ci > 0 && !noToday ? ci : undefined, prevClose: prevCloseBase && prevCloseBase > 0 ? prevCloseBase : undefined,
+          breakIdx: bi > 0 ? bi : undefined, prevBase: noToday ? dropLast : bi > 0 ? (trimmedPrev ?? (cpc && cpc > 0 ? cpc : undefined)) : undefined,
+          // 미국 주식 — 오늘 정규장이 끝났으면 그 종가(카드 % 기준, 토스식)를 점선으로 오늘 종가 세로선부터(토스 빌더와 같은 규칙)
+          nextBase: usEq && !noToday && ci > 0 && sess?.todayClose ? closes[ci] : undefined,
+          prevOpenIdx: poi > 0 ? poi : undefined, prevCloseIdx: pci > 0 ? pci : undefined,
+        }, times.map(fr), bi > 0 ? bi : 0, fNow, sess));
       }
     } catch { /* 이 묶음은 3개월 차트로 */ }
   }));
+  for (const [k, v] of out) sparkLastGood.set(k, v);
   return out;
 }
+const sparkLastGood = new Map<string, DaySpark>();   // 묶음 실패 때 대신 쓸 지난번 성공분(종목별)
 
 // ─── 한국 종목·ETF 24시간(당일) 차트 — 토스 10분봉 ─────────────
 //   토스 c-chart 분봉은 NXT 프리(08:00)~애프터(20:00)까지 들어 있고 봉마다 base(= 어제 종가)가 붙는다.
@@ -4055,7 +4606,11 @@ export async function fetchKrDayCandles(code: string): Promise<KrDayCandles | nu
   try {
     // 5분봉 이틀(어제+오늘 = 288개) — 1콜. 어제 하루를 왼쪽 절반에 이어 붙인다(buildTwoDaySeries)
     const cs = await fetchTossMinuteBars(`kr-s/A${code}`, 1);
-    return cs.length ? buildTwoDaySeries(cs, true) : null;
+    // 이틀 내내 체결 0(거래정지 등) — 토스는 빈 봉을 채워 보낸다. 24시간 대신 3개월 그래프로(정지 책갈피는 시장경보 목록이 단다)
+    if (cs.length && !cs.some(c => (c.volume ?? 1) > 0)) return { closes: [], halted: true };
+    // NXT 거래가 없는 종목(ETF·NXT 미상장)은 정규장 축 — 체결 봉이 09:00~15:30 밖에 하나도 없으면
+    const ext = cs.some(c => (c.volume ?? 1) > 0 && (c.dt.slice(11, 16) < "09:00" || c.dt.slice(11, 16) > "15:35"));
+    return cs.length ? buildTwoDaySeries(cs, true, ext ? undefined : KR_REGULAR_AXIS) : null;
   } catch { return null; }
 }
 
@@ -4091,6 +4646,38 @@ export async function fetchTossExchangeRate(): Promise<UsIndex | null> {
 //     regularPrice/regularPct 는 Yahoo 값 유지 → 장 마감 후 "마감가 책갈피" 표시 가능
 //   - 토스 실패 시 Yahoo 전체 entry 가 그대로 남아 자동 fallback
 // 라우팅: .KS 6자리(KODEX 등)·KOSPI/KOSDAQ/필반·미국지수/선물·미국ETF → 토스 현재가
+// 일본 등 해외 종목 시세 — 네이버 해외주식 polling(여러 종목 1콜, 사용자 2026-11-04 "m.stock.naver.com worldstock").
+//   도쿄 15분 지연 — 야후·TradingView(비로그인) 20분보다 빠르고, marketStatus(OPEN/CLOSE)·체결 시각(localTradedAt)을 직접 준다.
+//   (토스는 일본 종목이 없고, 한국투자 해외 현재가도 장 초반 거래량 0 = 지연. 실측 2026-11-04 09:12~09:18)
+//   polling.finance.naver.com 은 프록시 허용 목록에 이미 있다. 코드는 로이터 코드(285A.T·8035.T) 그대로.
+export interface NaverWorldQuote { code: string; name: string; price: number; prev: number; pct: number; tradedAt: number; open: boolean; date: string }
+export async function fetchNaverWorld(codes: string[], kind: "stock" | "index" = "stock"): Promise<Map<string, NaverWorldQuote>> {
+  const out = new Map<string, NaverWorldQuote>();
+  const num = (v: unknown) => Number(String(v ?? "").replace(/,/g, ""));
+  for (let i = 0; i < codes.length; i += 20) {
+    const chunk = codes.slice(i, i + 20);
+    try {
+      const r = await fetchProxied(`https://polling.finance.naver.com/api/realtime/worldstock/${kind}/${chunk.map(encodeURIComponent).join(",")}`);
+      if (!r.ok) continue;
+      const j = await r.json() as { datas?: { reutersCode?: string; stockName?: string; indexName?: string; closePrice?: string; compareToPreviousClosePrice?: string; fluctuationsRatio?: string; localTradedAt?: string; marketStatus?: string }[] };
+      for (const d of j.datas ?? []) {
+        const price = num(d.closePrice), chg = num(d.compareToPreviousClosePrice);
+        if (!d.reutersCode || !(price > 0)) continue;
+        const ms = d.localTradedAt ? Date.parse(d.localTradedAt) : NaN;
+        out.set(d.reutersCode, {
+          code: d.reutersCode, name: d.stockName ?? d.indexName ?? d.reutersCode, price, prev: price - chg, pct: num(d.fluctuationsRatio),
+          tradedAt: Number.isFinite(ms) ? Math.floor(ms / 1000) : 0, open: d.marketStatus === "OPEN",
+          date: (d.localTradedAt ?? "").slice(0, 10),   // 현지 날짜(+09:00 등 현지 오프셋이 붙어 온다)
+        });
+      }
+    } catch { /* 한 묶음 실패는 야후 값으로 */ }
+  }
+  return out;
+}
+const isNaverWorldSym = (s: string) => /^[0-9A-Z]{4}\.T$/.test(s);   // 도쿄 상장(8035.T·285A.T) — 다른 거래소는 아직 야후
+// 지수 — 야후 심볼 → 네이버 로이터 코드(사용자 2026-11-04 "닛케이도 네이버로", 15분 지연·장 상태 포함)
+const NAVER_WORLD_INDEX: Record<string, string> = { "^N225": ".N225" };
+
 export async function fetchYahooBatch(
   pairs: { symbol: string; name: string }[]
 ): Promise<Map<string, UsIndex>> {
@@ -4102,8 +4689,13 @@ export async function fetchYahooBatch(
     .map(p => ({ ...p, code: TOSS_US_STOCK_CODE[p.symbol] }));
   const investItems = pairs.filter(p => isCnbcIndex(p.symbol));
   const cnnFg = pairs.find(p => p.symbol === CNN_FG_SYMBOL);
+  const hySp = pairs.find(p => p.symbol === HY_SPREAD_SYMBOL);
+  const jpItems = pairs.filter(p => isNaverWorldSym(p.symbol));
+  const jpIdxItems = pairs.filter(p => NAVER_WORLD_INDEX[p.symbol]);
 
-  const [ksMap, overviewMap, usMap, investResults, yahooResults, cnnFgIdx, sinaMetals, memPrices] = await Promise.all([
+  const jpPromise = jpItems.length ? fetchNaverWorld(jpItems.map(p => p.symbol)).catch(() => new Map<string, NaverWorldQuote>()) : Promise.resolve(new Map<string, NaverWorldQuote>());
+  const jpIdxPromise = jpIdxItems.length ? fetchNaverWorld(jpIdxItems.map(p => NAVER_WORLD_INDEX[p.symbol]), "index").catch(() => new Map<string, NaverWorldQuote>()) : Promise.resolve(new Map<string, NaverWorldQuote>());
+  const [ksMap, overviewMap, usMap, investResults, yahooResults, cnnFgIdx, sinaMetals, memPrices, hySpIdx] = await Promise.all([
     ksItems.length > 0
       ? fetchTossPrices(ksItems.map(p => ksRegex.exec(p.symbol)![1]))
           .then(prices => {
@@ -4135,10 +4727,11 @@ export async function fetchYahooBatch(
     fetchTossUsIndexMap(tossUsItems),
     Promise.all(investItems.map(p => fetchCnbcIndexPrice(p.symbol, p.name))),
     // 모든 심볼 Yahoo 베이스 — v7 배치(~2콜). marketState/prevClose + 토스 실패 시 fallback
-    fetchYahooBatchQuote(pairs.filter(p => p.symbol !== CNN_FG_SYMBOL && !isSinaMetal(p.symbol) && !isMemPrice(p.symbol))),   // 가상 심볼 — 야후엔 없다
+    fetchYahooBatchQuote(pairs.filter(p => p.symbol !== CNN_FG_SYMBOL && p.symbol !== HY_SPREAD_SYMBOL && !isSinaMetal(p.symbol) && !isMemPrice(p.symbol))),   // 가상 심볼 — 야후엔 없다
     cnnFg ? fetchCnnFgIndex(cnnFg.name) : Promise.resolve(null),
     fetchSinaMetals(pairs),
     fetchMemPrices(pairs),
+    hySp ? fetchHySpreadIndex(hySp.name) : Promise.resolve(null),
   ]);
 
   // 1) Yahoo 결과를 베이스로
@@ -4200,8 +4793,20 @@ export async function fetchYahooBatch(
   }
   for (const r of investResults) { if (r) applyToss(r.symbol, r); }
   if (cnnFgIdx) applyToss(cnnFgIdx.symbol, cnnFgIdx);
+  if (hySpIdx) applyToss(hySpIdx.symbol, hySpIdx);
   for (const m of sinaMetals) applyToss(m.symbol, m);
   for (const m of memPrices) applyToss(m.symbol, m);
+  // 도쿄 상장 — 네이버(15분 지연, 장 상태 포함)로 현재가·등락률·체결 시각을 덮는다. 오늘 체결이 아직 없으면 체결 시각이 지난 거래일이라
+  //   카드 흐림(정체 판정)이 그대로 걸린다(야후 20분 지연·휴장 다음 날 09시에 지난 값이 밝게 뜨던 문제, 2026-11-04)
+  const jpMap = await jpPromise, jpIdxMap = await jpIdxPromise;
+  for (const p of [...jpItems, ...jpIdxItems]) {
+    const n = jpMap.get(p.symbol) ?? jpIdxMap.get(NAVER_WORLD_INDEX[p.symbol] ?? "");
+    if (!n) continue;
+    applyToss(p.symbol, {
+      symbol: p.symbol, name: p.name, price: n.price, prev: n.prev, prevClose: n.prev, diff: n.price - n.prev, pct: n.pct,
+      currency: NAVER_WORLD_INDEX[p.symbol] ? undefined : "JPY", tradeDate: n.date, freshTime: n.tradedAt || undefined, regularMarketTime: n.tradedAt || undefined, marketState: "",
+    });
+  }
 
   return merged;
 }
@@ -4807,15 +5412,15 @@ export type HeatmapRegion = "kr" | "us";
 interface HeatmapMeta { label: string; region: HeatmapRegion; symbolset: string | null; tvDs: string; sectorFilter?: string }
 const HEATMAP_META: Record<HeatmapSource, HeatmapMeta> = {
   kospi200:  { label: "KODEX 200",   region: "kr", symbolset: "SYML:KRX;KOSPI200",  tvDs: "KOSPI200" },
-  kospi:     { label: "코스피 전체",  region: "kr", symbolset: "SYML:KRX;KOSPI",     tvDs: "KOSPI" },
+  kospi:     { label: "코스피",  region: "kr", symbolset: "SYML:KRX;KOSPI",     tvDs: "KOSPI" },
   kosdaq150: { label: "KODEX 코스닥150", region: "kr", symbolset: "SYML:KRX;KOSDAQ150", tvDs: "KOSDAQ150" },
-  kosdaq:    { label: "코스닥 전체",  region: "kr", symbolset: "SYML:KRX;KOSDAQ",    tvDs: "KOSDAQ" },
-  all:       { label: "전체(한국)",   region: "kr", symbolset: null,                 tvDs: "allKR" },
+  kosdaq:    { label: "코스닥",  region: "kr", symbolset: "SYML:KRX;KOSDAQ",    tvDs: "KOSDAQ" },
+  all:       { label: "한국 전체",   region: "kr", symbolset: null,                 tvDs: "allKR" },
   // 코리아 밸류업 — symbolset 미지원. 네이버 편입종목 100코드를 런타임 tickers 로 조회(fetchKrHeatmap 분기).
   kr_valueup:{ label: "코리아 밸류업", region: "kr", symbolset: null,                 tvDs: "allKR" },
   us_sp500:    { label: "S&P 500",       region: "us", symbolset: "SYML:SP;SPX",       tvDs: "SPX500" },
   us_ndx:      { label: "나스닥 100",     region: "us", symbolset: "SYML:NASDAQ;NDX",   tvDs: "NASDAQ100" },
-  us_nasdaq:   { label: "나스닥 전체",    region: "us", symbolset: "SYML:NASDAQ;IXIC",  tvDs: "allNASDAQ" },
+  us_nasdaq:   { label: "나스닥",    region: "us", symbolset: "SYML:NASDAQ;IXIC",  tvDs: "allNASDAQ" },
   us_dow:      { label: "다우 30",        region: "us", symbolset: "SYML:DJ;DJI",       tvDs: "DJDJI" },
   us_dowcomp:  { label: "다우 컴포짓",    region: "us", symbolset: "SYML:DJ;DJA",       tvDs: "DJDJA" },
   us_dowtrans: { label: "다우 운송",      region: "us", symbolset: "SYML:DJ;DJT",       tvDs: "DJDJT" },
@@ -4824,7 +5429,7 @@ const HEATMAP_META: Record<HeatmapSource, HeatmapMeta> = {
   us_r1000:    { label: "러셀 1000",      region: "us", symbolset: "SYML:TVC;RUI",      tvDs: "RUSSELL1000" },
   us_r2000:    { label: "러셀 2000",      region: "us", symbolset: "SYML:TVC;RUT",      tvDs: "RUSSELL2000" },
   us_r3000:    { label: "러셀 3000",      region: "us", symbolset: "SYML:TVC;RUA",      tvDs: "RUSSELL3000" },
-  us_all:      { label: "전체(미국)",     region: "us", symbolset: null,                tvDs: "allUSA" },
+  us_all:      { label: "미국 전체",     region: "us", symbolset: null,                tvDs: "allUSA" },
   // 미국 전자기술(반도체·IT HW) — SK하이닉스 ADR(SKHY)·TSM 등 포함. sector 필터.
   us_tech:     { label: "미국 전자기술",   region: "us", symbolset: null,                tvDs: "allUSA", sectorFilter: "Electronic Technology" },
 };
@@ -4863,6 +5468,19 @@ export async function fetchKrHeatmap(source: HeatmapSource, limit = 500): Promis
   }
   const rows = Array.isArray(j.data) ? j.data : [];
   return mapHeatRows(rows);
+}
+
+// 웹은 서버 수집본(크롤러 live.js 가 10분마다 19개 소스 전부, lib/liveServer) 먼저 — 없으면 직접 조회. 앱은 직접(30초 폴링 그대로).
+//   서버본은 소스별 상한(SOURCE_LIMIT 과 같은 값)까지 담겨 있다.
+export interface HeatmapResult { items: HeatmapItem[]; fetchedAt: number; server: boolean }
+//   ver = 서버 갱신 시각(index.json) — 주면 그 판을 받는다(같은 판은 브라우저 캐시).
+export async function fetchHeatmapPreferServer(source: HeatmapSource, limit = 500, ver?: number): Promise<HeatmapResult> {
+  if (preferServer()) {
+    const live = await fetchLive<{ fetchedAt: number; rows?: unknown[][] }>(`heatmap/${source}`, ver);
+    if (live && Array.isArray(live.rows) && live.rows.length > 0)
+      return { items: mapHeatRows(live.rows.map(d => ({ s: "", d }))).slice(0, limit), fetchedAt: live.fetchedAt, server: true };
+  }
+  return { items: await fetchKrHeatmap(source, limit), fetchedAt: Date.now(), server: false };
 }
 
 // ─── 코리아 밸류업 지수 (네이버 KVALUE) ─── 지수탭 카드용. Yahoo 미제공 → 네이버 m.stock 무인증.
@@ -4934,13 +5552,58 @@ export async function fetchHlXyzPerps(): Promise<Map<string, HlPerp>> {
   } catch { /* 네트워크 실패 시 빈 맵 */ }
   return out;
 }
-// 스파크라인용 — 최근 24시간 15분봉 종가. coin 은 "xyz:SKHY" 처럼 프리픽스 포함.
-// 24h 카드용 **어제+오늘** — 무기한선물은 끝없이 거래돼 '하루'가 없다. 그래서 최근 48시간을 반으로:
-//   왼쪽 = 48~24시간 전, 오른쪽 = 최근 24시간(시간 축). 기준선 = 각 반쪽의 시작 가격 — 오른쪽 기준은 24시간 전 가격이라
-//   카드 %(prevDayPx 대비)와 같은 기준이다.
-export async function fetchHlPerpTwoDay(coin: string): Promise<DaySeries | null> {
+// coin 은 "xyz:SKHY" 처럼 프리픽스 포함.
+// ─── 하이퍼리퀴드 무기한선물 '세션' 그래프 — 다른 선물 카드처럼(사용자 2026-11-02 "48시간 말고 세션으로") ───
+//   세션 = **매일 한국 장 마감 시각(15:30 KST) ~ 다음 날 15:30**(24시간, 주말도). 따라가는 종목이 삼성전자·SK하이닉스라 한국 장 마감이 하루의 경계다.
+//   · 한국 장중(09:00~15:30) — 기준 = 전 거래일 15:30 가격 → 카드 % 가 그 종목의 오늘 등락과 같은 뜻
+//   · 장 마감 뒤·밤 — 기준 = 오늘 15:30 가격 → 카드 % = **한국 장 마감 뒤 시간외 움직임**(이 카드의 쓰임새). 주말은 그날 15:30 기준
+//   그림은 rollDay(다른 선물과 같은 굴러가는 창: 직전 세션 끝 + 지금 세션), 세로선 = 세션 경계(한국 15:30) 하나.
+const KR_CLOSE_MS = (15 * 60 + 30) * 60_000;
+// 매일 15:30 KST 경계(주말 포함) — 24시간 거래라 세션도 늘 24시간. 평일만 경계로 잡으면 주말을 낀 세션이 72시간이 돼
+//   '24시간 그래프'가 아니게 됐다(사용자 2026-11-02 "24시간 그래프인데?")
+function krCloseSessions(now: number): { s0: number; s1: number; s2: number } {
+  const at = (d: number) => d * 86400_000 + KR_CLOSE_MS - 9 * 3600_000;
+  let d = Math.floor((now + 9 * 3600_000) / 86400_000);
+  if (at(d) > now) d--;
+  return { s0: at(d - 1), s1: at(d), s2: at(d + 1) };
+}
+export interface HlPerpSession extends DaySeries { sessionBase: number; sessionStart: number }
+export async function fetchHlPerpSession(coin: string): Promise<HlPerpSession | null> {
   try {
-    const end = Date.now(), start = end - 48 * 3600_000, mid = end - 24 * 3600_000;
+    const now = Date.now();
+    const { s0, s1, s2 } = krCloseSessions(now);
+    const STEP = 5 * 60_000;
+    const resp = await fetch("https://api.hyperliquid.xyz/info", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "candleSnapshot", req: { coin, interval: "5m", startTime: s0 - STEP, endTime: now } }),
+    });
+    if (!resp.ok) return null;
+    const all = (await resp.json() as { t?: number; c?: string }[]).flatMap(k => (k.t && Number(k.c) > 0 ? [{ t: k.t, c: Number(k.c) }] : []));
+    // 봉 t = 시작 시각 → 끝 시각(t+5분)으로 세션을 가른다. 세션 경계 직전 봉의 종가 = 그 세션 기준가
+    const before = (b: number) => { let v: number | undefined; for (const k of all) if (k.t + STEP <= b) v = k.c; return v; };
+    const prevBase = before(s0), base = before(s1);
+    const arr = all.filter(k => k.t + STEP > s0);
+    if (arr.length < 2 || !base) return null;
+    const bi = arr.findIndex(k => k.t + STEP > s1);
+    const fr = arr.map(k => { const e = k.t + STEP; return e <= s1 ? (e - s0) / (s1 - s0) : (e - s1) / (s2 - s1); });
+    const fNow = Math.min(1, (now - s1) / (s2 - s1));
+    const r = rollDay({ closes: arr.map(k => k.c), breakIdx: bi > 0 ? bi : undefined }, fr, bi > 0 ? bi : 0, fNow);
+    // 세로선 위치 공식은 rollDay 와 같다.
+    const full = fNow >= 1, start = full ? 1 + ROLL_GAP : fNow, W = full ? 1 : 1 + ROLL_GAP;
+    const marks: MarkX[] = [];
+    const put = (g: number, close?: boolean) => { const x = (g - start) / W; if (x > 0.002 && x <= 1 + 1e-9) marks.push({ x: Math.min(1, x), ...(close ? { close: true } : {}) }); };
+    // 세로선은 **세션 경계 하나**(직전 세션 끝 = 한국 15:30 마감 = 지금 % 기준) — 세션으로 바꿨으니 09:00 선은 뺐다(사용자 2026-11-02 "선이 하나만 있어야")
+    put(1, true);
+    return { ...r, markXs: marks, base, ...(prevBase ? { prevBase } : {}), sessionBase: base, sessionStart: s1 };
+  } catch { return null; }
+}
+
+export async function fetchHlPerpTwoDay(coin: string): Promise<DaySeries | null> {
+  // 48시간 반반(사용자 2026-11-02 "24시간인 경우는 48시간 그래프 50%씩") — 왼쪽 = 48~24시간 전(기준 = 48시간 전 가격),
+  //   오른쪽 = 최근 24시간(기준 = 24시간 전 가격 = 카드 %(prevDayPx) 기준). 무기한선물은 '하루'가 없어 24시간으로 자른다.
+  //   주말이 끼어도 그 전 평일 장이 왼쪽에 보인다. 5분봉 576개 = 1콜(상한 5000).
+  try {
+    const end = Date.now(), mid = end - 24 * 3600_000, start = end - 48 * 3600_000;
     const resp = await fetch("https://api.hyperliquid.xyz/info", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ type: "candleSnapshot", req: { coin, interval: "5m", startTime: start, endTime: end } }),
@@ -4949,21 +5612,37 @@ export async function fetchHlPerpTwoDay(coin: string): Promise<DaySeries | null>
     const arr = (await resp.json() as { t?: number; c?: string }[]).flatMap(k => (k.t && Number(k.c) > 0 ? [{ t: k.t, c: Number(k.c) }] : []));
     if (arr.length < 2) return null;
     const bi = arr.findIndex(k => k.t >= mid);
-    const xs = arr.map(k => (k.t < mid ? ((k.t - start) / (24 * 3600_000)) * TWO_DAY_HALF : twoDayTodayX((k.t - mid) / (24 * 3600_000))));
+    // 세로선 = 한국 정규장 09:00 시가·15:30 종가(평일) — 따라가는 종목이 삼성전자·SK하이닉스라 다른 국내 카드와 같은 모양으로,
+    //   한국장 동안과 장 밖 움직임이 갈라 보이게(사용자 2026-11-02 "24시간 선물은 24시간 그래프 안 돼?")
+    const markXs: MarkX[] = [];
+    const kstDay0 = Math.floor((start + 9 * 3600_000) / 86400_000);
+    for (let d = kstDay0; d <= kstDay0 + 2; d++) {
+      const dow = new Date(d * 86400_000).getUTCDay();
+      if (dow === 0 || dow === 6) continue;
+      for (const [min, close] of [[9 * 60, false], [15 * 60 + 30, true]] as const) {
+        const t = d * 86400_000 + min * 60_000 - 9 * 3600_000;
+        if (t > start && t <= end) markXs.push({ x: (t - start) / (48 * 3600_000), ...(close ? { close: true } : {}) });
+      }
+    }
+    // 가운데 = 최근 24시간 시작(카드 % 기준 시각) — 시작선(점선) 하나 더(사용자 2026-11-02 "24시간에 시작 세로선")
+    markXs.push({ x: 0.5 });
+    markXs.sort((a, b) => a.x - b.x);
     return {
-      closes: arr.map(k => k.c), xs, twoDay: true,
-      base: bi > 0 ? arr[bi - 1].c : undefined, prevBase: arr[0].c,
-      breakIdx: bi > 0 ? bi : undefined,
+      closes: arr.map(k => k.c), xs: arr.map(k => Math.min(1, Math.max(0, (k.t - start) / (48 * 3600_000)))),
+      ...(bi > 0 ? { breakIdx: bi, base: arr[bi].c, prevBase: arr[0].c } : { base: arr[0].c }),
+      markXs,
     };
   } catch { return null; }
 }
 
-export async function fetchHlPerpCandles(coin: string): Promise<number[]> {
+// 3개월 카드용 — 일봉 3개월(약 63거래일, 다른 카드와 같은 길이). 예전엔 최근 24시간 15분봉이라 3개월을 골라도
+//   24시간과 같은 그래프였다(사용자 2026-11-02). 상장이 짧으면 있는 만큼.
+export async function fetchHlPerpCandles(coin: string, days = 92): Promise<number[]> {
   try {
-    const end = Date.now(), start = end - 24 * 60 * 60 * 1000;
+    const end = Date.now(), start = end - days * 86400_000;
     const resp = await fetch("https://api.hyperliquid.xyz/info", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "candleSnapshot", req: { coin, interval: "15m", startTime: start, endTime: end } }),
+      body: JSON.stringify({ type: "candleSnapshot", req: { coin, interval: "1d", startTime: start, endTime: end } }),
     });
     if (!resp.ok) return [];
     const arr = await resp.json() as { c?: string }[];
@@ -4971,54 +5650,29 @@ export async function fetchHlPerpCandles(coin: string): Promise<number[]> {
   } catch { return []; }
 }
 
-// 구성종목 — 네이버 PC 금융 편입종목 표(finance.naver.com, EUC-KR HTML). 10페이지 = 100종목 전체.
-//   m.stock enrollStocks 는 대표 20개뿐이라, 100종목 전체는 이 PC 표를 페이지별로 스크래핑.
-//   표 컬럼: [종목명, 현재가, 전일비(상승/하락+숫자), 등락률(%), 거래량, 거래대금(백만), 시가총액(억)]
-const VALUEUP_PAGES = 10;
+// 구성종목 — m.stock enrollStocks JSON(100종). pageSize 50 까지(100 은 빈 응답) → 50 × 2쪽.
+//   PC 표(finance.naver entryJongmok, EUC-KR HTML)는 410 폐기(2026-10-29 실측). marketValue = 시가총액(억원)
 function valueupLogoUrl(code: string): string {
   return `https://ssl.pstatic.net/imgstock/fn/real/logo/png/stock/Stock${code}.png`;
 }
-function parseValueupPage(html: string): ValueupStock[] {
-  const out: ValueupStock[] = [];
-  for (const tr of html.match(/<tr[^>]*>[\s\S]*?<\/tr>/g) ?? []) {
-    const cm = /\/item\/main\.naver\?code=([\dA-Za-z]{6})/.exec(tr);
-    if (!cm) continue;
-    const code = cm[1];
-    const cells = [...tr.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)]
-      .map(m => m[1].replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim())
-      .filter(c => c !== "");
-    if (cells.length < 7) continue;
-    const down = cells[2].includes("하락");   // 전일비 방향어(상승/하락/보합)
-    // 등락률 셀은 "+5.21%" 형태 — naverNum 은 % 를 못 벗겨 NaN→0 되므로 별도 파싱.
-    const pctMag = Math.abs(parseFloat(cells[3].replace(/[^\d.]/g, "")) || 0);
-    out.push({
-      code,
-      name: cells[0],
-      price: naverNum(cells[1]),
-      changePct: pctMag * (down ? -1 : 1),   // 등락률 크기 × 방향
-      marketCap: naverNum(cells[6]),   // 시가총액(억원)
-      logoUrl: valueupLogoUrl(code),
-    });
-  }
-  return out;
-}
+interface NaverEnrollStock { itemCode?: string; stockName?: string; closePrice?: string; fluctuationsRatio?: string; marketValue?: string }
 export async function fetchValueupConstituents(): Promise<ValueupStock[]> {
-  const pages = await Promise.all(
-    Array.from({ length: VALUEUP_PAGES }, (_, i) => i + 1).map(async page => {
-      try {
-        const resp = await fetchProxied(`https://finance.naver.com/sise/entryJongmok.naver?type=KVALUE&page=${page}`);
-        if (!resp.ok) return [];
-        const html = decodeHtmlBuf(await resp.arrayBuffer(), resp.headers.get("Content-Type") || "");
-        return parseValueupPage(html);
-      } catch { return []; }
-    })
-  );
-  // 페이지 경계 중복 제거(시총 내림차순 정렬은 표 순서 그대로 유지).
   const seen = new Set<string>();
   const all: ValueupStock[] = [];
-  for (const list of pages) for (const s of list) {
-    if (seen.has(s.code)) continue;
-    seen.add(s.code); all.push(s);
+  for (let page = 1; page <= 4; page++) {
+    let list: NaverEnrollStock[] = [];
+    try {
+      const resp = await fetchProxied(`https://m.stock.naver.com/api/index/KVALUE/enrollStocks?page=${page}&pageSize=50`);
+      if (resp.ok) list = await resp.json() as NaverEnrollStock[];
+    } catch { /* 이 쪽만 빠진다 */ }
+    if (!Array.isArray(list) || list.length === 0) break;
+    for (const s of list) {
+      const code = s.itemCode ?? "";
+      if (!/^[\dA-Za-z]{6}$/.test(code) || seen.has(code)) continue;
+      seen.add(code);
+      all.push({ code, name: s.stockName ?? code, price: naverNum(s.closePrice),
+        changePct: parseFloat(s.fluctuationsRatio ?? "") || 0, marketCap: naverNum(s.marketValue), logoUrl: valueupLogoUrl(code) });
+    }
   }
   return all;
 }
@@ -5051,6 +5705,7 @@ export interface InvestorFlowGroup {
   key: "foreigner" | "institution" | "individual";
   type: string;        // 외국인 / 기관 / 개인
   basedAt: string;     // ISO (UTC)
+  src?: "한투";         // 한투 오늘 잠정(가집계)으로 바꿔 넣은 칸(앱 전용)
   buy: InvestorFlowRow[];
   sell: InvestorFlowRow[];
 }
@@ -5366,6 +6021,131 @@ export async function fetchTossTicsStocks(
 //   ⚠️ 최근 것만 준다: count 는 300 까지(500 이상은 400). 하이닉스 기준 약 50초치 → 화면이 5초마다 받아 쌓는다.
 //   과거로 넘기는 파라미터는 없다(실측 2026-10-21). 시각은 KST "HH:MM:SS".
 export interface TossTick { time: string; price: number; volume: number; side: "BUY" | "SELL"; cum: number }
+// 실시간 호가(토스 quotes) — 매도·매수 10단계 + 총잔량. ⚡체결 팝업 호가창(사용자 요청 2026-10-23)
+export interface OrderBook {
+  close: number;
+  sell: { price: number; qty: number }[];   // 낮은 가격 → 높은 가격(화면은 위가 높게 뒤집어 그린다)
+  buy: { price: number; qty: number }[];    // 높은 가격 → 낮은 가격
+  sumSell: number; sumBuy: number;
+  single: boolean; estPrice?: number;
+}
+export async function fetchTossOrderBook(code: string): Promise<OrderBook | null> {
+  // v3 = 통합(KRX+NXT) 호가 — 토스 화면과 같다. v2 는 KRX 만이라 NXT 프리·애프터엔 어제 마감 호가에 멈춰 있었다
+  //   (사용자 2026-11-09 "호가가 3초인데 변하지 않아" — 실측 08:24 삼성 v2 189,700/188,700 · v3 192,300/192,200 = 토스 화면)
+  try {
+    const r3 = await fetchProxied(`https://wts-info-api.tossinvest.com/api/v3/stock-prices/A${code}/quotes`);
+    if (r3.ok) {
+      const j = (await r3.json() as { result?: { close?: number; offerPrices?: number[]; offerVolumes?: number[]; bidPrices?: number[]; bidVolumes?: number[];
+        offerVolume?: number; bidVolume?: number; singlePrice?: boolean; estimatedPrice?: number } }).result;
+      if (j?.offerPrices?.length && j.bidPrices?.length) {
+        const sell = j.offerPrices.map((p, i) => ({ price: p, qty: j.offerVolumes?.[i] ?? 0 })).filter(x => x.price > 0).sort((a, b) => a.price - b.price);
+        const buy = j.bidPrices.map((p, i) => ({ price: p, qty: j.bidVolumes?.[i] ?? 0 })).filter(x => x.price > 0).sort((a, b) => b.price - a.price);
+        if (sell.length && buy.length) return { close: j.close ?? 0, sell, buy, sumSell: j.offerVolume ?? 0, sumBuy: j.bidVolume ?? 0,
+          single: !!j.singlePrice, estPrice: j.singlePrice && j.estimatedPrice ? j.estimatedPrice : undefined };
+      }
+    }
+  } catch { /* v2 로 */ }
+  const r = await fetchProxied(`https://wts-info-api.tossinvest.com/api/v2/stock-prices/A${code}/quotes`);
+  if (!r.ok) throw new Error(`호가 조회 실패 (HTTP ${r.status})`);
+  const j = (await r.json() as { result?: { close?: number; sellPrices?: number[]; sellQuantities?: number[]; buyPrices?: number[]; buyQuantities?: number[];
+    sumOfSellQuantities?: number; sumOfBuyQuantities?: number; isSinglePrice?: boolean; estimatedPrice?: number } }).result;
+  if (!j?.sellPrices || !j.buyPrices) return null;
+  const sell = j.sellPrices.map((p, i) => ({ price: p, qty: j.sellQuantities?.[i] ?? 0 })).filter(x => x.price > 0).sort((a, b) => a.price - b.price);
+  const buy = j.buyPrices.map((p, i) => ({ price: p, qty: j.buyQuantities?.[i] ?? 0 })).filter(x => x.price > 0).sort((a, b) => b.price - a.price);
+  return { close: j.close ?? 0, sell, buy, sumSell: j.sumOfSellQuantities ?? 0, sumBuy: j.sumOfBuyQuantities ?? 0,
+    single: !!j.isSinglePrice, estPrice: j.isSinglePrice ? j.estimatedPrice : undefined };
+}
+
+// 최근 공시(네이버 — 시각 포함) — ⚡체결 팝업 '새 소식'. fetchKrDisclosures 는 날짜만이라 따로
+export interface RecentDisclosure { id: string; title: string; datetime: string; url: string }
+export async function fetchNaverRecentDisclosures(ticker: string, size = 20): Promise<RecentDisclosure[]> {
+  const r = await fetchProxied(`https://m.stock.naver.com/api/stock/${ticker}/disclosure?page=1&size=${size}`);
+  if (!r.ok) throw new Error(`공시 조회 실패 (HTTP ${r.status})`);
+  const rows = await r.json() as { disclosureId?: number; title?: string; datetime?: string }[];
+  return (Array.isArray(rows) ? rows : []).flatMap(x => x.disclosureId && x.title && x.datetime ? [{
+    id: String(x.disclosureId), title: x.title.replace(/^[^)]*\(주\)\s*/, ""), datetime: x.datetime,
+    url: `https://m.stock.naver.com/domestic/stock/${ticker}/notice/${x.disclosureId}`,
+  }] : []);
+}
+
+// 프로그램 매매 최근 n일(주) — ⚡ 실시간 탭 '오늘·5일'. 위 fetchKrProgramTrading(12개월)보다 가볍게 한 페이지만
+export interface ProgramDayRow { date: string; buy: number; sell: number; net: number; arbNet: number; nonArbNet: number }
+export async function fetchTossProgramRecent(code: string, size = 10): Promise<ProgramDayRow[]> {
+  const r = await fetchProxied(`https://wts-info-api.tossinvest.com/api/v1/stock-infos/trade/trend/program-trading?productCode=A${code}&size=${size}`);
+  if (!r.ok) throw new Error(`프로그램 매매 조회 실패 (HTTP ${r.status})`);
+  const j = await r.json() as { result?: { body?: Record<string, number | string>[] } };
+  return (j.result?.body ?? []).flatMap(x => x.baseDate ? [{
+    date: String(x.baseDate), buy: Number(x.totalBuyQuantity ?? 0), sell: Number(x.totalSellQuantity ?? 0), net: Number(x.totalNetBuyQuantity ?? 0),
+    arbNet: Number(x.arbitrageNetBuyQuantity ?? 0), nonArbNet: Number(x.nonArbitrageNetBuyQuantity ?? 0),
+  }] : []);
+}
+
+// 거래원(증권사별 매도·매수 상위 5 + 외국계 합계) — 토스 mds/broker/trading-ranking, 장중 실시간. 값 = 원
+export interface BrokerSide { name: string; vol: number; val: number; foreign: boolean }
+export interface BrokerRanking {
+  rows: { ask: BrokerSide; bid: BrokerSide }[];   // 같은 줄의 매도(ask)·매수(bid)는 서로 다른 증권사(각각의 순위)
+  foreign: { askVol: number; askVal: number; bidVol: number; bidVal: number };
+  updatedAt: string;
+}
+export async function fetchTossBrokerRanking(code: string): Promise<BrokerRanking | null> {
+  const r = await fetchProxied(`https://wts-info-api.tossinvest.com/api/v1/mds/broker/trading-ranking?code=A${code}`);
+  if (!r.ok) throw new Error(`거래원 조회 실패 (HTTP ${r.status})`);
+  const j = (await r.json() as { result?: Record<string, unknown> & { top5ActivityList?: Record<string, unknown>[] } }).result;
+  if (!j?.top5ActivityList) return null;
+  const n = (v: unknown) => Number(v ?? 0);
+  return {
+    rows: j.top5ActivityList.map(x => ({
+      ask: { name: String(x.askBrokerName ?? ""), vol: n(x.askTradingVolume), val: n(x.askTradingValue), foreign: x.askBrokerForeignYn === "Y" },
+      bid: { name: String(x.bidBrokerName ?? ""), vol: n(x.bidTradingVolume), val: n(x.bidTradingValue), foreign: x.bidBrokerForeignYn === "Y" },
+    })),
+    foreign: { askVol: n(j.askForeignTradingVolume), askVal: n(j.askForeignTradingValue), bidVol: n(j.bidForeignTradingVolume), bidVal: n(j.bidForeignTradingValue) },
+    updatedAt: String(j.updatedAt ?? ""),
+  };
+}
+
+/** 오늘 1분봉(국내, 토스) — 실시간 체결을 켜기 전 구간을 가격·거래량으로 채운다(사용자 2026-11-09 "빈 값에서 시작해서").
+ *  최신 → 과거 450개씩, 오늘 것만(08:00 NXT 프리부터 최대 2콜). 반환은 시각 오름차순 */
+export async function fetchTossMinuteToday(code: string): Promise<{ t: string; close: number; volume: number }[]> {
+  const today = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10);
+  const out: { t: string; close: number; volume: number }[] = [];
+  let from: string | undefined;
+  for (let page = 0; page < 2; page++) {
+    const r = await fetchProxied(`https://wts-info-api.tossinvest.com/api/v1/c-chart/kr-s/A${code}/min:1?count=450${from ? `&from=${encodeURIComponent(from)}` : ""}`);
+    if (!r.ok) break;
+    const res = ((await r.json()) as { result?: { candles?: { dt?: string; close?: number; volume?: number }[]; nextDateTime?: string } }).result;
+    const cs = res?.candles ?? [];
+    let older = false;
+    for (const c of cs) {
+      if (!c.dt || !(c.close! > 0)) continue;
+      if (c.dt.slice(0, 10) !== today) { older = true; continue; }
+      out.push({ t: c.dt.slice(11, 16), close: c.close!, volume: c.volume ?? 0 });
+    }
+    if (older || !cs.length || !res?.nextDateTime) break;
+    from = res.nextDateTime;
+  }
+  return out.sort((a, b) => a.t.localeCompare(b.t));
+}
+
+/** 최근 며칠 1분봉(국내, 토스) — 백테스트용. 450개씩 pages 번 이어 받아 날짜별로 묶는다(오래된 날 → 최근 날, 각 날은 시각순) */
+export async function fetchTossMinuteDays(code: string, pages = 4): Promise<{ date: string; bars: { t: string; close: number; vol: number }[] }[]> {
+  const by = new Map<string, { t: string; close: number; vol: number }[]>();
+  let from: string | undefined;
+  for (let p = 0; p < pages; p++) {
+    const r = await fetchProxied(`https://wts-info-api.tossinvest.com/api/v1/c-chart/kr-s/A${code}/min:1?count=450${from ? `&from=${encodeURIComponent(from)}` : ""}`);
+    if (!r.ok) break;
+    const res = ((await r.json()) as { result?: { candles?: { dt?: string; close?: number; volume?: number }[]; nextDateTime?: string } }).result;
+    const cs = res?.candles ?? [];
+    for (const c of cs) {
+      if (!c.dt || !(c.close! > 0)) continue;
+      const d = c.dt.slice(0, 10);
+      (by.get(d) ?? by.set(d, []).get(d)!).push({ t: c.dt.slice(11, 16), close: c.close!, vol: c.volume ?? 0 });
+    }
+    if (!cs.length || !res?.nextDateTime) break;
+    from = res.nextDateTime;
+  }
+  return [...by].sort((a, b) => a[0].localeCompare(b[0])).map(([date, bars]) => ({ date, bars: bars.sort((x, y) => x.t.localeCompare(y.t)) }));
+}
+
 export async function fetchTossTicks(code: string, count = 300): Promise<TossTick[]> {
   const r = await fetchProxied(`https://wts-info-api.tossinvest.com/api/v2/stock-prices/A${code}/ticks?count=${Math.min(300, count)}`);
   if (!r.ok) throw new Error(`체결 조회 실패 (HTTP ${r.status})`);
@@ -5484,14 +6264,62 @@ export async function fetchKrFuturesMinute(kind: "kospi200" | "kosdaq150" = "kos
   const oi = cur.findIndex(x => (x.mtime ?? "") >= "09:00");
   // 선물 정규장 종가 15:45 — 한경 봉 시각은 시작 시각이라 15:45 전 마지막 봉, 장이 끝난 뒤에만
   const ci = cur.some(x => (x.mtime ?? "") >= "15:44") ? cur.map(x => (x.mtime ?? "") < "15:45").lastIndexOf(true) : -1;
-  return {
+  const kst = new Date(Date.now() + 9 * 3600_000);
+  const isToday = kst.toISOString().slice(0, 10) === today, nowMin = kst.getUTCHours() * 60 + kst.getUTCMinutes();
+  const fNow = isToday ? Math.min(1, Math.max(0, (nowMin - START) / SPAN)) : 1;
+  // 세로선 — 09:00(현물 개장)·15:45(선물 마감) 시간표 위치
+  const sess: SessionMarks = {
+    open: frac("09:00"), close: frac("15:45"),
+    todayOpen: isToday ? nowMin >= 9 * 60 && oi >= 0 : oi >= 0,
+    todayClose: isToday ? nowMin >= 15 * 60 + 45 && oi >= 0 : ci > 0,
+    prevOpen: prev.some(x => (x.mtime ?? "") >= "09:00"), prevClose: prev.some(x => (x.mtime ?? "") >= "15:40"),
+  };
+  return rollDay({
     closes: [...prev.map(x => x.close!), ...cur.map(x => x.close!)],
-    xs: [...prev.map(x => frac(x.mtime) * TWO_DAY_HALF), ...cur.map(x => twoDayTodayX(frac(x.mtime)))],
     base: baseOf(cur), prevBase: baseOf(prev), openIdx: oi >= 0 ? prev.length + oi : undefined,
     closeIdx: ci > 0 ? prev.length + ci : undefined,
+    prevOpenIdx: (() => { const i = prev.findIndex(x => (x.mtime ?? "") >= "09:00"); return i > 0 ? i : undefined; })(),
+    prevCloseIdx: (() => { const i = prev.map(x => (x.mtime ?? "") < "15:45").lastIndexOf(true); return i > 0 && i < prev.length - 1 ? i : undefined; })(),
     todayTimes: cur.map(x => (x.mtime ?? "").slice(0, 5)),   // 오늘 봉 시각(가설 검증 — 베이시스 시계열)
     date: today, twoDay: true, breakIdx: prev.length > 0 ? prev.length : undefined,
-  };
+  }, [...prev.map(x => frac(x.mtime)), ...cur.map(x => frac(x.mtime))], prev.length, fNow, sess);
+}
+
+// 코스피200·코스닥150 **야간장 동안** 24시간 카드 — 다른 선물처럼 세션 그래프(사용자 2026-11-02 "여기는?").
+//   직전 세션 = 주간장(한경 1분봉, 08:45~15:45) · 지금 세션 = 야간장(yasun 1분봉, 18:00~05:00). 굴러가는 창(rollDay), 세로선 = 세션 경계 하나.
+//   기준선: 야간 = yasun 기준(카드 %와 같은 값 = 주간 종가 쪽), 주간 = 한경 전일 대비 역산.
+export async function fetchKrFuturesNightSession(kind: "kospi200" | "kosdaq150"): Promise<DaySeries | null> {
+  const real = kind === "kospi200" ? "^KS200" : "^KQ150";
+  const [hk, night, quote] = await Promise.all([
+    fetchProxied(`https://markets.hankyung.com/api/v2/future/${kind}/min`).then(r => (r.ok ? r.json() : [])).catch(() => []),
+    fetchYasunCandles(real, "night").catch(() => [] as YasunCandle[]),
+    fetchYasunQuote(real),
+  ]) as [{ mdate?: string; mtime?: string; close?: number; chg_net?: number }[], YasunCandle[], YasunPrice | null];
+  // 야간 — 마지막 세션만(30분 넘는 빈틈 뒤)
+  let ns = 0;
+  for (let i = night.length - 1; i > 0; i--) if (night[i].time - night[i - 1].time > 30 * 60) { ns = i; break; }
+  const cur = night.slice(ns).filter(c => c.close > 0);
+  if (cur.length < 2) return null;
+  // 야간 세션 시작 = 첫 봉의 18:00 KST(자정 넘어 시작한 봉이면 전날 18:00)
+  const k0 = new Date(cur[0].time * 1000 + 9 * 3600_000);
+  const day0 = Math.floor(k0.getTime() / 86400_000) - (k0.getUTCHours() < 12 ? 1 : 0);
+  const nStart = day0 * 86400_000 + 18 * 3600_000 - 9 * 3600_000, N_SPAN = 11 * 3600_000;
+  // 주간 — 한경의 가장 최근 날(야간 세션 시작일과 같은 날이어야 이어진다)
+  const rows = Array.isArray(hk) ? hk.filter(x => (x.close ?? 0) > 0) : [];
+  const dayKey = new Date(nStart + 9 * 3600_000).toISOString().slice(0, 10).replace(/-/g, "");
+  const prev = rows.filter(x => (x.mdate ?? "").replace(/-/g, "") === dayKey);
+  const D_START = 8 * 60 + 45, D_SPAN = 7 * 60;
+  const dFrac = (t = "") => Math.min(1, Math.max(0, (Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5)) - D_START) / D_SPAN));
+  const fr = [...prev.map(x => dFrac(x.mtime)), ...cur.map(c => Math.min(1, Math.max(0, (c.time * 1000 - nStart) / N_SPAN)))];
+  const fNow = Math.min(1, Math.max(0, (Date.now() - nStart) / N_SPAN));
+  const nBase = quote ? quote.price - quote.change : undefined;
+  const lp = prev[prev.length - 1];
+  const dBase = lp ? (lp.close ?? 0) - (lp.chg_net ?? 0) : undefined;
+  const bi = prev.length;
+  const r = rollDay({ closes: [...prev.map(x => x.close!), ...cur.map(c => c.close)], breakIdx: bi > 0 ? bi : undefined }, fr, bi, fNow);
+  const full = fNow >= 1, start = full ? 1 + ROLL_GAP : fNow, W = full ? 1 : 1 + ROLL_GAP;
+  const x = (1 - start) / W;   // 세션 경계(주간 15:45 마감 = 직전 세션 끝)
+  return { ...r, markXs: bi > 0 && x > 0.002 && x <= 1 ? [{ x, close: true }] : [], ...(nBase ? { base: nBase } : {}), ...(dBase && dBase > 0 ? { prevBase: dBase } : {}) };
 }
 
 // 오늘 하루 전체 체결강도(토스) — 시세 상세의 tradingStrength(매수 체결량 ÷ 매도 체결량 × 100, 장 시작부터 누적)·거래량·거래대금.
@@ -5533,8 +6361,24 @@ export async function fetchYahooTodayKst(symbol: string): Promise<{ t: string; c
   if (!r.ok) return [];
   const j = await r.json() as { chart?: { result?: { timestamp?: number[]; indicators?: { quote?: { close?: (number | null)[] }[] } }[] } };
   const res = j.chart?.result?.[0], ts = res?.timestamp ?? [], cl = res?.indicators?.quote?.[0]?.close ?? [];
+  // 오늘(KST) 봉만 — 장 시작 전엔 야후 1d 가 어제 세션을 줘서 배경에 어제 그래프가 깔렸다(2026-10-22)
+  const today = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10);
   return ts.flatMap((t, i) => {
-    const c = cl[i];
-    return c != null && c > 0 ? [{ t: new Date((t + 9 * 3600) * 1000).toISOString().slice(11, 16), c }] : [];
+    const c = cl[i], k = new Date((t + 9 * 3600) * 1000).toISOString();
+    return c != null && c > 0 && k.slice(0, 10) === today ? [{ t: k.slice(11, 16), c }] : [];
   });
+}
+
+// 코스피·코스닥 지수 오늘 1분 시세(다음 금융) — 실시간(09:28 요청 → 09:28 값). 야후 한국 지수는 약 20분 늦어
+//   반도체 수급 칸 배경이 장 초반에 몇 점뿐이었다(2026-10-22). 최신 → 과거로 온다. 시각("HH:MM")·종가.
+//   base = 전일 종가(tradePrice − changePrice) — 증시 탭 배경 기준선용. 반도체 수급·증시 탭이 같은 쿼리키로 공유.
+export async function fetchDaumIndexToday(market: "KOSPI" | "KOSDAQ"): Promise<{ points: { t: string; c: number }[]; base?: number }> {
+  const r = await fetchProxied(`https://finance.daum.net/api/market_index/times?page=1&perPage=400&market=${market}`);
+  if (!r.ok) return { points: [] };
+  const j = await r.json() as { data?: { date?: string; tradePrice?: number; changePrice?: number }[] };
+  const today = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10);
+  const rows = (j.data ?? []).filter(d => d.date?.startsWith(today) && (d.tradePrice ?? 0) > 0);
+  const top = rows[0];
+  const base = top && top.changePrice != null ? top.tradePrice! - top.changePrice : undefined;
+  return { points: rows.map(d => ({ t: d.date!.slice(11, 16), c: d.tradePrice! })).reverse(), base: base && base > 0 ? base : undefined };
 }

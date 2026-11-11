@@ -1,0 +1,191 @@
+// 국내 주식선물(삼성전자·SK하이닉스) — 한국투자 Open API(앱 전용, 본인 키). 무료 공개 출처엔 주식선물 시세가 없다
+//   (토스·네이버·다음·한경 실측 2026-10-30, 사용자 "한국투자 연결했어" 2026-11-02).
+//   📊종목정보 창의 '선물' 칸(사용자 2026-11-02 "지수에 추가한 건 빼고 종목정보 창에 선물 칸"). 선물이 걸린 종목(201개)만.
+//   종목 코드 = "A" + 기초자산 2자리 + 연도 끝자리 + 월(MM) — 한투 종목마스터 fo_stk_code_mts.mst 실측(삼성전자 A11611, SK하이닉스 A50611).
+//   근월물 = 만기(그 달 둘째 목요일)가 오늘 이후인 가장 가까운 달. 시장 분류 JF(주식선물).
+//   현재가 FHMIF10000000(inquire-price) · 분봉 FHKIF03020200(inquire-time-fuopchartprice), 공식 예제 examples_llm/domestic_futureoption.
+import { kisGet, isKisLinkOn } from "./broker";
+import type { DaySeries, MarkX } from "./api";
+
+// 종목코드 → 주식선물 기초자산 2자리 — 한투 종목마스터(fo_stk_code_mts.mst, 2026-11-02 받음) 근월물 행에서. 201종목.
+//   신규 편입·제외가 생기면 마스터를 다시 받아 갱신(코드 2자리는 종목마다 고정).
+const STOCK_FUT_UNDER: Record<string, string> = { "000080": "BK", "000100": "D6", "000120": "G1", "000150": "GT", "000210": "B5", "000240": "0Y", "000270": "19", "000660": "50", "000670": "0Q", "000720": "BN", "000810": "CT", "000880": "C9", "000990": "EK", "001040": "42", "001430": "0M", "001440": "FW", "001450": "CE", "001570": "GN", "001680": "B6", "001800": "0R", "002030": "2N", "002380": "D3", "002790": "CS", "002840": "1L", "003030": "0N", "003090": "0C", "003230": "0K", "003240": "1Z", "003490": "57", "003550": "34", "003670": "E8", "004000": "GV", "004020": "32", "004170": "DD", "004370": "DA", "004990": "FZ", "005300": "GW", "005380": "16", "005420": "HC", "005490": "13", "005830": "D0", "005850": "GY", "005930": "11", "005940": "BZ", "006040": "1W", "006260": "FS", "006280": "GQ", "006400": "22", "006650": "DJ", "006800": "48", "007070": "D4", "007310": "HA", "007340": "1T", "007660": "2P", "008730": "0S", "008770": "BQ", "008930": "CV", "009150": "23", "009240": "D2", "009420": "EE", "009540": "39", "009830": "CB", "009970": "0P", "010060": "C0", "010120": "GL", "010130": "B3", "010140": "BF", "010950": "B2", "011070": "BY", "011170": "BB", "011200": "FA", "011210": "BP", "011780": "C3", "011790": "EJ", "012330": "20", "012450": "BH", "0126Z0": "2M", "012750": "D5", "014680": "G4", "014820": "0E", "015760": "15", "016360": "17", "017670": "12", "017800": "DY", "017960": "2A", "018260": "C5", "018880": "CY", "021240": "CW", "022100": "CN", "023530": "BA", "024110": "B4", "026960": "FX", "028050": "ET", "028260": "C8", "028670": "EH", "029780": "BG", "030000": "C7", "030200": "14", "032640": "B0", "032830": "BD", "033780": "36", "034020": "B9", "034220": "45", "034230": "CG", "034730": "C1", "035250": "BS", "035420": "56", "035720": "CF", "036460": "28", "036570": "BJ", "039490": "HE", "042660": "FV", "042700": "0Z", "047040": "FT", "047050": "B7", "047810": "BM", "051600": "D7", "051900": "CR", "051910": "47", "052690": "G3", "055550": "18", "062040": "2L", "064350": "G6", "064400": "2K", "066570": "24", "066970": "FM", "068270": "CP", "069260": "0A", "069620": "GR", "069960": "D8", "071050": "BL", "071320": "1Y", "071970": "2J", "073240": "GP", "078930": "35", "079550": "DB", "081660": "HJ", "082740": "2Q", "086280": "CC", "086790": "40", "088350": "CA", "090430": "C6", "093370": "EL", "096770": "41", "097950": "D1", "103140": "0X", "105560": "46", "111770": "DG", "112610": "G0", "120110": "HD", "128940": "CX", "137310": "G2", "138040": "FK", "138930": "BT", "139130": "BV", "139480": "54", "161390": "55", "161890": "DE", "175330": "GJ", "180640": "G5", "185750": "HB", "192080": "0D", "192820": "DK", "204320": "DC", "207940": "ES", "241560": "DW", "251270": "E5", "259960": "F8", "267250": "FH", "267260": "GH", "267270": "3N", "268280": "1X", "271560": "FJ", "272210": "EV", "278470": "1Q", "280360": "0H", "282330": "FR", "285130": "GM", "298020": "HH", "298040": "1S", "298050": "HG", "300720": "1A", "302440": "F9", "307950": "2R", "316140": "EB", "323410": "F6", "326030": "FF", "329180": "FD", "352820": "FC", "361610": "FB", "373220": "F5", "375500": "ER", "377300": "F7", "383220": "FG", "402340": "FE", "443060": "1V", "450080": "GZ", "454910": "0F", "456040": "HX", "457190": "0T", "483650": "3P" };
+export function hasStockFutures(code: string): boolean { return code in STOCK_FUT_UNDER; }
+export function kisFutAvailable(): boolean { return isKisLinkOn(); }
+
+/** 그 달 둘째 목요일(만기일) — KST 날짜 YYYY-MM-DD */
+function secondThursday(y: number, m: number): string {
+  const first = new Date(Date.UTC(y, m - 1, 1)).getUTCDay();          // 0=일
+  const day = 1 + ((4 - first + 7) % 7) + 7;
+  return `${y}-${String(m).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+/** 근월물 코드. 내보내는 건 테스트용 */
+export function frontMonthCode(under: string, todayKst = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10)): string {
+  let y = Number(todayKst.slice(0, 4)), m = Number(todayKst.slice(5, 7));
+  if (todayKst > secondThursday(y, m)) { m += 1; if (m > 12) { m = 1; y += 1; } }
+  return `A${under}${y % 10}${String(m).padStart(2, "0")}`;
+}
+
+const num = (v: unknown) => { const n = Number(v); return Number.isFinite(n) ? n : NaN; };
+
+export interface KisFutQuote { code: string; price: number; pct: number; base: number; oi?: number; oiChg?: number; vol?: number }
+/** 종목코드(6자리)의 주식선물 근월물 현재가. 선물이 없는 종목은 null */
+export async function fetchKisFutQuote(stockCode: string): Promise<KisFutQuote | null> {
+  const under = STOCK_FUT_UNDER[stockCode];
+  if (!under) return null;
+  const code = frontMonthCode(under);
+  const { body } = await kisGet<{ rt_cd?: string; output1?: Record<string, string> }>(
+    "/uapi/domestic-futureoption/v1/quotations/inquire-price", "FHMIF10000000",
+    { FID_COND_MRKT_DIV_CODE: "JF", FID_INPUT_ISCD: code });
+  const o = body.output1 ?? {};
+  const price = num(o.futs_prpr), pct = num(o.futs_prdy_ctrt);
+  if (!(price > 0)) return null;
+  const base = num(o.futs_prdy_clpr) > 0 ? num(o.futs_prdy_clpr) : (Number.isFinite(pct) ? price / (1 + pct / 100) : price);
+  const oi = num(o.hts_otst_stpl_qty), oiChg = num(o.otst_stpl_qty_icdc), vol = num(o.acml_vol);
+  return { code, price, pct: Number.isFinite(pct) ? pct : (price / base - 1) * 100, base,
+    ...(oi >= 0 ? { oi } : {}), ...(Number.isFinite(oiChg) ? { oiChg } : {}), ...(vol >= 0 ? { vol } : {}) };
+}
+
+/** 오늘 1분봉 — 축 08:45~15:45(주식선물 정규장), 세로선 09:00 시가·15:45 종가. 기준선 = 전일 종가(카드 % 기준) */
+export async function fetchKisFutDay(stockCode: string): Promise<DaySeries | null> {
+  const under = STOCK_FUT_UNDER[stockCode];
+  if (!under) return null;
+  const code = frontMonthCode(under);
+  const today = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10).replace(/-/g, "");
+  // 한 번에 100봉 남짓만 온다(입력 시각부터 거꾸로) — 그래프가 오른쪽 1/4 만 그려졌다(사용자 2026-11-02 실측).
+  //   가장 이른 봉 1분 전으로 이어서 08:45 까지 받는다(하루 420분 → 최대 5콜).
+  type Body = { rt_cd?: string; output1?: Record<string, string>; output2?: Record<string, string>[] };
+  let hour = "160000", out1: Record<string, string> | undefined;
+  const all: Record<string, string>[] = [];
+  for (let page = 0; page < 6; page++) {
+    const { body } = await kisGet<Body>(
+      "/uapi/domestic-futureoption/v1/quotations/inquire-time-fuopchartprice", "FHKIF03020200",
+      { FID_COND_MRKT_DIV_CODE: "JF", FID_INPUT_ISCD: code, FID_HOUR_CLS_CODE: "60", FID_PW_DATA_INCU_YN: "N",
+        FID_FAKE_TICK_INCU_YN: "N", FID_INPUT_DATE_1: today, FID_INPUT_HOUR_1: hour });
+    out1 ??= body.output1;
+    const rs = (body.output2 ?? []).filter(r => String(r.stck_cntg_hour ?? "").length >= 4 && (!r.stck_bsop_date || r.stck_bsop_date === today));
+    if (!rs.length) break;
+    all.push(...rs);
+    const earliest = rs.map(r => String(r.stck_cntg_hour).padEnd(6, "0")).sort()[0];
+    if (earliest <= "084600") break;
+    const m = Number(earliest.slice(0, 2)) * 60 + Number(earliest.slice(2, 4)) - 1;
+    const next = `${String(Math.floor(m / 60)).padStart(2, "0")}${String(m % 60).padStart(2, "0")}00`;
+    if (next >= hour) break;
+    hour = next;
+  }
+  const body = { output1: out1, output2: [...new Map(all.map(r => [String(r.stck_cntg_hour), r])).values()] };
+  const START = 8 * 60 + 45, SPAN = 7 * 60;
+  const rows = (body.output2 ?? [])
+    .map(r => ({ hm: String(r.stck_cntg_hour ?? ""), c: num(r.futs_prpr ?? r.stck_prpr) }))
+    .filter(r => r.hm.length >= 4 && r.c > 0)
+    .map(r => ({ f: (Number(r.hm.slice(0, 2)) * 60 + Number(r.hm.slice(2, 4)) - START) / SPAN, c: r.c }))
+    .filter(r => r.f >= 0 && r.f <= 1)
+    .sort((a, b) => a.f - b.f);
+  if (rows.length < 2) return null;
+  const prevClose = num(body.output1?.futs_prdy_clpr);
+  const markXs: MarkX[] = [{ x: 15 / SPAN }, { x: 1, close: true }];
+  return { closes: rows.map(r => r.c), xs: rows.map(r => r.f), markXs, ...(prevClose > 0 ? { base: prevClose } : {}) };
+}
+
+// ─── 장중 투자자 추정(외국인·기관 가집계) — 한투 MTS '투자자동향 > 추정(주)' 와 같은 자료(사용자 2026-11-02) ───
+//   증권사 직원이 장중에 집계해 넣는 누계: 외국인 09:30·11:20·13:20·14:30 / 기관 10:00·11:20·13:20·14:30(사정에 따라 변동).
+//   무료 출처엔 종목별 장중 투자자가 없다(일별만). 응답 필드 이름은 공식 문서에 없어 '…frgn…ntby…'·'…orgn…ntby…' 꼴로 찾는다.
+export interface KisInvEstimate { seq: string; frgn?: number; orgn?: number }
+export async function fetchKisInvestorEstimate(stockCode: string): Promise<KisInvEstimate[]> {
+  const { body } = await kisGet<{ rt_cd?: string; output2?: Record<string, string>[] }>(
+    "/uapi/domestic-stock/v1/quotations/investor-trend-estimate", "HHPTJ04160200", { MKSC_SHRN_ISCD: stockCode });
+  const pick = (r: Record<string, string>, re: RegExp) => { const k = Object.keys(r).find(x => re.test(x)); return k ? num(r[k]) : NaN; };
+  return (body.output2 ?? []).map((r, i) => {
+    const frgn = pick(r, /frgn.*ntby.*qty/i), orgn = pick(r, /orgn.*ntby.*qty/i);
+    const seq = String(r.bsop_hour_gb ?? r.bsop_hour ?? i + 1);
+    return { seq, ...(Number.isFinite(frgn) ? { frgn } : {}), ...(Number.isFinite(orgn) ? { orgn } : {}) };
+  }).filter(x => x.frgn != null || x.orgn != null);
+}
+
+// ─── VI(변동성 완화장치) 발동 현황 — 오늘 이 종목(사용자 2026-11-02 순서 2번). 급등·급락 시 2분 단일가로 넘어간 시각·종류.
+//   FHPST01390000 inquire-vi-status. 응답 필드 이름이 문서에 없어 시각·종류·가격을 키 꼴로 찾는다.
+export interface KisViEvent { time: string; kind: string; dir: string; price?: number }
+export async function fetchKisViToday(stockCode: string): Promise<KisViEvent[]> {
+  const today = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10).replace(/-/g, "");
+  const { body } = await kisGet<{ rt_cd?: string; output?: Record<string, string>[] }>(
+    "/uapi/domestic-stock/v1/quotations/inquire-vi-status", "FHPST01390000",
+    { FID_DIV_CLS_CODE: "0", FID_COND_SCR_DIV_CODE: "20139", FID_MRKT_CLS_CODE: "0", FID_INPUT_ISCD: stockCode,
+      FID_RANK_SORT_CLS_CODE: "0", FID_INPUT_DATE_1: today, FID_TRGT_CLS_CODE: "", FID_TRGT_EXLS_CLS_CODE: "" });
+  const val = (r: Record<string, string>, re: RegExp) => { const k = Object.keys(r).find(x => re.test(x)); return k ? String(r[k] ?? "") : ""; };
+  return (body.output ?? [])
+    .filter(r => !r.mksc_shrn_iscd || r.mksc_shrn_iscd === stockCode)
+    .map(r => {
+      const t = val(r, /cntg_vi_hour|vi_hour|hour/i).replace(/\D/g, "");
+      const kindRaw = val(r, /vi_kind|vi_cls/i);
+      const kind = /1|정적/.test(kindRaw) ? "정적" : /2|동적/.test(kindRaw) ? "동적" : kindRaw;
+      const dirRaw = val(r, /prdy_vrss_sign|vi_dir|div_cls/i);
+      const dir = /[12]|상승/.test(dirRaw) ? "상승" : /[45]|하락/.test(dirRaw) ? "하락" : "";
+      const price = num(val(r, /vi_prc|vi_stnd_prc|stck_prpr/i));
+      return { time: t.length >= 4 ? `${t.slice(0, 2)}:${t.slice(2, 4)}` : "", kind, dir, ...(price > 0 ? { price } : {}) };
+    })
+    .filter(e => e.time);
+}
+
+// ─── 코스피200 옵션 전광판(콜·풋, 근월물 전 행사가) — 한국투자(사용자 2026-11-02 순서 3번). 한경은 현재가 ±37pt 만 합산했다.
+//   FHPIF05030100 display-board-callput(각 100행까지, 1초에 1번 권장 → 1분마다). 모양은 한경 요약(fetchKospi200OptionSummary)과 같게.
+//   필드 이름이 문서에 없어 행사가·거래량·미결제·미결제 증감을 키 꼴로 찾는다.
+export interface KisOptionSummary {
+  month: string; atm?: number; callVol: number; putVol: number; callOi: number; putOi: number; callOiChg: number; putOiChg: number;
+  maxCallOi?: number; maxPutOi?: number; range: [number, number]; time: string; src: "한투";
+}
+export async function fetchKisKospi200Options(): Promise<KisOptionSummary | null> {
+  const todayKst = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10);
+  let y = Number(todayKst.slice(0, 4)), m = Number(todayKst.slice(5, 7));
+  if (todayKst > secondThursday(y, m)) { m += 1; if (m > 12) { m = 1; y += 1; } }
+  const exp = secondThursday(y, m);
+  const { body } = await kisGet<{ rt_cd?: string; output1?: Record<string, string>[]; output2?: Record<string, string>[] }>(
+    "/uapi/domestic-futureoption/v1/quotations/display-board-callput", "FHPIF05030100",
+    { FID_COND_MRKT_DIV_CODE: "O", FID_COND_SCR_DIV_CODE: "20503", FID_MRKT_CLS_CODE: "CO",
+      FID_MTRT_CNT: `${y}${String(m).padStart(2, "0")}`, FID_MRKT_CLS_CODE1: "PO", FID_COND_MRKT_CLS_CODE: "" });
+  const val = (r: Record<string, string>, re: RegExp) => { const k = Object.keys(r).find(x => re.test(x)); return k ? num(r[k]) : NaN; };
+  const sum = (rows: Record<string, string>[]) => {
+    let vol = 0, oi = 0, chg = 0, max = { k: 0, oi: -1 }, lo = Infinity, hi = 0;
+    for (const r of rows) {
+      const k = val(r, /^acpr$|optn_acpr|stck_acpr|acpr/i);
+      const o = val(r, /otst_stpl_qty$|hts_otst_stpl_qty/i), c = val(r, /otst_stpl_qty_icdc/i), v = val(r, /acml_vol/i);
+      if (!(k > 0)) continue;
+      lo = Math.min(lo, k); hi = Math.max(hi, k);
+      if (v > 0) vol += v;
+      if (o > 0) { oi += o; if (o > max.oi) max = { k, oi: o }; }
+      if (Number.isFinite(c)) chg += c;
+    }
+    return { vol, oi, chg, max: max.oi > 0 ? max.k : undefined, lo, hi };
+  };
+  const c = sum(body.output1 ?? []), p = sum(body.output2 ?? []);
+  if (!(c.oi + p.oi > 0)) return null;
+  const k = new Date(Date.now() + 9 * 3600_000).toISOString();
+  return {
+    month: exp.replace(/-/g, ""), callVol: c.vol, putVol: p.vol, callOi: c.oi, putOi: p.oi, callOiChg: c.chg, putOiChg: p.chg,
+    maxCallOi: c.max, maxPutOi: p.max, range: [Math.min(c.lo, p.lo), Math.max(c.hi, p.hi)], time: `${k.slice(11, 16)}:00`, src: "한투",
+  };
+}
+
+// ─── 코스피200 선물 외국인 순매수 — 한국투자 '시장별 투자자매매동향(시세)' FHPTJ04030000(HTS 0403 상단 표, 조회 시점 누적만) ───
+//   시간별 이력이 없어 앱이 1분마다 받아 쌓는다(lib/futuresTape). 네이버 시간별(20분 지연)의 뒤를 이 값으로 잇는다(사용자 2026-11-03 2단계).
+//   ⚠️ 선물 시장 코드가 공식 예제에 없다 — 후보를 차례로 물어 '선물다운' 응답(외국인 매도 수량이 계약 단위 = 수백만 미만)을 고르고 기억한다.
+const FUT_MKT_KEY = "kis_fut_investor_mkt";
+const FUT_MKT_CANDIDATES: [string, string][] = [["K2I", "F001"], ["999", "F001"], ["K2I", "S001"], ["101", "F001"], ["F", "F001"]];
+export interface KisFutInvestor { frgnQty: number; frgnAmtEok?: number; mkt: string }
+export async function fetchKisK200FutInvestor(): Promise<KisFutInvestor | null> {
+  let saved: string | null = null;
+  try { saved = localStorage.getItem(FUT_MKT_KEY); } catch { /* noop */ }
+  const order = saved ? [saved.split("|") as [string, string], ...FUT_MKT_CANDIDATES.filter(c => c.join("|") !== saved)] : FUT_MKT_CANDIDATES;
+  for (const [a, b] of order) {
+    try {
+      const { body } = await kisGet<{ rt_cd?: string; output?: Record<string, string>[] | Record<string, string> }>(
+        "/uapi/domestic-stock/v1/quotations/inquire-investor-time-by-market", "FHPTJ04030000", { FID_INPUT_ISCD: a, FID_INPUT_ISCD_2: b });
+      const row = Array.isArray(body.output) ? body.output[0] : body.output;
+      if (!row) continue;
+      const sell = num(row.frgn_seln_vol), qty = num(row.frgn_ntby_qty), amt = num(row.frgn_ntby_tr_pbmn);
+      if (!(sell > 0) || sell > 3_000_000 || !Number.isFinite(qty)) continue;   // 주식(수억 주)이 아니라 선물(계약)이어야
+      try { localStorage.setItem(FUT_MKT_KEY, `${a}|${b}`); } catch { /* noop */ }
+      return { frgnQty: qty, frgnAmtEok: Number.isFinite(amt) ? amt / 100 : undefined, mkt: `${a}|${b}` };   // 거래대금 단위 백만원 → 억원
+    } catch { /* 다음 후보 */ }
+  }
+  return null;
+}

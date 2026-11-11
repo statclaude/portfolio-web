@@ -2,6 +2,10 @@ import { Fragment, useMemo, useState } from "react";
 import { loadAllTrades, addTrade, replaceAllTrades, type Trade } from "../lib/db";
 import { parseTossTransactionsJson, tradeDedupeKey, type ImportTradeRow } from "../lib/parseTossTransactions";
 import { rememberTickerNames } from "../lib/tickerNames";
+import { appConfirm } from "../lib/appDialog";
+import { isBrokerAvailable } from "../lib/broker";
+import { linkedGroupOf } from "../lib/linkedGroups";
+import { feeOf, fetchTossTrades } from "../lib/tossTrades";
 
 interface Props {
   isOpen: boolean;
@@ -11,7 +15,8 @@ interface Props {
 }
 
 type Status = "new" | "dup";
-interface Cand extends ImportTradeRow { status: Status; key: string; }
+// id = 토스 Open API 로 받은 거래(tossapi_<orderId>) — 저장 id 로 그대로 쓴다. overlap = 수동 기록과 겹치는 것 같음(표시만)
+interface Cand extends ImportTradeRow { status: Status; key: string; id?: string; overlap?: string; native?: string; fee?: number }
 
 const today = () => new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10);   // KST
 // YYYY-MM-DD 에서 n개월 빼기 (윈도우 이동용)
@@ -31,6 +36,7 @@ const PERIODS = [
   { key: "2y", label: "2년", years: 2 },
   { key: "5y", label: "5년", years: 5 },
   { key: "10y", label: "10년", years: 10 },
+  { key: "all", label: "전체", years: 10 },      // 연동(Open API)은 기간 없이 전체, 붙여넣기는 10년 창으로
   { key: "custom", label: "직접", years: 0 },
 ] as const;
 type PeriodKey = typeof PERIODS[number]["key"];
@@ -52,6 +58,43 @@ export function TossImportDialog({ isOpen, onClose, onImported, groups }: Props)
   const [extraTos, setExtraTos] = useState<Record<string, string[]>>({});    // 구간(from)별 추가페이지 to 목록(50건 초과)
 
   const resetPages = () => { setPageDone(new Set()); setExtraTos({}); };
+
+  // ── 토스 Open API(데스크톱 앱 + 연동 그룹) — 붙여넣기 없이 기간째 받아 같은 후보 목록에 채운다(3단계, 2026-10-26)
+  const apiLink = isBrokerAvailable() ? linkedGroupOf("toss") : null;
+  const [apiProgress, setApiProgress] = useState<string>("");
+  const fetchViaApi = async () => {
+    if (!apiLink) return;
+    setErr(""); setBusy(true); setApiProgress("받는 중…");
+    try {
+      const all = period === "all";
+      const f = all ? await fetchTossTrades(undefined, undefined, n => setApiProgress(`주문 ${n}건 받는 중…`))
+                    : await fetchTossTrades(from, to, n => setApiProgress(`주문 ${n}건 받는 중…`));
+      const map = new Map<string, Cand>((cands ?? []).map(c => [c.key, c]));
+      const newlyPicked = new Set(picked);
+      let added = 0, already = 0;
+      for (const r of f.rows) {
+        const key = r.id;
+        if (map.has(key)) continue;
+        const status: Status = f.existingIds.has(r.id) ? "dup" : "new";
+        if (status === "dup") already++; else added++;
+        map.set(key, {
+          ticker: r.ticker, name: r.name, date: r.date, type: r.type, qty: r.qty, amount: r.amount,
+          key, status, id: r.id, overlap: f.overlaps.get(r.id), ...feeOf(r),
+          native: r.currency === "USD" ? `$${r.nativeAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : undefined,
+        });
+        if (status === "new") newlyPicked.add(key);
+      }
+      rememberTickerNames(f.rows.map(r => ({ ticker: r.ticker, name: r.name })));
+      setCands(Array.from(map.values()).sort((a, b) => b.date.localeCompare(a.date) || a.name.localeCompare(b.name)));
+      setPicked(newlyPicked);
+      setSkipped(sk => sk + f.skipped.noFill);
+      setAccount(f.group);   // 연동 거래는 연동 그룹으로
+      const parts = [`${all ? "전체 기간" : `${from}~${to}`}: 새 거래 ${added}건`, already ? `이미 있음 ${already}건` : "", f.skipped.noFx ? `환율 없어 제외 ${f.skipped.noFx}건` : ""].filter(Boolean);
+      setApiProgress(`✅ ${parts.join(" · ")}${f.overlaps.size ? ` · 수동 기록과 겹치는 것 같음 ${f.overlaps.size}건(표시만)` : ""}`);
+    } catch (e) {
+      setApiProgress(""); setErr(e instanceof Error ? e.message : String(e));
+    } finally { setBusy(false); }
+  };
   const applyPeriod = (p: PeriodKey) => {
     setPeriod(p);
     if (p === "custom") return;
@@ -137,12 +180,13 @@ export function TossImportDialog({ isOpen, onClose, onImported, groups }: Props)
       for (const c of cands) {
         if (!picked.has(c.key)) continue;
         const t: Omit<Trade, "id" | "createdAt"> & { id?: string } = {
-          id: `toss_${c.key}`,            // 멱등 — 재가져와도 덮어쓰기(중복 방지)
+          id: c.id ?? `toss_${c.key}`,    // 멱등 — 재가져와도 덮어쓰기(중복 방지). Open API 행은 tossapi_<orderId>
           ticker: c.ticker,
           type: c.type,
           date: c.date,
           qty: c.qty,
           amount: c.amount,
+          ...(c.fee ? { fee: c.fee } : {}),
           ...(acct ? { account: acct } : {}),
         };
         await addTrade(t);
@@ -166,7 +210,7 @@ export function TossImportDialog({ isOpen, onClose, onImported, groups }: Props)
           <div className="text-base font-bold text-gray-800">📥 토스 거래 가져오기</div>
           <div className="flex items-center gap-3">
             <button onClick={async () => {
-                      if (!confirm("저장된 모든 거래기록을 삭제할까요?\n(보유 수량/평단엔 영향 없음 — 거래 로그만 초기화)")) return;
+                      if (!(await appConfirm("저장된 모든 거래기록을 삭제할까요?\n(보유 수량/평단엔 영향 없음 — 거래 로그만 초기화)"))) return;
                       await replaceAllTrades([]);
                       onImported();
                     }}
@@ -177,6 +221,21 @@ export function TossImportDialog({ isOpen, onClose, onImported, groups }: Props)
         </div>
 
         <div className="px-4 py-3 overflow-y-auto space-y-3">
+          {/* 토스 Open API — 데스크톱 앱에서 연동 그룹이 있으면 맨 위에. 붙여넣기 없이 기간째 받는다 */}
+          {apiLink && (
+            <div className="rounded border border-violet-200 bg-violet-50/40 p-2.5 text-[12px] text-gray-700 space-y-1.5">
+              <div className="flex items-center gap-2 flex-wrap">
+                <b>🔗 토스 연동으로 불러오기</b>
+                <span className="text-[11px] text-gray-500">그룹 <b className="text-violet-700">{apiLink.group}</b> · 아래 조회 기간을 고르고 누르세요</span>
+                <button onClick={() => void fetchViaApi()} disabled={busy}
+                        className="px-3 py-1 rounded text-xs font-bold bg-violet-600 hover:bg-violet-700 text-white disabled:opacity-50">
+                  {busy && apiProgress && !apiProgress.startsWith("✅") ? apiProgress : "자동으로 불러오기"}
+                </button>
+              </div>
+              {apiProgress.startsWith("✅") && <div className="text-emerald-700 text-[11px]">{apiProgress}</div>}
+              <div className="text-[10px] text-gray-500">체결된 주문만(체결 수량·총액, 체결일 기준) · 미국은 체결일 환율로 원화 환산 · <b>장전·장후 시간외 종가 주문은 Open API 가 주지 않아</b> 그건 아래 붙여넣기 방식으로.</div>
+            </div>
+          )}
           {!cands && (
             <div className="text-[12px] text-gray-700 leading-relaxed">
               <b>1.</b> 먼저{" "}
@@ -242,7 +301,9 @@ export function TossImportDialog({ isOpen, onClose, onImported, groups }: Props)
                   신규 <b className="text-blue-600">{newCount}</b> · 이미있음 <b className="text-gray-400">{dupCount}</b>
                   {skipped > 0 && <> · 제외 {skipped}</>}
                 </span>
-                {groups.length > 0 && (
+                {apiLink && cands.some(c => c.id) ? (
+                  <span className="text-gray-500">그룹 <b className="text-violet-700">{account || apiLink.group}</b> (연동)</span>
+                ) : groups.length > 0 && (
                   <label className="text-gray-500">그룹
                     <select value={account} onChange={e => setAccount(e.target.value)}
                             className="ml-1 border border-gray-300 rounded px-1 py-0.5">
@@ -269,8 +330,10 @@ export function TossImportDialog({ isOpen, onClose, onImported, groups }: Props)
                         {c.type === "buy" ? "매수" : "매도"}
                       </span>
                       <span className="w-12 text-right tabular-nums">{c.qty}주</span>
-                      <span className="w-20 text-right tabular-nums">{won(c.amount)}</span>
+                      <span className="w-20 text-right tabular-nums" title={c.native ? `${c.native} → 체결일 환율 환산` : undefined}>{won(c.amount)}{c.native && <span className="text-gray-400 text-[9px] ml-0.5">$</span>}</span>
+                      <span className="w-12 text-right tabular-nums text-[10px] text-gray-400" title="수수료+세금">{c.fee ? `-${won(c.fee)}` : ""}</span>
                       {dup && <span className="w-10 text-right text-gray-400">있음</span>}
+                      {!dup && c.overlap && <span className="text-[10px] text-amber-700" title={`수동 기록(${c.overlap})과 같은 거래로 보입니다 — 둘 다 두면 그룹이 다를 때만 안전합니다`}>⚠ 수동과 겹침</span>}
                     </label>
                   );
                 })}

@@ -2,10 +2,10 @@
 //   섹터로 그룹핑 → 종목 타일(크기=시총/거래량, 색=등락률 한국식 빨강+/파랑−).
 //   scanner.tradingview.com 이 워커 화이트리스트에 없으면(403) 안내 + 원본 링크 폴백.
 import { useState, useRef, useEffect, useLayoutEffect, useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  fetchKrHeatmap, heatmapTradingViewUrl, heatmapLogoUrl, heatmapRegion, ProxyHostError,
-  HEATMAP_SOURCE_LABEL, type HeatmapSource, type HeatmapItem,
+  fetchHeatmapPreferServer, fetchTossPrices, fetchTossUsPricesBySymbol, heatmapTradingViewUrl, heatmapLogoUrl, heatmapRegion, ProxyHostError,
+  HEATMAP_SOURCE_LABEL, type HeatmapSource, type HeatmapItem, type HeatmapResult,
 } from "../lib/api";
 import { loadEtfWeights } from "../lib/etfWeights";
 import { squarify } from "../lib/treemap";
@@ -13,16 +13,31 @@ import { heatColor, sectorKr } from "../lib/heatColor";   // 심플 보기 히�
 import { loadKrNameDict, getRuntimeNames, fetchMissingKrNames } from "../lib/krStockNames";
 import { isMarketOpen } from "../lib/format";
 import { reportRefresh } from "../lib/lastRefresh";
-import { getEffectivePollMs } from "../lib/proxyConfig";
+import { getEffectivePollMs, hasDirectTransport } from "../lib/proxyConfig";
+import { dayChangePct } from "../lib/format";
+import { HEAT_SIGN_OPTS, type HeatSign } from "../lib/holdingsHeat";
+import { useIncrementalRender } from "../lib/useIncrementalRender";
 import { takePendingHeatmap } from "../lib/heatmapNav";
+import { preferServer, fmtServerStamp, fetchLiveIndex } from "../lib/liveServer";
+import { openStockInfo } from "../lib/tickPopup";
+import { openTossStock } from "../lib/toss";
+import { HeatTiles } from "./HeatTiles";
 
 const KR_SOURCES: HeatmapSource[] = ["kospi200", "kospi", "kosdaq150", "kosdaq", "kr_valueup", "all"];
 const US_SOURCES: HeatmapSource[] = ["us_sp500", "us_ndx", "us_tech", "us_nasdaq", "us_dow", "us_dowcomp",
   "us_dowtrans", "us_dowutil", "us_kbwbank", "us_r1000", "us_r2000", "us_r3000", "us_all"];
 // 종목 많은 소스는 상위 N만(트리맵 가독성·부하)
+//   S&P 500·러셀 1000 은 구성 전체가 들어가게(기본 400 에 걸려 일부만 나왔다). 상한보다 큰 소스는 이름에 '시총 상위 N'
+//   (사용자 2026-10-30 "전체가 아니라 상위 700 이라고 표시를 해야지") — 서버 live.js 의 HEAT 상한과 같은 값
 const SOURCE_LIMIT: Partial<Record<HeatmapSource, number>> = {
   all: 700, kosdaq: 700, us_tech: 500, us_nasdaq: 1000, us_r2000: 1000, us_r3000: 1000, us_all: 1000,
+  us_sp500: 510, us_r1000: 1010,
 };
+const CAPPED: Partial<Record<HeatmapSource, true>> = {
+  kospi: true, kosdaq: true, all: true, us_tech: true, us_nasdaq: true, us_r2000: true, us_r3000: true, us_all: true,
+};
+const sourceLabel = (s: HeatmapSource) =>
+  CAPPED[s] ? `${HEATMAP_SOURCE_LABEL[s]} (시총 상위 ${SOURCE_LIMIT[s] ?? 400})` : HEATMAP_SOURCE_LABEL[s];
 
 // 국내 주식 일일 가격제한폭(±30%). 이보다 큰 1일 등락률은 스캐너 기준가 오류로 본다.
 const KR_DAILY_LIMIT_PCT = 30;
@@ -58,9 +73,12 @@ const COLOR_OPTS: { key: ColorMode; label: string; sat: number; usOnly?: boolean
   { key: "y", label: "1년 수익률", sat: 40, field: it => it.perfY },
 ];
 // 그룹 기준
-type GroupMode = "sector" | "dir" | "none";
+type GroupMode = "sector" | "secdir" | "dir" | "none";
 
 
+// 그룹 색 — 빨강·파랑(등락 색)과 겹치지 않는 차분한 색 10개
+const GROUP_COLORS = ["#0f766e", "#7c3aed", "#b45309", "#0369a1", "#be185d", "#4d7c0f", "#6d28d9", "#c2410c", "#155e75", "#a16207"];
+const hashStr = (t: string) => { let h = 0; for (const ch of t) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return h; };
 const fmtPct = (p: number) => `${p >= 0 ? "+" : ""}${p.toFixed(2)}%`;
 // 금액 축약 — 한국은 원(조/억), 미국은 달러(T/B/M)
 function fmtCap(v: number): string {
@@ -99,10 +117,20 @@ export function HeatmapTab() {
   const marketOpen = isMarketOpen(isKr ? "KR" : "US");   // 표시용(장중/장마감 라벨)
   // 폴링 주기는 전역과 동일(getEffectivePollMs) — 상단 시계 카운트다운과 맞아 '0초 멈춤' 방지.
   //   수동 모드(0)면 폴링 안 함. 보유탭처럼 장마감에도 폴링(refetchIntervalInBackground).
+  //   웹은 서버 수집본 — 같은 주기마다 서버 갱신 시각(index.json, 작은 파일)만 보고 바뀌었을 때만 전체를 받는다
+  //   (사용자 2026-10-29 "히트맵(웹)도 시간체크해서 계속 업데이트"). 화면엔 서버가 받은 시각을 보여준다.
   const pollMs = getEffectivePollMs();
+  const qc = useQueryClient();
   const q = useQuery({
     queryKey: ["kr-heatmap", source],
-    queryFn: () => fetchKrHeatmap(source, SOURCE_LIMIT[source] ?? 400),
+    queryFn: async () => {
+      const limit = SOURCE_LIMIT[source] ?? 400;
+      if (!preferServer()) return fetchHeatmapPreferServer(source, limit);
+      const prev = qc.getQueryData<HeatmapResult>(["kr-heatmap", source]);
+      const v = (await fetchLiveIndex())?.[`heatmap/${source}`];
+      if (prev?.server && v && v === prev.fetchedAt) return prev;   // 서버 판이 그대로 — 다시 받지 않는다
+      return fetchHeatmapPreferServer(source, limit, v);
+    },
     staleTime: 0, refetchOnWindowFocus: false, retry: false,
     refetchInterval: pollMs > 0 ? pollMs : false,
     refetchIntervalInBackground: true,
@@ -160,13 +188,70 @@ export function HeatmapTab() {
   //   1일 등락률에만 적용 — 기간 수익률(1주~1년)은 30% 를 넘는 게 정상이고,
   //   미국은 상하한가 제도가 없으므로 국내 소스에서만 적용한다.
   //   신규상장 첫날(공모가 대비 최대 +300%)도 같이 빠지지만, 트리맵을 삼키는 건 마찬가지라 감수.
+  // 시세 출처 옵션 — 한국 소스에서 '토스 실시간'(NXT 프리·애프터 포함)을 고르면 등락률·현재가·거래량을 토스로 덮어쓴다
+  //   (사용자 2026-10-30 "지금 트레이딩뷰는 느려", "옵션 넣자", "앱이나 extension 에서만 가능해도 괜찮아").
+  //   섹터·시총·로고는 스캐너 값 그대로. 종목 수 ÷ 200 콜(코스닥 전체 700 = 4콜)이라 직결(앱·확장)일 때만 보인다.
+  //   미국 소스도(사용자 2026-10-30 "미국장은? 프리장에서?") — 프리·애프터·오버나이트 가격, % 는 직전 정규장 종가 대비(카드와 같은 기준)
+  const canToss = hasDirectTransport();
+  //   앱·확장은 토스가 기본(사용자 2026-10-30 "앱이랑 extension 에서는 그냥 토스를 기본으로") — 스캐너는 장 밖에도, 9시가 지나도 한동안 어제 값이다
+  type PriceSrc = "tv" | "toss";
+  const [priceSrc, setPriceSrc] = useState<PriceSrc>(() => {
+    try { return localStorage.getItem("heatmap_price_src") === "tv" ? "tv" : "toss"; } catch { return "toss"; }
+  });
+  const wantToss = canToss && priceSrc !== "tv";
+  const baseCodes = useMemo(() => (q.data?.items ?? []).map(it => it.code)
+    .filter(c => isKr ? /^[\dA-Za-z]{6}$/.test(c) : /^[A-Z][A-Z.]{0,6}$/.test(c)), [q.data, isKr]);
+  const tossQ = useQuery({
+    queryKey: ["heatmap-toss", source, baseCodes.join(",")],
+    queryFn: () => isKr ? fetchTossPrices(baseCodes) : fetchTossUsPricesBySymbol(baseCodes),
+    enabled: wantToss && baseCodes.length > 0,
+    staleTime: 0, refetchOnWindowFocus: false, retry: false,
+    refetchInterval: wantToss && getEffectivePollMs() > 0 ? getEffectivePollMs() : false,
+    refetchIntervalInBackground: true,
+  });
+  const useToss = wantToss;
+  // 오늘 체결이 없는 종목(카드에서 흐린 것) — 토스 체결일로만 안다. 전부 그렇다면(휴장·장 전) 빈 집합으로(다 빠지지 않게)
+  const staleCodes = useMemo(() => {
+    if (!useToss || !isKr || !tossQ.data?.length) return new Set<string>();   // 미국은 24시간 거래라 흐림 판정을 여기서 안 한다
+    const today = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10);
+    const stale = tossQ.data.filter(p => p.trade_date !== today).map(p => p.ticker);
+    return stale.length < tossQ.data.length ? new Set(stale) : new Set<string>();
+  }, [useToss, isKr, tossQ.data]);
+  // 상승만 / 하락만 · 흐린 종목 제외(심플 보기 히트맵과 같은 버튼, 사용자 2026-10-30) — 기준은 지금 고른 색 기준 값
+  const [sign, setSign] = useState<HeatSign>("all");
+  // 히트맵 | 타일 — 카드 보기는 뺐다(사용자 2026-11-09 "히트맵에 카드는 삭제")
+  const [view, setView] = useState<"heat" | "tile">("heat");
+  const tileView = view === "tile";
+  const cardView = tileView;   // 트리맵 캔버스를 숨기는 보기
+  // 타일 — 작은 칸에 로고·이름·등락률·값·시총(kospimap 증시 전광판처럼, 사용자 2026-11-09 "둘 다 해 보자"). 시총순 | 등락순
+  const tossByCode = useMemo(() => new Map((useToss ? tossQ.data ?? [] : []).map(p => [p.ticker, p])), [useToss, tossQ.data]);
+  const [hideStale, setHideStale] = useState<boolean>(() => { try { return localStorage.getItem("heatmap_hide_stale") === "1"; } catch { return false; } });
+  const liveItems = useMemo(() => {
+    const items = q.data?.items ?? [];
+    if (!useToss || !tossQ.data?.length) return items;
+    const by = new Map(tossQ.data.map(p => [p.ticker, p]));
+    return items.map(it => {
+      const p = by.get(it.code);
+      if (!p || !(p.price > 0)) return it;
+      const pct = dayChangePct(p);   // 카드와 같은 기준 — 어제 종가 대비, 오늘 체결 없으면 직전 거래일 등락
+      return { ...it, close: p.price, changePct: pct ?? it.changePct,
+        ...(p.volume > 0 ? { volume: p.volume, valueTraded: p.volume * p.price } : {}) };
+    });
+  }, [q.data, useToss, tossQ.data]);
   const rows = useMemo(
     // 0.5%p 여유 — 상한가는 정확히 +30% 지만 (1300/1000-1)*100 이 부동소수점상
     //   30.000000000000004 로 나와 정상 상한가가 걸러질 수 있다.
-    () => (q.data ?? []).filter(it => !isKr || Math.abs(it.changePct) <= KR_DAILY_LIMIT_PCT + 0.5),
-    [q.data, isKr],
+    () => liveItems.filter(it => !isKr || Math.abs(it.changePct) <= KR_DAILY_LIMIT_PCT + 0.5),
+    [liveItems, isKr],
   );
-  const dropped = (q.data?.length ?? 0) - rows.length;
+  const shown = useMemo(() => rows.filter(it => {
+    if (hideStale && staleCodes.has(it.code)) return false;
+    const v = colorDef.field(it);
+    return sign === "all" || (sign === "up" ? v > 0 : v < 0);
+  }), [rows, hideStale, staleCodes, sign, colorDef]);
+  const { count: cardCount, sentinelRef: cardSentinel, hasMore: cardHasMore } =
+    useIncrementalRender<HTMLDivElement>(tileView ? shown.length : 0, 120, `${source}|${sign}|${colorMode}|${hideStale}|${view}`);
+  const dropped = (q.data?.items.length ?? 0) - rows.length;
 
   // 등락률 변동폭 크기 모드의 허수 필터 — 거래량 1·거래대금 미미한데 ±100% 찍히는 호가는
   // 실제 자금 이동이 없는 허수라 크기 왜곡을 유발. 데이터셋 거래대금 중앙값의 2% 미만이면 제외.
@@ -199,18 +284,25 @@ export function HeatmapTab() {
   // 트리맵 — 그룹=섹터/등락방향이면 2단계(그룹→종목), 그룹없음이면 종목만 1단계.
   const layout = useMemo(() => {
     // change 모드에선 유동성 미달(허수) 종목 제외 — liqFloor=0 이면 전체 통과
-    const items = rows.filter(it => liqFloor <= 0 || it.valueTraded >= liqFloor);
-    const empty = { stocks: [] as { it: HeatmapItem; x: number; y: number; w: number; h: number }[], headers: [] as { sec: string; x: number; y: number; w: number }[] };
+    const items = shown.filter(it => liqFloor <= 0 || it.valueTraded >= liqFloor);
+    const empty = { stocks: [] as { it: HeatmapItem; x: number; y: number; w: number; h: number }[], headers: [] as { sec: string; x: number; y: number; w: number; h: number; avg?: number }[], dividers: [] as { x: number; y: number; w: number; h: number }[] };
     if (!items.length || size.w < 40 || size.h < 40) return empty;
     const stocks: { it: HeatmapItem; x: number; y: number; w: number; h: number }[] = [];
-    const headers: { sec: string; x: number; y: number; w: number }[] = [];
+    const headers: { sec: string; x: number; y: number; w: number; h: number; avg?: number }[] = [];
+    const dividers: { x: number; y: number; w: number; h: number }[] = [];   // 섹터+상승/하락 — 섹터 안 경계선
+    // 그룹 칸 — 머리 18px(글자 크게) + 칸 사이 3px 틈 + 테두리(사용자 2026-11-03 "그룹을 잘 확인 가능하게, 그룹명 키우고 경계 명확히")
+    const HEAD = 18, GAP = 3;   // 테두리 2px + 안쪽 틈(사용자 2026-11-03 — 4px 은 굵어 "더 가늘게")
+    const M = 0.5;               // 그룹 사이 바깥 간격(양쪽 0.5px = 1px — 사용자 2026-11-03 "너무 띄웠어" → "더 좁게")
+    const shrink = (r: { x: number; y: number; w: number; h: number }) => ({ x: r.x + M, y: r.y + M, w: Math.max(0, r.w - 2 * M), h: Math.max(0, r.h - 2 * M) });
+    const avgOf = (list: HeatmapItem[]) => list.length ? list.reduce((a, it) => a + colorDef.field(it), 0) / list.length : undefined;
     if (groupMode === "none") {
       const cells = squarify(items.map(it => ({ item: it, value: sizeVal(it) })), { x: 0, y: 0, w: size.w, h: size.h });
       for (const c of cells) stocks.push({ it: c.item, x: c.x, y: c.y, w: c.w, h: c.h });
-      return { stocks, headers };
+      return { stocks, headers, dividers };
     }
     // 그룹 키 — 섹터 또는 등락 방향. 방향은 '색 기준'과 같은 값으로 나눈다.
     //   1일 등락으로 나누고 색은 1개월 수익률이면 상승 블록에 파란 타일이 섞여 읽기 어렵다.
+    const dirOf = (it: HeatmapItem) => { const v = colorDef.field(it); return v > 0 ? 0 : v < 0 ? 2 : 1; };   // 상승·보합·하락
     const groupKey = groupMode === "dir"
       ? (it: HeatmapItem) => { const v = colorDef.field(it); return v > 0 ? "상승" : v < 0 ? "하락" : "보합"; }
       : (it: HeatmapItem) => it.sector;
@@ -231,16 +323,17 @@ export function HeatmapTab() {
       blocks.forEach((g, i) => {
         // 마지막 블록은 남은 폭을 다 써서 반올림 오차로 빈 틈이 생기지 않게 한다
         const w = i === blocks.length - 1 ? size.w - x : (size.w * g.total) / sum;
-        const head = size.h > 34 && w > 46 ? 13 : 0;
-        if (head) headers.push({ sec: `${g.k} ${g.list.length}`, x, y: 0, w });
+        const b = shrink({ x, y: 0, w, h: size.h });
+        const head = b.h > 40 && b.w > 46 ? HEAD : 0;
+        headers.push({ sec: `${g.k} ${g.list.length}`, ...b, avg: avgOf(g.list) });
         const cells = squarify(
           g.list.map(it => ({ item: it, value: sizeVal(it) })),
-          { x, y: head, w, h: size.h - head },
+          { x: b.x + GAP, y: b.y + head + GAP / 2, w: Math.max(0, b.w - GAP * 2), h: Math.max(0, b.h - head - GAP * 1.5) },
         );
         for (const c of cells) stocks.push({ it: c.item, x: c.x, y: c.y, w: c.w, h: c.h });
         x += w;
       });
-      return { stocks, headers };
+      return { stocks, headers, dividers };
     }
 
     const sectorInputs = [...byGroup].map(([sec, list]) => ({
@@ -248,15 +341,33 @@ export function HeatmapTab() {
     }));
     const sectorTiles = squarify(sectorInputs, { x: 0, y: 0, w: size.w, h: size.h });
     for (const st of sectorTiles) {
-      const head = st.h > 34 && st.w > 46 ? 13 : 0;
-      if (head) headers.push({ sec: st.item.sec, x: st.x, y: st.y, w: st.w });
-      const inner = { x: st.x, y: st.y + head, w: st.w, h: st.h - head };
+      const b = shrink(st);
+      const head = b.h > 40 && b.w > 46 ? HEAD : 0;
+      headers.push({ sec: st.item.sec, ...b, avg: avgOf(st.item.list) });
+      const inner = { x: b.x + GAP, y: b.y + head + GAP / 2, w: Math.max(0, b.w - GAP * 2), h: Math.max(0, b.h - head - GAP * 1.5) };
+      if (groupMode === "secdir") {
+        // 섹터 안을 상승 | 보합 | 하락으로 나눈다(사용자 2026-11-03 "섹터 안에 상승·하락을 반반씩") — 폭은 크기 합에 비례,
+        //   넓은 칸은 좌→우(상승 왼쪽), 좁고 긴 칸은 위→아래(상승 위). 순서 고정이라 섹터끼리 비교가 된다
+        const parts = [0, 1, 2].map(d => st.item.list.filter(it => dirOf(it) === d)).filter(l => l.length);
+        const tot = parts.reduce((a, l) => a + l.reduce((b, it) => b + sizeVal(it), 0), 0) || 1;
+        const horiz = inner.w >= inner.h;
+        let off = 0;
+        parts.forEach((l, i) => {
+          const share = l.reduce((b, it) => b + sizeVal(it), 0) / tot;
+          const span = i === parts.length - 1 ? (horiz ? inner.w : inner.h) - off : (horiz ? inner.w : inner.h) * share;
+          const r = horiz ? { x: inner.x + off, y: inner.y, w: span, h: inner.h } : { x: inner.x, y: inner.y + off, w: inner.w, h: span };
+          for (const c of squarify(l.map(it => ({ item: it, value: sizeVal(it) })), r)) stocks.push({ it: c.item, x: c.x, y: c.y, w: c.w, h: c.h });
+          if (i < parts.length - 1) dividers.push(horiz ? { x: r.x + r.w - 1, y: r.y, w: 2, h: r.h } : { x: r.x, y: r.y + r.h - 1, w: r.w, h: 2 });
+          off += span;
+        });
+        continue;
+      }
       const cells = squarify(st.item.list.map(it => ({ item: it, value: sizeVal(it) })), inner);
       for (const c of cells) stocks.push({ it: c.item, x: c.x, y: c.y, w: c.w, h: c.h });
     }
-    return { stocks, headers };
+    return { stocks, headers, dividers };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, size.w, size.h, sizeModeEff, groupMode, colorDef, liqFloor, weightMap]);
+  }, [shown, size.w, size.h, sizeModeEff, groupMode, colorDef, liqFloor, weightMap]);
 
   const isHostErr = q.error instanceof ProxyHostError;
 
@@ -264,18 +375,29 @@ export function HeatmapTab() {
     <div className="p-2">
       {/* 컨트롤 */}
       <div className="flex flex-wrap items-center gap-2 mb-2">
+        {/* 히트맵 | 카드 — 히트맵 팝업(SimpleViewModal)과 같은 버튼·같은 카드(사용자 2026-10-30 "이거도 동일하면"). 미국도(달러 카드) */}
+        {(
+          <span className="inline-flex rounded border border-gray-300 overflow-hidden text-[12px] font-bold">
+            {(["heat", "tile"] as const).map(v => (
+              <button key={v} onClick={() => { setView(v); if (v === "tile") setColorMode("change"); }}
+                      className={`px-2 py-1 ${view === v ? "bg-indigo-600 text-white" : "bg-white text-gray-600 hover:bg-gray-100"}`}>{v === "heat" ? "히트맵" : "타일"}</button>
+            ))}
+          </span>
+        )}
         <label className="flex items-center gap-1 text-xs">
           <span className="text-gray-400">지수</span>
           <select value={source} onChange={e => setSource(e.target.value as HeatmapSource)}
                   className="border border-gray-300 rounded px-1.5 py-1 bg-white font-semibold text-gray-800">
             <optgroup label="🇰🇷 한국">
-              {KR_SOURCES.map(s => <option key={s} value={s}>{HEATMAP_SOURCE_LABEL[s]}</option>)}
+              {KR_SOURCES.map(s => <option key={s} value={s}>{sourceLabel(s)}</option>)}
             </optgroup>
             <optgroup label="🇺🇸 미국">
-              {US_SOURCES.map(s => <option key={s} value={s}>{HEATMAP_SOURCE_LABEL[s]}</option>)}
+              {US_SOURCES.map(s => <option key={s} value={s}>{sourceLabel(s)}</option>)}
             </optgroup>
           </select>
         </label>
+        {/* 타일 보기에선 크기·색·그룹이 안 쓰인다 — 숨김(사용자 2026-11-09 "타일일 때 안 되는 건 숨김") */}
+        {!tileView && (<>
         <label className="flex items-center gap-1 text-xs">
           <span className="text-gray-400">크기</span>
           <select value={sizeModeEff} onChange={e => setSizeMode(e.target.value as SizeMode)}
@@ -295,12 +417,40 @@ export function HeatmapTab() {
           <select value={groupMode} onChange={e => setGroupMode(e.target.value as GroupMode)}
                   className="border border-gray-300 rounded px-1.5 py-1 bg-white font-medium text-gray-700">
             <option value="sector">섹터</option>
+            <option value="secdir">섹터+상승/하락</option>
             <option value="dir">상승/하락</option>
             <option value="none">그룹없음</option>
           </select>
         </label>
+        </>)}
+        {canToss && (
+          <label className="flex items-center gap-1 text-xs" title="토스 실시간 = 등락률·현재가·거래량을 토스(NXT 프리·애프터 포함)로 갱신 주기마다. 섹터·시총은 TradingView 그대로 — 앱·확장에서만">
+            <span className="text-gray-400">시세</span>
+            <select value={priceSrc}
+                    onChange={e => { const v = e.target.value as PriceSrc; setPriceSrc(v); try { localStorage.setItem("heatmap_price_src", v); } catch { /* 이번 화면만 */ } }}
+                    className="border border-gray-300 rounded px-1.5 py-1 bg-white font-medium text-gray-700">
+              <option value="toss">토스 실시간</option>
+              <option value="tv">TradingView</option>
+            </select>
+          </label>
+        )}
+        <span className="inline-flex rounded border border-gray-300 overflow-hidden text-xs font-bold" title="색 기준 값이 +인 종목만 / −인 종목만">
+          {HEAT_SIGN_OPTS.map(o => (
+            <button key={o.key} onClick={() => setSign(o.key)}
+                    className={`px-2 py-1 ${sign === o.key
+                      ? (o.key === "up" ? "bg-rose-600 text-white" : o.key === "down" ? "bg-blue-600 text-white" : "bg-gray-800 text-white")
+                      : "bg-white text-gray-600 hover:bg-gray-100"}`}>{o.label}</button>
+          ))}
+        </span>
+        {useToss && isKr && (
+          <label className="inline-flex items-center gap-1 text-xs cursor-pointer select-none" title="오늘 체결이 없어 지난 거래일 값에 멈춘(카드에서 흐린) 종목을 뺀다 — 전부 안 열렸을 땐 그대로 둔다(토스 실시간일 때만)">
+            <input type="checkbox" checked={hideStale}
+                   onChange={e => { setHideStale(e.target.checked); try { localStorage.setItem("heatmap_hide_stale", e.target.checked ? "1" : "0"); } catch { /* 이번 화면만 */ } }} />
+            흐린 종목 제외
+          </label>
+        )}
         <span className="text-[10px] text-gray-400">
-          색: 빨강▲/파랑▼ · {rows.length}종목
+          색: 빨강▲/파랑▼ · {shown.length}종목
           {dropped > 0 && (
             <span className="text-gray-300"
                   title={`1일 등락률이 ±${KR_DAILY_LIMIT_PCT}% 를 벗어난 ${dropped}종목 제외.\n국내 가격제한폭상 불가능한 값 — 거래정지·액면병합 종목의 기준가 오류로 보고 걸러냅니다.`}>
@@ -308,7 +458,21 @@ export function HeatmapTab() {
             </span>
           )}
         </span>
-        {ago != null && (
+        {useToss && tossQ.dataUpdatedAt > 0 ? (
+          <span className="text-[10px] text-gray-500 flex items-center gap-1" title="등락률·현재가 = 토스(한국 NXT·미국 프리·애프터·오버나이트 포함), 섹터·시총 = TradingView">
+            <span className="text-emerald-500">●</span>
+            토스 실시간 · {tossQ.isFetching ? "갱신 중…" : `${Math.max(0, Math.round((Date.now() - tossQ.dataUpdatedAt) / 1000))}초 전`}
+          </span>
+        ) : q.data?.server ? (
+          // 서버 수집본 — 서버가 받은 시각(사용자 요청 2026-10-29 "히트맵은 갱신시간을 표시")
+          <span className="text-[10px] text-gray-500 flex items-center gap-1"
+                title="서버가 장중 2분(대표 4개)~10분마다 받아 둔 값입니다. 서버 시각이 바뀌면 저절로 새로 받습니다(앱은 실시간).">
+            <span className={marketOpen ? "text-emerald-500" : "text-gray-300"}>●</span>
+            서버 갱신 <b className="text-gray-700">{fmtServerStamp(q.data.fetchedAt)}</b>
+            <span className="text-gray-400">({Math.max(0, Math.round((Date.now() - q.data.fetchedAt) / 60_000))}분 전)</span>
+            {marketOpen ? " · 장중" : " · 장마감"}
+          </span>
+        ) : ago != null && (
           <span className="text-[10px] text-gray-400 flex items-center gap-1">
             <span className={marketOpen ? "text-emerald-500" : "text-gray-300"}>●</span>
             {q.isFetching ? "갱신 중…" : `${ago}초 전`}{marketOpen ? " · 장중" : " · 장마감"}
@@ -318,8 +482,17 @@ export function HeatmapTab() {
            className="text-[10px] text-blue-600 hover:underline ml-auto">TradingView 원본 ↗</a>
       </div>
 
-      {/* 트리맵 캔버스 */}
-      <div ref={boxRef} className="relative w-full h-[72vh] min-h-[360px] bg-gray-100 rounded-lg overflow-hidden">
+      {/* 카드 — 지금 거른 종목(+만/−만·흐림 제외)을 색 기준 값 큰 순으로 */}
+      {tileView && (<>
+        {/* 타일 판은 components/HeatTiles 한 벌(그룹 히트맵·업종 칸 팝업과 같이 쓴다) */}
+        <HeatTiles limit={cardCount}
+                   tiles={shown.map(it => ({ code: it.code, name: krName(it), pct: it.changePct, price: tossByCode.get(it.code)?.price ?? it.close,
+                                             kr: isKr, cap: it.marketCap || it.aum, logoid: it.logoid, dim: staleCodes.has(it.code) }))} />
+        {cardHasMore && <div ref={cardSentinel} className="h-8" />}
+      </>)}
+
+      {/* 트리맵 캔버스 — 카드 보기일 땐 숨겨만 둔다(크기 측정이 끊기지 않게) */}
+      <div ref={boxRef} className={`relative w-full h-[72vh] min-h-[360px] bg-gray-100 rounded-lg overflow-hidden ${cardView ? "hidden" : ""}`}>
         {q.isLoading && <div className="absolute inset-0 flex items-center justify-center text-sm text-gray-400">불러오는 중…</div>}
 
         {isHostErr && (
@@ -354,12 +527,27 @@ export function HeatmapTab() {
         )}
 
         {/* 섹터 헤더 */}
-        {layout.headers.map(h => (
+        {/* 그룹 칸 — 바깥 테두리 + 머리(그룹명 크게 · 종목 평균 등락) */}
+        {/* 그룹마다 색을 다르게(사용자 2026-11-03) — 테두리·머리 띠. 이름으로 색을 고정해 새로고침해도 같은 섹터는 같은 색 */}
+        {layout.headers.map(h => { const gc = GROUP_COLORS[hashStr(h.sec) % GROUP_COLORS.length]; return (
           <div key={`h-${h.sec}-${Math.round(h.x)}-${Math.round(h.y)}`}
-               className="absolute text-[9px] font-semibold text-gray-500 px-1 truncate pointer-events-none"
-               style={{ left: h.x, top: h.y, width: h.w, height: 13, lineHeight: "13px" }}>
-            {sectorKr(h.sec)}
+               className="absolute pointer-events-none rounded border-2"
+               style={{ left: h.x + 0.5, top: h.y + 0.5, width: Math.max(0, h.w - 1), height: Math.max(0, h.h - 1), borderColor: `${gc}66`, background: `${gc}12` }}>   {/* 테두리도 연하게(40%, 사용자 2026-11-03) */}   {/* 섹터 칸 배경은 아주 연하게(약 7%, 사용자 2026-11-03 "투명하고 연하게") */}
+            {h.h > 40 && h.w > 46 && (
+              <div className="flex items-baseline gap-1.5 px-1.5 truncate" style={{ height: 16, lineHeight: "16px", background: `${gc}2e` }}>   {/* 머리 띠도 연하게, 글자를 섹터 색으로(사용자 2026-11-03) */}
+                <span className="text-[12px] font-bold truncate" style={{ color: gc }}>{sectorKr(h.sec)}</span>
+                {h.avg != null && h.w > 110 && (
+                  <span className={`text-[11px] font-bold tabular-nums ${h.avg > 0 ? "text-rose-600" : h.avg < 0 ? "text-blue-600" : "text-gray-500"}`}>
+                    {h.avg > 0 ? "▲" : h.avg < 0 ? "▼" : ""}{h.avg > 0 ? "+" : ""}{h.avg.toFixed(2)}%
+                  </span>
+                )}
+              </div>
+            )}
           </div>
+        ); })}
+        {/* 섹터 안 상승 | 하락 경계선 — 종목 칸 위에 그린다 */}
+        {layout.dividers.map((d, i) => (
+          <div key={`d-${i}`} className="absolute z-[5] bg-white/90 pointer-events-none" style={{ left: d.x, top: d.y, width: d.w, height: d.h }} />
         ))}
 
         {/* 종목 타일 — 로고 + (회사명) + 코드 + 등락%. 폰트·로고는 타일 크기에 비례. hover 강조+툴팁. */}
@@ -369,11 +557,21 @@ export function HeatmapTab() {
           const codeFs = s >= 190 ? 30 : s >= 140 ? 24 : s >= 100 ? 18 : s >= 66 ? 13 : s >= 42 ? 10 : (t.w > 30 && t.h > 18 ? 8 : 0);
           const nameFs = s >= 190 ? 18 : s >= 140 ? 15 : s >= 95 ? 12 : 0;   // 회사명은 공간 넉넉할 때만
           const pctFs = Math.max(7, Math.round(codeFs * 0.82));
+          // 한국은 **종목명이 주인공**(사용자 2026-11-02 "코드보다 종목명이 더 중요") — 코드 자리에 이름을, 칸 폭에 맞춰 글자 크기를 줄인다.
+          //   한글 1글자 ≈ 1em, 영숫자 ≈ 0.6em. 코드는 칸이 넉넉할 때만 작게. 미국은 티커가 곧 이름이라 그대로.
+          const nm = krName(t.it);
+          const em = [...nm].reduce((a, ch) => a + (/[\u3131-\uD79D]/.test(ch) ? 1 : 0.6), 0) || 1;
+          const mainFs = isKr ? Math.min(codeFs, Math.floor((t.w - 6) / em)) : codeFs;
+          const mainTxt = isKr ? nm : t.it.code;
+          const subFs = isKr ? (s >= 95 ? Math.max(9, Math.round(codeFs * 0.5)) : 0) : nameFs;
           return (
+            // 칸 누르면 한국 = 📊종목정보 창, 미국 = 토스 종목 페이지(종목정보 창엔 미국 자료가 없다, 없으면 야후)
+            //   사용자 2026-10-30 "클릭도 안 되는데", "바로 연결 말고 종목정보창", "미장은 정보가 없으니 바로 연결"
             <div key={t.it.code}
+                 onClick={() => isKr ? openStockInfo(t.it.code, krName(t.it)) : openTossStock(t.it.code)}
                  onMouseMove={e => setHover({ it: t.it, x: e.clientX, y: e.clientY })}
                  onMouseLeave={() => setHover(null)}
-                 className="absolute flex flex-col items-center justify-center gap-0.5 overflow-hidden text-white cursor-default
+                 className="absolute flex flex-col items-center justify-center gap-0.5 overflow-hidden text-white cursor-pointer
                             hover:outline hover:outline-2 hover:-outline-offset-2 hover:outline-white hover:z-10 hover:brightness-110"
                  style={{
                    left: t.x + 0.5, top: t.y + 0.5,
@@ -386,17 +584,22 @@ export function HeatmapTab() {
                      className="rounded-full bg-white/90 object-contain pointer-events-none"
                      style={{ width: logoSize, height: logoSize, padding: 1 }} />
               )}
-              {nameFs > 0 && (
+              {!isKr && subFs > 0 && (
                 <span className="font-semibold leading-tight text-center max-w-full px-1 pointer-events-none line-clamp-2"
-                      style={{ fontSize: nameFs }}>
-                  {krName(t.it)}
+                      style={{ fontSize: subFs }}>
+                  {nm}
                 </span>
               )}
               {codeFs > 0 && (
                 <>
-                  <span className="font-semibold leading-none truncate max-w-full px-0.5 pointer-events-none" style={{ fontSize: codeFs }}>
-                    {t.it.code}
-                  </span>
+                  {mainFs >= 7 && (
+                    <span className="font-semibold leading-none truncate max-w-full px-0.5 pointer-events-none" style={{ fontSize: mainFs }}>
+                      {mainTxt}
+                    </span>
+                  )}
+                  {isKr && subFs > 0 && (
+                    <span className="leading-none opacity-70 pointer-events-none" style={{ fontSize: subFs }}>{t.it.code}</span>
+                  )}
                   <span className="leading-none pointer-events-none" style={{ fontSize: pctFs }}>{fmtPct(colorDef.field(t.it))}</span>
                   {weightOf(t.it.code) != null && (
                     <span className="leading-none font-bold pointer-events-none bg-black/25 rounded px-1"
@@ -436,6 +639,7 @@ export function HeatmapTab() {
           <div className="font-bold text-gray-700 mb-1">🗂️ 그룹 (배치 방식)</div>
           <ul className="space-y-0.5 leading-relaxed">
             <li><b>섹터</b> — 업종(전자기술·금융·생산자제조 등)별로 묶어 배치. 어느 업종이 강한지 한눈에</li>
+            <li><b>섹터+상승/하락</b> — 업종 안을 다시 상승(왼쪽·위) | 하락(오른쪽·아래)으로 나눔. 폭은 크기 합에 비례 — 업종 안에서 오른 쪽이 얼마나 되는지</li>
             <li><b>상승/하락</b> — 왼쪽 상승 · 오른쪽 하락으로 갈라 배치(자리 고정). 블록 폭이 곧 비중이고, 헤더 숫자가 각 블록 종목 수(기준은 위에서 고른 <b>색</b> 기준과 동일)</li>
             <li><b>그룹없음</b> — 업종 구분 없이 전체를 크기순으로 배치</li>
           </ul>

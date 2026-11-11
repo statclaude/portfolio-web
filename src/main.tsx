@@ -2,9 +2,51 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
+import { isDirectApp } from './lib/nativeProxy'
+import { applyNightBg } from './lib/nightBg'
+import { pruneMarketCache } from './lib/marketCache'
+import { installSystemBars } from './lib/systemBars'
+import { startFuturesTape } from './lib/futuresTape'
+import { startKisRadar } from './lib/kisRadar'
+import { startKisVi } from './lib/kisVi'
+import { routePreview } from './lib/previewMode'
+import { startGlobalTips } from './lib/globalTips'
+import { MarketHaltBanner } from './components/MarketHaltBanner'
+
+// 야간 배경 — 첫 그림 전에 적용(깜빡임 방지)
+applyNightBg()
+// 포크: installInAppBrowser·startAndroidBack 은 넣지 않는다 — 포크 APK 가 외부 링크·뒤로가기를 App.tsx/MobileSimpleView 에서 직접 처리
+// 안드로이드 앱 — 위아래 시스템 막대(전체 화면·야간 스타일)
+installSystemBars()
+// 기기 시세 캐시 — 이틀 넘은 줄 정리(어차피 다시 받는다)
+pruneMarketCache()
+// 코스피200 선물 장중 기록(미결제약정·외국인) — 어느 탭이든 앱이 켜져 있으면 1분마다(외국인 K200 선물 패널용)
+startFuturesTape()
+startKisRadar()   // 거래대금 급증 레이더 — 앱+한국투자일 때만 실제로 부른다
+startKisVi()      // VI 발동 꼬리표 — 앱+한국투자일 때만
+
+// 앱(네이티브)에서는 서비스워커를 쓰지 않는다.
+//   앱은 배포된 웹을 원격으로 불러온다(capacitor.config server.url). 그런데 그 웹에는 PWA
+//   서비스워커가 붙어 있어서, 그대로 두면 앱이 옛 번들을 캐시로 붙잡는다 —
+//   "웹만 배포하면 앱도 따라온다" 는 전제가 깨지고, 사용자가 강제 갱신을 눌러야만 반영된다.
+//   앱은 APK 로 갱신하지 SW 로 갱신하지 않으므로, 등록된 게 있으면 지우고 캐시도 비운다.
+//   (index.html 의 자동 등록 스크립트는 그대로 두고 여기서 되돌린다 — 웹 갱신 흐름은 무손상)
+// 데스크톱 앱(맥·윈도우)도 같다 — 맥 앱이 옛 화면(옛 합계 바)을 붙잡고 있었다(2026-10-23)
+if (isDirectApp() && 'serviceWorker' in navigator) {
+  void navigator.serviceWorker.getRegistrations()
+    .then(regs => Promise.all(regs.map(r => r.unregister())))
+    .then(() => (typeof caches !== 'undefined'
+      ? caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))))
+      : undefined))
+    .catch(() => { /* 지우기 실패해도 앱 동작에는 지장 없음 */ })
+}
+
+startGlobalTips()   // 마우스 설명을 흰 레이어로(앱 전체)
+routePreview()   // 미리보기 모드면 /preview/ 로(같은 사이트라 오늘 기록 그대로)
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <App />
+    <MarketHaltBanner />   {/* 사이드카·서킷브레이커 경고(모든 화면) */}
   </StrictMode>,
 )

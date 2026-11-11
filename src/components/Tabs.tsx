@@ -4,12 +4,15 @@ import { createPortal } from "react-dom";
 import type { Stock } from "../types";
 import { normalizeAccount } from "../lib/account";
 import { getIndependentGroupsMode } from "../lib/groupMode";
-import { DASHBOARD_PAGES, INDEX_GROUP_KEYS, defaultDashboardPage, type DashboardPage } from "../lib/dashboardGroups";
+import { DASHBOARD_PAGES, INDEX_GROUP_KEYS, type DashboardPage } from "../lib/dashboardGroups";
 import type { TabVisibility } from "../lib/tabVisibility";
 import type { GroupFolder } from "../lib/groupFolders";
+import { BROKER_FOLDER, isLinkedGroup } from "../lib/linkedGroups";
+import { FolderIcon } from "./FolderIcon";
 import {
   getGroupFolders, folderAllKey, isFolderAllKey, folderNameOfAllKey, FOLDER_ALL_LABEL,
 } from "../lib/groupFolders";
+import { appConfirm, appPrompt } from "../lib/appDialog";
 
 export interface TabSpec {
   key: string;
@@ -30,8 +33,8 @@ interface Props {
 }
 
 export function Tabs({ tabs, activeKey, onChange, onRename, onDelete, folders, leading }: Props) {
-  const handleRename = (oldKey: string, displayLabel: string) => {
-    const next = window.prompt(`"${displayLabel}" 그룹명 변경 — 새 이름:`, displayLabel);
+  const handleRename = async (oldKey: string, displayLabel: string) => {
+    const next = await appPrompt(`"${displayLabel}" 그룹명 변경 — 새 이름:`, displayLabel);
     if (next == null) return;
     const trimmed = next.trim();
     if (!trimmed || trimmed === oldKey) return;
@@ -53,8 +56,8 @@ export function Tabs({ tabs, activeKey, onChange, onRename, onDelete, folders, l
 
   // 시스템 탭 묶기 — 섹터~ETF 를 드롭다운 하나로 (증시·지수는 자주 써서 별도 고정 탭으로 분리)
   const sysTabs = tabs.filter(t => SYSTEM_TAB_KEYS.has(t.key)
-    && t.key !== US_MARKET_TAB_KEY && t.key !== MARKET_MONEY_TAB_KEY && t.key !== SEMI_DASH_TAB_KEY);
-  const indexTabs = tabs.filter(t => INDEX_GROUP_KEYS.has(t.key) || t.key === SEMI_DASH_TAB_KEY);   // 반도체 대시보드도 지수 묶음 끝에   // 지수 드롭다운(주간·야간·반도체)
+    && t.key !== US_MARKET_TAB_KEY && t.key !== MARKET_MONEY_TAB_KEY && t.key !== SEMI_DASH_TAB_KEY && t.key !== SEOHAK_TAB_KEY && t.key !== HOT_TAB_KEY);
+  const indexTabs = tabs.filter(t => INDEX_GROUP_KEYS.has(t.key) || t.key === SEMI_DASH_TAB_KEY || t.key === SEOHAK_TAB_KEY || t.key === HOT_TAB_KEY);   // 반도체 대시보드도 지수 묶음 끝에   // 지수 드롭다운(주간·야간·반도체)
   const marketMoneyTab = tabs.find(t => t.key === MARKET_MONEY_TAB_KEY);
   // 내자산 묶기 — 내주식 + 내거래 드롭다운 하나로
   const myTabs = tabs.filter(t => MY_GROUP_KEYS.has(t.key));
@@ -91,6 +94,8 @@ export function Tabs({ tabs, activeKey, onChange, onRename, onDelete, folders, l
         </button>
       );
     }
+    // "지수(업종별)" → "업종별" — 묶음 이름(지수)이 이미 메뉴 제목이라 겹친다(사용자 2026-11-09)
+    const shortLabel = (l: string) => { const m = new RegExp(`^(?:${menuTitle}|지수)\\((.*)\\)$`).exec(l); return m ? m[1] : l; };
     const activeOne = groupTabs.find(t => t.key === activeKey);
     const current = activeOne ? activeKey : groupTabs[0].key;
     const curTab = groupTabs.find(t => t.key === current);
@@ -101,17 +106,95 @@ export function Tabs({ tabs, activeKey, onChange, onRename, onDelete, folders, l
                    {curTab?.icon
                      ? <span className="inline-flex align-middle">{curTab.icon}</span>
                      : <span className="text-sm">{curTab?.emoji ?? fallbackEmoji}</span>}
-                   <span>{curTab?.label}</span>
+                   <span>{curTab ? shortLabel(curTab.label) : ""}</span>   {/* 탭 이름도 묶음 이름 겹침 없이(사용자 2026-11-09 "선택된 탭 이름도") */}
                  </>}
                  items={groupTabs.map(t => ({
                    key: t.key, active: t.key === activeKey,
                    label: <>{t.icon ? <span className="inline-flex align-middle">{t.icon}</span> : <span>{t.emoji ?? fallbackEmoji}</span>}
-                            <span>{t.label}</span>
+                            {/* 목록 안에선 묶음 이름 겹침을 뺀다 — 제목이 이미 '지수'라 "지수(업종)" → "업종"(사용자 2026-11-09) */}
+                            <span>{shortLabel(t.label)}</span>
                             {t.count > 0 && <span className="text-xs text-gray-400">{t.count}</span>}</>,
                  }))}
                  onPick={onChange} />
     );
   };
+
+  // 폴더 탭 — 📁 폴더(선택그룹). 멤버 1개면 단일 탭, 2개 이상이면 폴더명(멤버 전환은 아래 sub 링크바)
+  const renderFolder = (folder: GroupFolder) => {
+        const members = folder.groups.filter(g => presentGroups.has(g))
+                              .sort((a, b) => a.localeCompare(b, "ko"));   // 이름순
+        if (members.length === 0) return null;
+        // 폴더 진입 기본은 '첫 그룹' — 이미 폴더 안 그룹(또는 전체보기)에 있으면 그대로 유지.
+        //  기본을 전체보기로 두면 종목 많은 폴더에서 폴더를 누를 때마다 전 종목을 불러온다.
+        //  전체보기는 칩바 맨 끝에서 명시적으로 눌러야 켜진다.
+        const allKey = folderAllKey(folder.name);
+        // 폴더 진입 기본 = 전체보기(사용자 결정 2026-10-26). 이미 폴더 안 그룹에 있으면 그대로
+        const current = (members.includes(activeKey) || activeKey === allKey)
+          ? activeKey : allKey;
+        const active = members.includes(activeKey) || activeKey === allKey;
+        // 멤버 1개 → 폴더명(그룹명) 단일 탭 (드롭다운 없이 바로 클릭). 증권사연결 폴더는 1개여도 '보따리'처럼 폴더명 + 아래 칩(사용자 요청)
+        if (members.length === 1 && folder.name !== BROKER_FOLDER) {
+          const g = members[0];
+          const cnt = countByKey.get(g) ?? 0;
+          return (
+            <button key={`__folder__${folder.name}`}
+                    onClick={() => onChange(g)}
+                    className={`shrink-0 px-3 py-2 text-sm font-medium rounded-t-md border-b-2 -mb-px transition-colors
+                                ${active ? "border-blue-500 text-blue-700 bg-blue-50" : "border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-100"}`}>
+              <FolderIcon folder={folder.name} className="mr-0.5" />{folder.name}({g})
+              {cnt > 0 && (
+                <span className={`ml-1.5 text-xs ${active ? "text-blue-500" : "text-gray-400"}`}>{cnt}</span>
+              )}
+            </button>
+          );
+        }
+        // 폴더 탭 = 내주식 묶음처럼 **마우스를 올리면 펼쳐지는 메뉴**(사용자 결정 2026-10-26) — 전체보기 + 폴더 안 그룹.
+        //   탭 자체를 누르면 현재 그룹(없으면 전체보기)으로. 그룹 줄에 ⚙️ 이름변경·🗑 삭제(연동 그룹은 🗑 없음).
+        const inGroup = members.includes(activeKey) ? activeKey : null;
+        const allCnt = countByKey.get(allKey) ?? 0;
+        return (
+          <HoverMenu key={`__folder__${folder.name}`} title={`📁 ${folder.name}`} on={active}
+                     onTriggerClick={() => onChange(current)}
+                     trigger={<>
+                       <span><FolderIcon folder={folder.name} className="mr-0.5" />{folder.name}</span>
+                       {inGroup && <span className={`text-xs ${active ? "text-blue-500" : "text-gray-400"}`}>· {inGroup}</span>}
+                     </>}
+                     items={[
+                       { key: allKey, active: activeKey === allKey,
+                         label: <><span>{FOLDER_ALL_LABEL}</span>{allCnt > 0 && <span className="text-xs text-gray-400">{allCnt}</span>}</> },
+                       ...members.map(g => {
+                         const cnt = countByKey.get(g) ?? 0;
+                         return {
+                           key: g, active: g === activeKey,
+                           label: <>
+                             <span>{g}</span>
+                             {cnt > 0 && <span className="text-xs text-gray-400">{cnt}</span>}
+                             {/* 메뉴 줄이 button 이라 안에는 span role=button — 누르면 이동 대신 수정/삭제 */}
+                             {onRename && (
+                               <span role="button" tabIndex={0} title="그룹명 변경"
+                                     onClick={e => { e.stopPropagation(); handleRename(g, g); }}
+                                     className="ml-auto inline-flex items-center pl-2 text-slate-400 hover:text-slate-800">
+                                 <Settings size={12} strokeWidth={2.2} />
+                               </span>
+                             )}
+                             {onDelete && !isLinkedGroup(g) && (   /* 증권사 연동 그룹은 삭제 없음(연동 해제로) */
+                               <span role="button" tabIndex={0} title="그룹 삭제"
+                                     onClick={async e => {
+                                       e.stopPropagation();
+                                       if (await appConfirm(`"${g}" 그룹의 ${cnt}건을 모두 삭제할까요?\n(되돌릴 수 없음)`)) onDelete(g);
+                                     }}
+                                     className="inline-flex items-center pl-1 text-[11px] text-slate-400 hover:text-rose-600">🗑</span>
+                             )}
+                           </>,
+                         };
+                       }),
+                     ]}
+                     onPick={onChange} />
+        );
+  };
+  // 증권사연결 폴더는 지수 탭 바로 오른쪽에 고정, 나머지 폴더는 사용자 그룹 뒤(사용자 결정 2026-10-26)
+  const brokerFolder = folderList.find(f => f.name === BROKER_FOLDER);
+  const otherFolders = folderList.filter(f => f.name !== BROKER_FOLDER);
 
   return (
     <>
@@ -119,8 +202,8 @@ export function Tabs({ tabs, activeKey, onChange, onRename, onDelete, folders, l
                     border-b border-gray-200 mb-3 px-1 pt-1">
       {leading && <span className="shrink-0">{leading}</span>}
       {/* 섹터~ETF 드롭다운 → 내자산 묶음(내주식·내거래) → 지수 순서 */}
-      {/* 투자도구 탭을 누르면 종목찾기(눌림목)로 바로 — 다른 도구는 마우스를 올려 메뉴에서 */}
-      {renderGroupDropdown(sysTabs, "📊", "투자도구(분석)", VALUATION_TAB_KEY)}   {/* 맨 위 = 종목찾기(섹터별) — 버튼 이름과 누르면 가는 곳이 같게 */}
+      {/* 투자도구 탭을 누르면 맨 위 최신공시로 바로(사용자 요청 2026-10-29 "클릭하면 공시나오게") — 다른 도구는 마우스를 올려 메뉴에서 */}
+      {renderGroupDropdown(sysTabs, "📊", "투자도구(분석)", DISCLOSURE_TAB_KEY)}
       {renderGroupDropdown(myTabs, "📦", "내자산")}
       {/* 증시 — 지수 왼쪽 별도 탭 */}
       {[marketMoneyTab].map(t => t && (
@@ -134,9 +217,11 @@ export function Tabs({ tabs, activeKey, onChange, onRename, onDelete, folders, l
       ))}
       {/* 지수 — 별도 탭 */}
       {/* 지수 — 주간·야간·반도체 드롭다운(투자도구·내자산과 같은 모양) */}
-      {/* 지수 탭을 누르면 시간에 맞는 페이지로 — 한국 낮(07~18시)은 주간, 그 외는 야간 */}
-      {renderGroupDropdown(indexTabs, "📈", "지수",
-        defaultDashboardPage() === "day" ? US_MARKET_TAB_KEY : INDEX_NIGHT_TAB_KEY)}
+      {/* 지수 탭을 누르면 시간에 맞는 페이지로 — 한국 07~20시(NXT 애프터까지)는 주간, 그 외는 야간 */}
+      {/* 지수 탭을 누르면 업종별로(사용자 2026-11-09 "클릭 시 업종별로") — 한국·미국 지수는 오른쪽 📈 서랍으로 옮겨 갔다 */}
+      {renderGroupDropdown(indexTabs, "📈", "시장", INDEX_SOBU_TAB_KEY)}   {/* 목록 제목 '시장'(사용자 2026-11-09) — '지수'는 오른쪽 📈 서랍 이름으로만 */}
+      {/* 🏦 증권사연결 폴더 — 지수 바로 오른쪽 고정 */}
+      {brokerFolder && renderFolder(brokerFolder)}
       {tabs.map(t => {
         const active = t.key === activeKey;
         const editable = !RESERVED.has(t.key);
@@ -180,11 +265,11 @@ export function Tabs({ tabs, activeKey, onChange, onRename, onDelete, folders, l
                 {onDelete && (
                   <button
                     type="button"
-                    onClick={e => {
+                    onClick={async e => {
                       e.stopPropagation();
                       const msg = `"${t.label}" 그룹의 ${t.count}건을 모두 삭제할까요?`
                                 + `\n(되돌릴 수 없음)`;
-                      if (confirm(msg)) onDelete(t.key);
+                      if (await appConfirm(msg)) onDelete(t.key);
                     }}
                     title="그룹 삭제"
                     className="text-[10px] leading-none px-0.5
@@ -198,115 +283,9 @@ export function Tabs({ tabs, activeKey, onChange, onRename, onDelete, folders, l
         );
       })}
 
-      {/* 폴더 — 📁 폴더(선택그룹) 드롭다운 */}
-      {folderList.map(folder => {
-        const members = folder.groups.filter(g => presentGroups.has(g))
-                              .sort((a, b) => a.localeCompare(b, "ko"));   // 이름순
-        if (members.length === 0) return null;
-        // 폴더 진입 기본은 '첫 그룹' — 이미 폴더 안 그룹(또는 전체보기)에 있으면 그대로 유지.
-        //  기본을 전체보기로 두면 종목 많은 폴더에서 폴더를 누를 때마다 전 종목을 불러온다.
-        //  전체보기는 칩바 맨 끝에서 명시적으로 눌러야 켜진다.
-        const allKey = folderAllKey(folder.name);
-        const current = (members.includes(activeKey) || activeKey === allKey)
-          ? activeKey : members[0];
-        const active = members.includes(activeKey) || activeKey === allKey;
-        // 멤버 1개 → 폴더명(그룹명) 단일 탭 (드롭다운 없이 바로 클릭)
-        if (members.length === 1) {
-          const g = members[0];
-          const cnt = countByKey.get(g) ?? 0;
-          return (
-            <button key={`__folder__${folder.name}`}
-                    onClick={() => onChange(g)}
-                    className={`shrink-0 px-3 py-2 text-sm font-medium rounded-t-md border-b-2 -mb-px transition-colors
-                                ${active ? "border-blue-500 text-blue-700 bg-blue-50" : "border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-100"}`}>
-              📁{folder.name}({g})
-              {cnt > 0 && (
-                <span className={`ml-1.5 text-xs ${active ? "text-blue-500" : "text-gray-400"}`}>{cnt}</span>
-              )}
-            </button>
-          );
-        }
-        // 폴더명 링크 — 클릭 시 폴더 진입(현재/첫 멤버). 멤버 전환은 아래 폴더 sub 링크바에서.
-        return (
-          <button key={`__folder__${folder.name}`}
-                  onClick={() => onChange(current)}
-                  className={`shrink-0 px-3 py-2 text-sm font-medium rounded-t-md border-b-2 -mb-px transition-colors
-                              ${active ? "border-blue-500 text-blue-700 bg-blue-50"
-                                       : "border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-100"}`}>
-            📁{folder.name}
-          </button>
-        );
-      })}
+      {/* 폴더 — 📁 폴더(선택그룹) (증권사연결은 위 지수 옆에 고정) */}
+      {otherFolders.map(renderFolder)}
       </nav>
-      {/* 폴더 sub 링크바 — 폴더 안 그룹에 있을 때, 그 폴더의 그룹들을 칩으로 펼쳐 빠르게 전환.
-          Tabs(=tabsStickyRef) 안에 두어 sticky 측정 높이에 포함 → 아래 정렬 툴바가 자동으로 밀려 내려감. */}
-      {(() => {
-        const activeFolder = folderList.find(f =>
-          f.groups.some(g => g === activeKey && presentGroups.has(g))
-          || folderAllKey(f.name) === activeKey);
-        if (!activeFolder) return null;
-        const members = activeFolder.groups.filter(g => presentGroups.has(g))
-                                    .sort((a, b) => a.localeCompare(b, "ko"));
-        if (members.length < 2) return null;
-        return (
-          <div className="flex items-center gap-1.5 overflow-x-auto whitespace-nowrap
-                          px-1 py-1.5 border-b border-gray-200 bg-white">
-            {members.map(g => {
-              const on = g === activeKey;
-              const cnt = countByKey.get(g) ?? 0;
-              return (
-                <div key={g} className="group relative inline-flex shrink-0">
-                  <button onClick={() => onChange(g)}
-                          className={`rounded-full px-3 py-1 text-xs font-medium transition inline-flex items-center gap-1
-                                      ${on ? "bg-blue-600 text-white"
-                                           : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}>
-                    <span>{g}</span>
-                    {cnt > 0 && <span className={on ? "text-blue-100" : "text-gray-400"}>{cnt}</span>}
-                  </button>
-                  {/* 수정/삭제 — hover 시 노출 (일반 탭과 동일) */}
-                  {(onRename || onDelete) && (
-                    <div className="absolute -top-1.5 -right-1 flex gap-0.5
-                                    opacity-0 group-hover:opacity-90 hover:!opacity-100
-                                    bg-white rounded shadow px-0.5 transition-opacity">
-                      {onRename && (
-                        <button type="button" title="그룹명 변경"
-                                onClick={e => { e.stopPropagation(); handleRename(g, g); }}
-                                className="inline-flex items-center leading-none px-0.5 text-slate-500 hover:text-slate-800">
-                          <Settings size={11} strokeWidth={2.2} />
-                        </button>
-                      )}
-                      {onDelete && (
-                        <button type="button" title="그룹 삭제"
-                                onClick={e => {
-                                  e.stopPropagation();
-                                  if (confirm(`"${g}" 그룹의 ${cnt}건을 모두 삭제할까요?\n(되돌릴 수 없음)`)) onDelete(g);
-                                }}
-                                className="text-[10px] leading-none px-0.5 hover:text-rose-600">🗑</button>
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-            {/* 전체보기 — 폴더 안 모든 그룹의 종목을 한 번에. 실제 그룹이 아니라 이름변경·삭제 없음.
-                맨 끝에 두는 이유: 종목이 많은 폴더에서 이게 앞에 있으면 무심코 눌러 매번 전부 불러오게 된다. */}
-            {(() => {
-              const allKey = folderAllKey(activeFolder.name);
-              const on = activeKey === allKey;
-              const cnt = countByKey.get(allKey) ?? 0;
-              return (
-                <button onClick={() => onChange(allKey)}
-                        className={`shrink-0 rounded-full px-3 py-1 text-xs font-medium transition inline-flex items-center gap-1
-                                    ${on ? "bg-blue-600 text-white"
-                                         : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}>
-                  <span>{FOLDER_ALL_LABEL}</span>
-                  {cnt > 0 && <span className={on ? "text-blue-100" : "text-gray-400"}>{cnt}</span>}
-                </button>
-              );
-            })()}
-          </div>
-        );
-      })()}
     </>
   );
 }
@@ -317,6 +296,8 @@ export const US_MARKET_TAB_KEY = "__us-market__";   // 지수(한국, 옛 주간
 // 지수(미국, 옛 야간) — 메뉴의 '📈 지수' 드롭다운에 주간과 같이 묶인다
 export const INDEX_NIGHT_TAB_KEY = "__idx-night__";
 export const INDEX_ROT_TAB_KEY = "__idx-rot__";   // 지수(순환매) — 반도체 지수·일본 반도체·AI 순환매 (2026-10-12)
+export const INDEX_SOBU_TAB_KEY = "__idx-sobu__";
+export const INDEX_BATT_TAB_KEY = "__idx-batt__";   // 지수(2차전지·ESS)(2026-11-03)   // 지수(소부장) — 단계별 소부장(2026-11-02)
 export const INDEX_US_TAB_KEY = "__idx-us__";   // 폐지 — 지수(미국)에 합침(2026-10-12). 옛 저장값 이동용으로만 남긴다
 export const INDEX_SEMI_TAB_KEY = "__idx-semi__";   // 폐지 — 지금은 지수(순환매)로(2026-10-12). 옛 저장값 이동용으로만 남긴다
 export const INDEX_LEADERS_TAB_KEY = "__idx-leaders__";   // 폐지 — 주간에 합침(2026-10-08). 옛 저장값 이동용으로만 남긴다
@@ -325,18 +306,27 @@ export const INDEX_LEADERS_TAB_KEY = "__idx-leaders__";   // 폐지 — 주간�
 export const SEMI_CHECK_TAB_KEY = "__semi-check__";
 // 반도체 한눈에 — 삼성·하이닉스 실시간 체결 + 현물·선물·옵션 수급(증시 옆 별도 탭, 2026-10-21)
 export const SEMI_DASH_TAB_KEY = "__semi-dash__";
+// 서학개미 — 한국 개인의 미국 주식 결제·보유(예탁결제원, 지수 묶음 끝, 2026-11-03)
+export const SEOHAK_TAB_KEY = "__seohak__";
+// 지금 시끄러운 종목 — 최근 5분 평소보다 돈이 확 몰린 종목(lib/hotNow, 2026-11-09)
+export const HOT_TAB_KEY = "__hot-now__";
 // 한국 섹터 순위 — 토스 TICS depth1 기반, 돈의 흐름 시각화
 export const SECTOR_RANK_TAB_KEY = "__sector-rank__";
 // 가상 합산 그룹 — 모든 그룹의 동일 ticker 를 합쳐 표시 (수량/평단 통합 뷰)
 export const MY_STOCKS_TAB_KEY = "__my-stocks__";
 // 내거래 — 모든 종목의 거래 기록(trades) 모아보기. 내주식과 한 묶음.
 export const MY_TRADES_TAB_KEY = "__my-trades__";
+export const MY_TRADES_TOSS_TAB_KEY = "__my-trades-toss__";   // 내거래(토스) — 토스 연동 그룹 거래만(사용자 요청 2026-10-26)
 // 컨센서스 — 증권사 목표주가·연기금·변동폭·등락률 sub탭 (관심종목을 줄 세우는 화면들)
 export const CONSENSUS_TAB_KEY = "__consensus__";
+// 최신공시 — 보유 국내 종목 전체의 공시를 한 목록으로(검색·종류·'중요만' 필터). 종목찾기 묶음에서 컨센서스 바로 아래(2026-10-28)
+export const DISCLOSURE_TAB_KEY = "__disclosures__";
 // 눌림목 — RSI·볼린저·200일선·흑자·유동성 조건으로 코스피·코스닥 전 종목 스크리닝 (+ 백테스트)
 export const SCREENER_TAB_KEY = "__screener__";
 // 종가배팅 — 오늘 종가에 사서 다음 날 시가에 파는 후보(lib/closeBet)
 export const CLOSE_BET_TAB_KEY = "__close-bet__";
+// 밸류업 명단 — 거래소 저PBR·고배당·밸류업 우수기업 목록(lib/valueupTags, 2026-11-02)
+export const VALUEUP_TAB_KEY = "__valueup__";
 // 수급 매집 — 외국인·기관·연기금 누적 순매수(크롤러 JSON, lib/investorFlows)
 export const ACCUM_TAB_KEY = "__accum__";
 // ETF 역검색 — 다중 종목으로 ETF 찾기
@@ -355,28 +345,28 @@ export const ASSET_TREND_TAB_KEY = "__asset-trend__";
 
 // 시스템 reserved — 이름 변경/삭제 불가
 const RESERVED = new Set<string>([
-  "관심ETF", MARKET_MONEY_TAB_KEY, SEMI_DASH_TAB_KEY, US_MARKET_TAB_KEY, INDEX_NIGHT_TAB_KEY, INDEX_ROT_TAB_KEY, INDEX_US_TAB_KEY, INDEX_SEMI_TAB_KEY, INDEX_LEADERS_TAB_KEY, SEMI_CHECK_TAB_KEY,
-  SECTOR_RANK_TAB_KEY, MY_STOCKS_TAB_KEY, MY_TRADES_TAB_KEY, CONSENSUS_TAB_KEY,
+  "관심ETF", MARKET_MONEY_TAB_KEY, SEMI_DASH_TAB_KEY, SEOHAK_TAB_KEY, HOT_TAB_KEY, US_MARKET_TAB_KEY, INDEX_NIGHT_TAB_KEY, INDEX_ROT_TAB_KEY, INDEX_SOBU_TAB_KEY, INDEX_BATT_TAB_KEY, INDEX_US_TAB_KEY, INDEX_SEMI_TAB_KEY, INDEX_LEADERS_TAB_KEY, SEMI_CHECK_TAB_KEY,
+  SECTOR_RANK_TAB_KEY, MY_STOCKS_TAB_KEY, MY_TRADES_TAB_KEY, MY_TRADES_TOSS_TAB_KEY, CONSENSUS_TAB_KEY, DISCLOSURE_TAB_KEY,
   ETF_REVERSE_TAB_KEY, ETF_RANKING_TAB_KEY, ETF_COMPARE_TAB_KEY, HEATMAP_TAB_KEY,
-  SCREENER_TAB_KEY, CLOSE_BET_TAB_KEY, ACCUM_TAB_KEY, VALUATION_TAB_KEY, EARNINGS_TAB_KEY,
+  SCREENER_TAB_KEY, CLOSE_BET_TAB_KEY, ACCUM_TAB_KEY, VALUATION_TAB_KEY, EARNINGS_TAB_KEY, VALUEUP_TAB_KEY,
 ]);
 
 // 묶기 대상 시스템 탭 — 드롭다운 하나로 합침. (증시·지수는 자주 써서 별도 고정 탭)
 export const SYSTEM_TAB_KEYS = new Set<string>([
-  MARKET_MONEY_TAB_KEY, SEMI_DASH_TAB_KEY, US_MARKET_TAB_KEY, SECTOR_RANK_TAB_KEY, SEMI_CHECK_TAB_KEY,
-  CONSENSUS_TAB_KEY, ETF_REVERSE_TAB_KEY, ETF_RANKING_TAB_KEY, ETF_COMPARE_TAB_KEY, HEATMAP_TAB_KEY,
-  SCREENER_TAB_KEY, CLOSE_BET_TAB_KEY, ACCUM_TAB_KEY, VALUATION_TAB_KEY, EARNINGS_TAB_KEY,
+  MARKET_MONEY_TAB_KEY, SEMI_DASH_TAB_KEY, SEOHAK_TAB_KEY, HOT_TAB_KEY, US_MARKET_TAB_KEY, SECTOR_RANK_TAB_KEY, SEMI_CHECK_TAB_KEY,
+  CONSENSUS_TAB_KEY, DISCLOSURE_TAB_KEY, ETF_REVERSE_TAB_KEY, ETF_RANKING_TAB_KEY, ETF_COMPARE_TAB_KEY, HEATMAP_TAB_KEY,
+  SCREENER_TAB_KEY, CLOSE_BET_TAB_KEY, ACCUM_TAB_KEY, VALUATION_TAB_KEY, EARNINGS_TAB_KEY, VALUEUP_TAB_KEY,
 ]);
 
 // 내자산 묶음 — 내주식 + 내거래를 별도 드롭다운 하나로 (지수 묶음과 동일 방식).
 export const MY_GROUP_KEYS = new Set<string>([
-  MY_STOCKS_TAB_KEY, MY_TRADES_TAB_KEY, ASSET_TREND_TAB_KEY,
+  MY_STOCKS_TAB_KEY, MY_TRADES_TAB_KEY, MY_TRADES_TOSS_TAB_KEY, ASSET_TREND_TAB_KEY,
 ]);
 
 // 미국증시 → 섹터순위 → 반도체 점검 → 내주식(합산) → 사용자 그룹 알파벳 순.
 // "보유"도 일반 사용자 그룹과 동일하게 취급 (별도 분기 없음).
 // visibility 미지정 시 시스템 탭 모두 노출 (기본 동작).
-export function buildTabs(holdings: Stock[], visibility?: TabVisibility, tradeCount = 0): TabSpec[] {
+export function buildTabs(holdings: Stock[], visibility?: TabVisibility, tradeCount = 0, tossTrades?: { count: number; linked: boolean }): TabSpec[] {
   const showUs = visibility?.usMarket ?? true;
   const showSector = visibility?.sectorRank ?? true;
   const showMy = visibility?.myStocks ?? true;
@@ -394,17 +384,33 @@ export function buildTabs(holdings: Stock[], visibility?: TabVisibility, tradeCo
   if (visibility?.stockMarket ?? true) tabs.push({ key: MARKET_MONEY_TAB_KEY, label: "증시", emoji: "💰", count: 0 });
   // 지수 — 한국·미국·순환매 세 탭(메뉴의 '📈 지수' 드롭다운). 라벨은 lib 한 벌(DASHBOARD_PAGES).
   if (showUs) {
-    const keyOf: Record<DashboardPage, string> = { day: US_MARKET_TAB_KEY, night: INDEX_NIGHT_TAB_KEY, rot: INDEX_ROT_TAB_KEY };
-    for (const p of DASHBOARD_PAGES) tabs.push({ key: keyOf[p.key], label: p.tab, emoji: p.emoji, count: 0 });
-    tabs.push({ key: SEMI_DASH_TAB_KEY, label: "지수(반도체 수급)", emoji: "💾", count: 0 });   // 지수 묶음 끝 — UsMarketTab 페이지가 아니라 별도 화면
+    const keyOf: Record<DashboardPage, string> = { day: US_MARKET_TAB_KEY, night: INDEX_NIGHT_TAB_KEY, sobu: INDEX_SOBU_TAB_KEY };
+    // 순서 — 업종별 · 반도체 수급 · 서학개미 · 한국/주간 · 미국/야간(사용자 2026-11-09 "업종별을 맨 위로, 한국과 미국을 맨 아래로")
+    const pg = (k: DashboardPage) => DASHBOARD_PAGES.find(p => p.key === k)!;
+    tabs.push({ key: keyOf.sobu, label: pg("sobu").tab, emoji: pg("sobu").emoji, count: 0 });
+    tabs.push({ key: HOT_TAB_KEY, label: "지수(지금 시끄러운 종목)", emoji: "🔔", count: 0 });
+    tabs.push({ key: SEMI_DASH_TAB_KEY, label: "지수(반도체 수급)", emoji: "💾", count: 0 });
+    tabs.push({ key: SEOHAK_TAB_KEY, label: "지수(서학개미)", emoji: "🐜", count: 0 });
+    for (const k of ["day", "night"] as const) tabs.push({ key: keyOf[k], label: pg(k).tab, emoji: pg(k).emoji, count: 0 });   // 한국 개인의 미국 주식(2026-11-03)   // 지수 묶음 끝 — UsMarketTab 페이지가 아니라 별도 화면
   }
-  // 종목찾기(섹터별) — 섹터를 골라 그 안의 종목을 한 표로(옛 '성적표'). 종목찾기 묶음 맨 위.
+  // 투자도구 묶음 맨 위 = 최신공시, 두 번째 = 실적 일정(사용자 요청 2026-10-29 "공시를 맨위에, 그다음 실적을 두번째로")
+  if (visibility?.disclosures ?? true) {
+    tabs.push({ key: DISCLOSURE_TAB_KEY, label: "최신공시", emoji: "📋", count: 0 });
+  }
+  if (visibility?.earnings ?? true) tabs.push({ key: EARNINGS_TAB_KEY, label: "실적 일정", emoji: "📅", count: 0 });
+  // 세 번째 = 컨센서스(사용자 요청 2026-10-29 "실적 아래 컨센서스"). 설정 ON 이면 항상 노출(종목 없으면 빈 안내)
+  if (showConsensus) tabs.push({ key: CONSENSUS_TAB_KEY, label: "컨센서스(목표주가)", emoji: "🎯", count: 0 });
+  // 종목찾기(섹터별) — 섹터를 골라 그 안의 종목을 한 표로(옛 '성적표').
   if (visibility?.valuation ?? true) {
     tabs.push({ key: VALUATION_TAB_KEY, label: "종목찾기(섹터별)", emoji: "📊", count: 0 });
   }
   // 눌림목 — 시스템 묶음의 첫 자리(섹터 위). 전 종목 스크리닝이라 관심종목과 무관하게 항상 노출.
   if (visibility?.screener ?? true) {
     tabs.push({ key: SCREENER_TAB_KEY, label: "종목찾기(눌림목)", emoji: "🔎", count: 0 });
+  }
+  // 밸류업 명단 — 종목찾기 다음(저PBR·고배당도 종목을 고르는 목록)
+  if (visibility?.valueup ?? true) {
+    tabs.push({ key: VALUEUP_TAB_KEY, label: "밸류업 명단", emoji: "🏷️", count: 0 });
   }
   if (visibility?.closeBet ?? true) {
     tabs.push({ key: CLOSE_BET_TAB_KEY, label: "종가배팅", emoji: "🌙", count: 0 });
@@ -414,7 +420,6 @@ export function buildTabs(holdings: Stock[], visibility?: TabVisibility, tradeCo
   }
   // 섹터 (KODEX ETF 기반 4기간 ranking + 토스 핫 테마). 반도체는 지수 대시보드 그룹으로 통합됨.
   if (showSector) tabs.push({ key: SECTOR_RANK_TAB_KEY, label: "섹터별등락", emoji: "🧩", count: 0 });
-  if (visibility?.earnings ?? true) tabs.push({ key: EARNINGS_TAB_KEY, label: "실적 일정", emoji: "📅", count: 0 });
   // 내주식 (합산) — 보유 수량 있는 모든 ticker 의 가중평균. 종목 1개 이상일 때만 노출.
   if (showMy && uniqHeld.size > 0) {
     tabs.push({ key: MY_STOCKS_TAB_KEY, label: "내주식", emoji: "📦", count: uniqHeld.size });
@@ -423,13 +428,13 @@ export function buildTabs(holdings: Stock[], visibility?: TabVisibility, tradeCo
   if (showMyTrades && (tradeCount > 0 || uniqHeld.size > 0)) {
     tabs.push({ key: MY_TRADES_TAB_KEY, label: "내거래", emoji: "🧾", count: tradeCount });
   }
+  // 내거래(토스) — 토스 연동 그룹이 있을 때, 내거래 바로 아래(같은 묶음). 연동으로 가져온 거래만 모아 본다.
+  if (showMyTrades && tossTrades?.linked) {
+    tabs.push({ key: MY_TRADES_TOSS_TAB_KEY, label: "내거래(토스)", emoji: "🔗", count: tossTrades.count });
+  }
   // 자산추이 — 내자산 묶음(내주식·내거래)의 세 번째. 거래 기록이 있어야 역산이 되므로 그때만.
   if ((visibility?.assetTrend ?? true) && tradeCount > 0) {
     tabs.push({ key: ASSET_TREND_TAB_KEY, label: "자산추이", emoji: "📈", count: 0 });
-  }
-  // 컨센서스 — 목표주가·연기금·변동폭·등락률. 설정 ON 이면 항상 노출(종목 없으면 빈 안내).
-  if (showConsensus) {
-    tabs.push({ key: CONSENSUS_TAB_KEY, label: "컨센서스(목표주가)", emoji: "🎯", count: 0 });
   }
   // ETF 역검색 — 다중 종목 교집합/합집합
   if (visibility?.etfReverse ?? true) {
@@ -454,12 +459,13 @@ export function buildTabs(holdings: Stock[], visibility?: TabVisibility, tradeCo
   for (const g of userGroups) {
     tabs.push({ key: g, label: g, emoji: "📁", count: counts.get(g)! });
   }
-  // 폴더 전체보기 — 폴더(멤버 2개 이상)마다 가상 탭 하나.
+  // 폴더 전체보기 — 폴더(멤버 1개 이상)마다 가상 탭 하나.
   //   탭 바에는 안 그리고 폴더 sub 링크바의 칩으로만 노출하지만,
   //   App 의 'activeTab 이 탭 목록에 없으면 첫 탭으로 되돌리기' 가드를 통과하려면
   //   목록에는 반드시 들어 있어야 한다. count 는 중복 제거한 종목 수.
+  //   멤버 1개(증권사연결 폴더)도 넣는다 — 폴더 진입 기본이 전체보기라, 빠지면 가드가 증시로 튕긴다(실측 2026-10-26).
   for (const f of getGroupFolders()) {
-    if (f.groups.filter(g => counts.has(g)).length < 2) continue;
+    if (f.groups.filter(g => counts.has(g)).length < 1) continue;
     const inFolder = new Set(f.groups);
     const uniq = new Set<string>();
     for (const s of holdings) if (inFolder.has(normalizeAccount(s.account))) uniq.add(s.ticker);
@@ -467,6 +473,17 @@ export function buildTabs(holdings: Stock[], visibility?: TabVisibility, tradeCo
   }
   // 관심ETF 는 별도 탭 X — 미국증시 탭의 섹터별 ETF 컬럼에서만 표시
   return tabs;
+}
+
+// 폴더 전체보기의 row 는 account 가 가상 키(__folder_all__폴더) 인 사본 — 보유 수정 창은 실제 그룹이 있어야
+// 거래 기록(그룹 계정으로 저장)·폴더 select 가 맞는다(실측 2026-10-27: 전체보기에서 열면 거래 기록 0건, 제목에 가상 키).
+// 보유가 있는 row 우선, 없으면 첫 row. 폴더 밖 row(일반 탭)는 그대로.
+export function realHoldingOf(holdings: Stock[], stock: Stock): Stock {
+  const folderName = folderNameOfAllKey(stock.account || "");
+  if (folderName == null) return stock;
+  const members = new Set(getGroupFolders().find(f => f.name === folderName)?.groups ?? []);
+  const rows = holdings.filter(h => h.ticker === stock.ticker && members.has(normalizeAccount(h.account)));
+  return rows.find(r => r.shares > 0) ?? rows[0] ?? stock;
 }
 
 export function filterByTab(holdings: Stock[], tabKey: string): Stock[] {

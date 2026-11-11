@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { fetchHlXyzPerps, fetchHlPerpCandles, fetchHlPerpTwoDay } from "../lib/api";
+import { fetchHlXyzPerps, fetchHlPerpCandles, fetchHlPerpSession, fetchHlPerpTwoDay } from "../lib/api";
 import { useChartRange } from "../lib/chartRange";
 import { useAdaptiveRefreshMs } from "../lib/proxyStatus";
 import { Sparkline } from "./Sparkline";
@@ -29,33 +29,58 @@ export function HlPerpCard({ coin, name }: Props) {
     refetchInterval: refreshMs,
     staleTime: 5_000,
   });
-  const day = useChartRange() === "day";
-  // 24시간 설정이면 어제+오늘(48시간 반반) — 기준선·끊김·위아래 색을 다른 카드와 같게
+  const range = useChartRange();
+  const day = range === "day";
+  // 세션 = 한국 장 마감(15:30) ~ 다음 평일 15:30 — 다른 선물 카드처럼 세션 그래프(사용자 2026-11-02 "48시간 말고 세션으로").
+  //   카드 % 도 그 세션 기준(한국 장 마감 가격 대비)으로 맞춘다 — 그래프 기준선과 % 가 다르면 둘을 같이 못 읽는다. 3개월·1년일 때도 % 때문에 받는다.
   const { data: two } = useQuery({
-    queryKey: ["hl-perp-2day", coin],
-    queryFn: () => fetchHlPerpTwoDay(`xyz:${coin}`),
+    queryKey: ["hl-perp-session", coin],
+    queryFn: () => fetchHlPerpSession(`xyz:${coin}`),
+    refetchInterval: 60_000, staleTime: 30_000,
+  });
+  // 그래프 = 48시간, 가운데(50%) 세로선 = 24시간 전 — 큰 숫자(24시간 전 대비)와 같은 기준(사용자 2026-11-03).
+  //   오른쪽 절반 기준선 = 24시간 전 가격, 왼쪽 = 48시간 전. 위 세션 자료는 '15:30 후 %' 한 줄에만 쓴다
+  const { data: two48 } = useQuery({
+    queryKey: ["hl-perp-48h", coin],
+    queryFn: async () => { const d = await fetchHlPerpTwoDay(`xyz:${coin}`); if (!d) return d;
+      // 종가 실선은 가장 최근 한국 정규장 마감(15:30) 하나만(사용자 2026-11-03 "오늘 것만")
+      const closes = (d.markXs ?? []).filter(m => m.close);
+      const lastClose = closes.length ? closes.reduce((a, m) => (m.x > a.x ? m : a)) : undefined;
+      return { ...d, markXs: [{ x: 0.5 }, ...(lastClose ? [lastClose] : [])] }; },   // 24시간 전(점선) + 한국 정규장 종가 15:30(실선, 사용자 2026-11-03)
     enabled: day, refetchInterval: day ? 60_000 : false, staleTime: 30_000,
   });
   const { data: spark } = useQuery({
-    queryKey: ["hl-perp-candles", coin],
-    queryFn: () => fetchHlPerpCandles(`xyz:${coin}`),
-    refetchInterval: 60_000,
-    staleTime: 30_000,
+    queryKey: ["hl-perp-daily", coin, range],   // 3개월 | 1년 일봉(상장이 짧으면 있는 만큼) — 하루 몇 번이면 충분
+    queryFn: () => fetchHlPerpCandles(`xyz:${coin}`, range === "year" ? 366 : 92),
+    enabled: !day, refetchInterval: !day ? 30 * 60_000 : false,
+    staleTime: 10 * 60_000,
   });
 
   const p = perps?.get(coin);
+  const sBase = two?.sessionBase;
+  // 큰 숫자 = 하이퍼리퀴드와 같은 24시간 전 대비(사용자 2026-11-03 2안), 설명 줄에 한국 장 마감(15:30) 뒤 움직임
   const pct = p?.changePct ?? 0;
+  const sPct = p && sBase && sBase > 0 ? (p.price - sBase) / sBase * 100 : null;
   const up = pct > 0, dn = pct < 0;
   // 24시간 거래라 흐림(dim) 없음.
-  const bg = up ? "bg-rose-50 border-rose-200" : dn ? "bg-blue-50/70 border-blue-200" : "bg-white border-gray-200";
+  // 불투명 — 반투명(/70)이면 야간 배경이 비쳐 이 카드만 칙칙했다(사용자 지적 2026-10-30, 지수 카드와 같은 색)
+  const bg = up ? "bg-rose-50 border-rose-200" : dn ? "bg-blue-50 border-blue-200" : "bg-white border-gray-200";
   const sign = pctColor(pct);
   const url = `https://app.hyperliquid.xyz/trade/xyz:${coin}`;
 
   return (
-    <div className="relative h-full">
+    <div className="pg-card relative h-full">
+      {/* 한국 정규장 마감(15:30) 가격·그 뒤 움직임 — 위쪽 책갈피(지수 카드의 '마감' 책갈피와 같은 모양, 사용자 2026-11-03) */}
+      {sBase != null && sPct != null && (
+        <div className="absolute -top-2 right-1 z-20 px-1.5 py-0 border rounded bg-yellow-50 border-yellow-400/60 text-[10px] font-medium leading-tight whitespace-nowrap"
+             title={`한국 정규장 마감(15:30) 가격 $${sBase.toFixed(2)} 대비 지금 ${sPct >= 0 ? "+" : ""}${sPct.toFixed(2)}% — 장 마감 뒤 시간외 움직임`}>
+          <span className="tabular-nums text-gray-700">${sBase.toFixed(2)}</span>{" "}
+          <span className={`tabular-nums font-bold ${sPct > 0 ? "text-rose-600" : sPct < 0 ? "text-blue-600" : "text-gray-600"}`}>({sPct >= 0 ? "+" : ""}{sPct.toFixed(2)}%)</span>
+        </div>
+      )}
       <div className={`relative overflow-hidden h-full flex flex-col gap-0.5 rounded-lg border px-3 py-1.5 ${bg}`}>
-        {day && two && two.closes.length > 1 ? (
-          <Sparkline data={two.closes} xs={two.xs} baseline={two.base} prevBaseline={two.prevBase} breakIndex={two.breakIdx}
+        {day && two48 && two48.closes.length > 1 ? (
+          <Sparkline data={two48.closes} xs={two48.xs} baseline={p?.prevDay ?? two48.base} prevBaseline={two48.prevBase} breakIndex={two48.breakIdx} markXs={two48.markXs}
                      width={400} height={80} className="absolute inset-0 w-full h-full opacity-50 pointer-events-none" />
         ) : spark && spark.length > 1 && (
           <Sparkline data={spark} width={400} height={80}
@@ -73,7 +98,9 @@ export function HlPerpCard({ coin, name }: Props) {
             24h
           </span>
         </div>
-        <div className="relative z-10 text-[11px] text-gray-500 truncate">하이퍼리퀴드 무기한선물 · 24시간</div>
+        <div className="relative z-10 text-[11px] text-gray-500 truncate"
+             title={sBase ? `큰 숫자 = 24시간 전 대비(하이퍼리퀴드 화면과 같음). 장 마감 후 % 기준 = ${new Date(two!.sessionStart).toLocaleString("ko-KR", { month: "numeric", day: "numeric", weekday: "short", hour: "2-digit", minute: "2-digit" })} 가격 $${sBase.toFixed(2)} — 매일 15:30 경계 24시간 세션 — 15:30 뒤엔 오늘 한국 장 마감 대비(시간외 움직임), 그 전엔 어제 15:30 대비` : undefined}>
+          하이퍼리퀴드 · 24시간 전 대비</div>
         <div className="relative z-10 flex items-end mt-auto">
           <span className={`flex-1 text-left tabular-nums ${sign}`}>
             <span className="text-sm">

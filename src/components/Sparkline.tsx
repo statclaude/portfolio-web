@@ -3,6 +3,14 @@
 // 기준선(baseline)을 주면 **선 위 구간은 빨강, 아래 구간은 파랑**으로 나눠 칠한다(채움도 기준선까지).
 import { useId } from "react";
 
+// 정규장 세로선 — 시작 = 진한 점선, 종가 = 진한 실선(사용자 결정 2026-10-21, 글자·기호 없이 선 모양으로만 구분).
+//   종가는 원래 연한 회색이었는데 분홍·보라 면에 묻혀 '마감선이 없다'로 보였다(사용자 지적 2026-10-23) → 시작과 같은 진한 색, 모양만 실선
+//   ⚠️ 차트는 viewBox 400 폭을 카드 폭(~170px)으로 줄여(preserveAspectRatio none) 그려서, 굵기 1.2 가 화면에선 0.5px 로
+//   가늘어져 1배율 화면·보라 채움 위에선 종가선이 사라졌다(사용자 2026-10-27 "국장 어제 종가 선이 없어" — 선은 있었다).
+//   non-scaling-stroke 로 카드 크기와 상관없이 **화면 1px**(점선 간격도 화면 px)로 고정한다.
+const OPEN_LINE = { stroke: "#334155", strokeWidth: 1, strokeDasharray: "3 2", opacity: 0.95, vectorEffect: "non-scaling-stroke" } as const;
+const CLOSE_LINE = { stroke: "#334155", strokeWidth: 1, opacity: 0.95, vectorEffect: "non-scaling-stroke" } as const;
+
 interface Props {
   data: number[];
   width?: number;
@@ -33,13 +41,23 @@ interface Props {
   breakIndex?: number;
   // 세로 표시선(종가) — '오늘 정규장 마감' 지점. 시작선과 같은 점선(점은 안 찍는다 — 사용자 결정)
   closeIndex?: number;
+  // 어제 구간 정규장 [시작, 종가] 세로선(사용자 요청) — 오늘 것과 같은 모양(시작 = 진한 점선, 종가 = 연한 실선)
+  extraMarks?: (number | undefined)[];
   // 끊은 앞 구간(어제)의 기준선 — 어제의 전일 종가. 주면 기준선이 **두 개**(왼쪽=어제 기준·오른쪽=오늘 기준)가 되고
   //   위·아래 색도 구간마다 자기 기준선으로 칠한다(카드 등락률과 같은 기준 — 어제는 어제 등락, 오늘은 오늘 등락).
   prevBaseline?: number;
+  // 거래량(점마다, data 와 같은 길이) — 주면 아래 1/4 을 거래량 막대 자리로 비우고 회색 막대를 그린다(사용자 요청 2026-10-22)
+  volumes?: number[];
+  // 정규장 시작·종가 세로선을 **가로 위치(0~1)** 로 — 시장 시간표로 정한 자리(api.rollDay 의 markXs). 주면 markIndex·closeIndex·extraMarks 는 무시.
+  //   같은 시장 카드는 봉이 어떻게 왔든 같은 x 에 선다(사용자 결정 2026-10-27).
+  markXs?: { x: number; close?: boolean }[];
+  // 오늘 정규장이 끝난 뒤의 새 기준(미국 — 오늘 종가, 카드 % 기준). 주면 오늘 종가 세로선부터 오른쪽 끝까지 점선을 하나 더 긋고
+  //   오늘 기준선 점선은 그 세로선에서 멈춘다. 색칠은 그대로(사용자 2026-10-29 "그제·어제 종가 가로 점선이 이상해").
+  nextBaseline?: number;
 }
 
 export function Sparkline({
-  data, width = 120, height = 32, className = "", color, target, avgPrice, entry, strokeWidth = 1.5, markIndex, baseline, xs, breakIndex, prevBaseline, closeIndex,
+  data, width = 120, height = 32, className = "", color, target, avgPrice, entry, strokeWidth = 1.5, markIndex, baseline, xs, breakIndex, prevBaseline, closeIndex, extraMarks, volumes, markXs, nextBaseline,
   aboveColor = "#dc2626", belowColor = "#2563eb",
 }: Props) {
   const uid = useId().replace(/:/g, "");   // 위·아래 잘라내기(clipPath)·그라디언트 id — 카드마다 달라야 한다
@@ -66,13 +84,16 @@ export function Sparkline({
   if (entry !== undefined && entry > 0) allValues.push(entry);
   if (hasBase) allValues.push(baseline!);
   if (prevBaseline !== undefined && prevBaseline > 0) allValues.push(prevBaseline);
+  if (nextBaseline !== undefined && nextBaseline > 0) allValues.push(nextBaseline);
   const min = Math.min(...allValues);
   const max = Math.max(...allValues);
   const range = max - min || 1;
   const padX = 1;
   const padY = 2;
   const innerW = width - padX * 2;
-  const innerH = height - padY * 2;
+  const hasVol = !!volumes && volumes.length === data.length && volumes.some(v => v > 0);
+  const volH = hasVol ? Math.round(height * 0.25) : 0;   // 아래 거래량 띠 — 가격은 그 위에서만
+  const innerH = height - padY * 2 - volH;
 
   // 정규화 좌표 — 시간 축(xs)이 없고 끊는 곳(breakIndex)이 있으면 그 사이에 빈칸(약 4%)을 둔다.
   //   한 칸 차이로 맞닿으면 끊어도 이어진 세로선처럼 보인다(야후 지수 카드 — 20:00→04:00 이 붙어 있음).
@@ -107,12 +128,31 @@ export function Sparkline({
   const avgY = avgPrice !== undefined && avgPrice > 0 ? yFor(avgPrice) : null;
   const entryY = entry !== undefined && entry > 0 ? yFor(entry) : null;
   const baseY = hasBase ? yFor(baseline!) : null;
-  // 기준선 구간 — 어제 기준선이 있으면 끊는 곳 가운데(splitX)에서 좌우로 나눈다
+  // 기준선 구간 — 어제 기준선이 있으면 끊는 곳 가운데(splitX)에서 좌우로 나눈다(색칠은 이 구간대로)
   const splitX = segs.length === 2 ? (segs[0][segs[0].length - 1][0] + segs[1][0][0]) / 2 : width;
+  // 오늘 칸이 아직 비었을 때(미국 프리장 전·한국 장 시작 전) — 어제 칸만 있어도 어제는 어제 기준선(그저께 종가)으로,
+  //   오늘 기준선(어제 종가)은 어제 마지막 점부터 오른쪽으로. 예전엔 둘 다 오늘 기준선 한 줄이라 가로선이 하나로 보였다(KORU, 사용자 2026-11-03)
+  //   (breakIndex 가 데이터 끝 이상 = 오늘 봉이 하나도 없다는 뜻 — api 의 noToday 경로)
+  const onlyPrev = segs.length === 1 && prevBaseline !== undefined && prevBaseline > 0 && baseY !== null
+    && (breakIndex === undefined || breakIndex >= data.length) && Math.abs(prevBaseline - baseline!) > 1e-9 && segs[0].length > 0;
   const parts: { ss: typeof segs; by: number; x0: number; x1: number }[] = baseY === null ? []
     : segs.length === 2 && prevBaseline !== undefined && prevBaseline > 0
       ? [{ ss: [segs[0]], by: yFor(prevBaseline), x0: 0, x1: splitX }, { ss: [segs[1]], by: baseY, x0: splitX, x1: width }]
+      : onlyPrev
+      ? [{ ss: segs, by: yFor(prevBaseline!), x0: 0, x1: segs[0][segs[0].length - 1][0] + 2 }, { ss: [], by: baseY, x0: segs[0][segs[0].length - 1][0] + 2, x1: width }]
       : [{ ss: segs, by: baseY, x0: 0, x1: width }];
+  // 오늘 기준선(= 어제 종가) **점선만** 어제 종가 세로선부터 이어 긋는다 — 색칠은 위 구간 그대로(사용자 2026-10-27:
+  //   "가로 점선을 종가에서부터 이어서", "선만 추가하고 색은 지금처럼"). 어제 종가선이 창 밖이면 예전처럼 오늘 칸부터.
+  const prevCloseX = parts.length === 2 && markXs
+    ? markXs.filter(m => m.close).map(m => padX + Math.min(1, Math.max(0, m.x)) * innerW).find(x => x < splitX)
+    : undefined;
+  // 오늘 종가 세로선 — 새 기준(nextBaseline) 점선의 시작점. 마지막 구간 안에 있는 가장 오른쪽 종가선
+  const lastX0 = parts.length ? (parts.length === 2 && prevCloseX != null ? prevCloseX : parts[parts.length - 1].x0) : 0;
+  const todayCloseX = nextBaseline !== undefined && nextBaseline > 0 && parts.length
+    ? (markXs
+        ? markXs.filter(m => m.close).map(m => padX + Math.min(1, Math.max(0, m.x)) * innerW).filter(x => x > lastX0 + 2).pop()
+        : closeIndex != null && closeIndex > 0 && closeIndex < points.length ? points[closeIndex][0] : undefined)
+    : undefined;
 
   return (
     <svg width={width} height={height} className={className}
@@ -156,23 +196,47 @@ export function Sparkline({
                 strokeLinejoin="round" strokeLinecap="round" />
         </>
       )}
+      {/* 거래량 — 아래 띠. 직전 봉보다 오르면 빨강·내리면 파랑·같으면 회색(사용자 요청) */}
+      {hasVol && (() => {
+        // 기준 = 상위 5% 값 — 동시호가(15:30) 한 봉이 수십 배라 최대값에 맞추면 나머지가 다 바닥에 붙었다. 넘는 봉은 띠 높이로 자른다
+        const sorted = volumes!.filter(v => v > 0).sort((x, y) => x - y);
+        const vMax = sorted[Math.floor(sorted.length * 0.95)] || sorted[sorted.length - 1];
+        const bw = Math.max(0.8, (innerW / data.length) * 0.7);
+        return volumes!.map((v, i) => v > 0 && (
+          <rect key={`v${i}`} x={points[i][0] - bw / 2} width={bw} y={height - Math.min(1, v / vMax) * volH} height={Math.min(1, v / vMax) * volH}
+                fill={i > 0 && data[i] < data[i - 1] ? belowColor : i > 0 && data[i] > data[i - 1] ? aboveColor : "#94a3b8"} opacity="0.55" />
+        ));
+      })()}
       {/* 기준선(전일 종가) — 회색 가로 점선 (24시간 차트). 어제·오늘 둘이면 좌우로 나눠 따로, 사이는 살짝 띄운다 */}
       {parts.map(({ by, x0, x1 }, k) => (
-        <line key={k} x1={Math.max(padX, x0 + (k > 0 ? 2 : 0))} x2={Math.min(width - padX, x1 - (k < parts.length - 1 ? 2 : 0))} y1={by} y2={by}
+        <line key={k} x1={k === 1 && prevCloseX != null ? prevCloseX : Math.max(padX, x0 + (k > 0 ? 2 : 0))}
+              x2={k === parts.length - 1 && todayCloseX != null ? todayCloseX : Math.min(width - padX, x1 - (k < parts.length - 1 ? 2 : 0))} y1={by} y2={by}
               stroke="#475569" strokeWidth="1" strokeDasharray="4 3" opacity="0.8" />
       ))}
+      {todayCloseX != null && (
+        <line x1={todayCloseX} x2={width - padX} y1={yFor(nextBaseline!)} y2={yFor(nextBaseline!)}
+              stroke="#475569" strokeWidth="1" strokeDasharray="4 3" opacity="0.8" />
+      )}
+      {/* 시간표 세로선 — 시작 = 점선, 종가 = 실선 */}
+      {markXs?.map((m, k) => {
+        const x = padX + Math.min(1, Math.max(0, m.x)) * innerW;
+        return <line key={`mx${k}`} x1={x} x2={x} y1={padY} y2={height - padY} {...(m.close ? CLOSE_LINE : OPEN_LINE)} />;
+      })}
       {/* 오늘 정규장 시작 — 회색 세로 점선 (24시간 차트) */}
-      {markIndex != null && markIndex > 0 && markIndex < points.length && (
+      {!markXs && markIndex != null && markIndex > 0 && markIndex < points.length && (
         <>
-          <line x1={points[markIndex][0]} x2={points[markIndex][0]} y1={padY} y2={height - padY}
-                stroke="#334155" strokeWidth="1.2" strokeDasharray="3 2" opacity="0.9" />
+          <line x1={points[markIndex][0]} x2={points[markIndex][0]} y1={padY} y2={height - padY} {...OPEN_LINE} />
         </>
       )}
+      {(markXs ? [] : extraMarks ?? []).map((m, k) => m != null && m > 0 && m < points.length ? (
+        k % 2 === 0
+          ? <line key={`em${k}`} x1={points[m][0]} x2={points[m][0]} y1={padY} y2={height - padY} {...OPEN_LINE} />
+          : <line key={`em${k}`} x1={points[m][0]} x2={points[m][0]} y1={padY} y2={height - padY} {...CLOSE_LINE} />
+      ) : null)}
       {/* 오늘 정규장 종가 — 회색 세로 점선 */}
-      {closeIndex != null && closeIndex > 0 && closeIndex < points.length && (
+      {!markXs && closeIndex != null && closeIndex > 0 && closeIndex < points.length && (
         <>
-          <line x1={points[closeIndex][0]} x2={points[closeIndex][0]} y1={padY} y2={height - padY}
-                stroke="#334155" strokeWidth="1.2" strokeDasharray="3 2" opacity="0.9" />
+          <line x1={points[closeIndex][0]} x2={points[closeIndex][0]} y1={padY} y2={height - padY} {...CLOSE_LINE} />
         </>
       )}
       {/* 목표가 — amber 점선 */}

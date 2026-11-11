@@ -5,12 +5,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useEscClose } from "../lib/useEscClose";
 import { createPortal } from "react-dom";
-import { useQueries } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import {
   createChart,
   ColorType,
   LineSeries,
   BaselineSeries,
+  AreaSeries,
   LineStyle,
   type IChartApi,
   type ISeriesApi,
@@ -25,6 +26,8 @@ import {
   fetchYahooIntraday,
   type PricePoint,
   type IntradayBar,
+  searchTossAutoComplete,
+  searchNaverAutoComplete,
 } from "../lib/api";
 
 interface StockRef { ticker: string; name: string; }
@@ -33,6 +36,9 @@ interface Props {
   isOpen: boolean;
   onClose: () => void;
   seed: StockRef[];   // 초기 종목 (ETF 검색결과 전체 or 단일 ETF). 열릴 때 이걸로 초기화.
+  title?: string;     // 머리 제목(기본 'ETF 등락률 비교')
+  initialMode?: "min" | "day" | "week" | "month";   // 처음 봉(기본 분봉)
+  startUnchecked?: boolean;   // 처음에 모두 체크 해제(흐림)
 }
 
 const KST_OFFSET = 9 * 3600;                  // 분봉 UTC epoch → KST 벽시계 보정(초)
@@ -63,7 +69,7 @@ const PERIODS: Record<Mode, { range: string; label: string }[]> = {
   week:  [{ range: "1y", label: "1년" }, { range: "2y", label: "2년" }, { range: "5y", label: "5년" }],
   month: [{ range: "2y", label: "2년" }, { range: "5y", label: "5년" }, { range: "10y", label: "10년" }, { range: "max", label: "전체" }],
 };
-const DEFAULT_RANGE: Record<Mode, string> = { min: "5d", day: "6mo", week: "2y", month: "10y" };
+const DEFAULT_RANGE: Record<Mode, string> = { min: "5d", day: "1mo", week: "2y", month: "10y" };   // 일봉 기본 1개월(사용자 2026-11-10)
 
 interface Built {
   data: { time: Time; value: number }[];
@@ -71,6 +77,12 @@ interface Built {
   final: number | null;
 }
 const EMPTY: Built = { data: [], map: new Map(), final: null };
+// 누적(첫날=0%) → 봉마다 직전 봉 대비 등락률(사용자 2026-11-10 "누적으로 할지 매일 매일 상승률로 할지 옵션")
+function toPerBar(b: Built): Built {
+  if (b.data.length < 2) return b;
+  const data = b.data.map((p, i) => ({ time: p.time, value: i === 0 ? 0 : ((1 + p.value / 100) / (1 + b.data[i - 1].value / 100) - 1) * 100 }));
+  return { data, map: new Map(data.map(x => [String(x.time), x.value])), final: data[data.length - 1].value };
+}
 
 // 주봉: 일봉을 7일 버킷으로 묶어 각 주 마지막 종가 → 시작주=0% 정규화
 function buildWeekly(hist: PricePoint[]): Built {
@@ -134,24 +146,50 @@ const lineColorAt = (i: number): string =>
 
 // "#dc2626" + 알파 → rgba (격차 리본 채우기용). 비-hex(hsl)은 그대로 반환(2종목 비교는 항상 hex).
 const hexA = (hex: string, a: number): string => {
+  // 13번째 종목부터는 hsl 색 — 예전엔 그대로 돌려줘 마우스 강조 때 이 선들만 안 흐려졌다(사용자 2026-11-10)
+  const hm = /^hsl\(([^)]+)\)$/.exec(hex);
+  if (hm) return `hsla(${hm[1]}, ${a})`;
   if (hex[0] !== "#" || hex.length < 7) return hex;
   const n = parseInt(hex.slice(1, 7), 16);
   return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
 };
 
-export function EtfCompareChartDialog({ isOpen, onClose, seed }: Props) {
+export function EtfCompareChartDialog({ isOpen, onClose, seed, title, initialMode = "min", startUnchecked = false }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
   const bandRef = useRef<HTMLCanvasElement>(null);   // 배경 밴드(일/주 음영 + 요일 라벨)
-  const [mode, setMode] = useState<Mode>("min");
-  const [range, setRange] = useState<string>(DEFAULT_RANGE.min);
+  const [mode, setMode] = useState<Mode>(initialMode);
+  const [range, setRange] = useState<string>(DEFAULT_RANGE[initialMode]);
   // 모드 전환 시 그 모드의 기본 기간으로 (현재 range 가 새 모드에 없으면 기본값).
   const pickMode = (m: Mode) => {
     setMode(m);
     setRange(r => (PERIODS[m].some(p => p.range === r) ? r : DEFAULT_RANGE[m]));
   };
-  // seed 로 고정 (다이얼로그는 열 때마다 remount → seed 반영). 추가검색 없음.
-  const [items] = useState<StockRef[]>(seed);
+  // seed 로 시작(다이얼로그는 열 때마다 remount → seed 반영). 검색으로 하나씩 더하고 칩 ✕ 로 뺀다
+  //   (사용자 2026-11-10 "검색해서 종목을 하나씩 추가하면서 비교")
+  const [items, setItems] = useState<StockRef[]>(seed);
+  const [q, setQ] = useState("");
+  const [dq, setDq] = useState("");
+  useEffect(() => { const t = setTimeout(() => setDq(q.trim()), 250); return () => clearTimeout(t); }, [q]);
+  const { data: found } = useQuery({
+    queryKey: ["compare-chart-search", dq],
+    queryFn: async () => { const a = await searchTossAutoComplete(dq, 12); return a.length ? a : searchNaverAutoComplete(dq, 12); },
+    enabled: isOpen && dq.length > 0,
+    staleTime: 30_000,
+  });
+  const addItem = (r: StockRef) => { setItems(xs => (xs.some(x => x.ticker === r.ticker) ? xs : [...xs, { ticker: r.ticker, name: r.name }])); setQ(""); setDq(""); };
+  const removeItem = (t: string) => setItems(xs => xs.filter(x => x.ticker !== t));
+  // 칩·범례에 마우스를 올리면 그 종목 선만 진하게, 나머지는 흐리게(사용자 2026-11-10)
+  const [hot, setHot] = useState<string | null>(null);
+  // 체크 해제한 종목 — 선을 흐리게(값 꼬리표도 숨김). 고른 종목만 또렷이 비교(사용자 2026-11-10 "체크 안 되면 흐리게, 일괄 선택·해제")
+  // 업종 비교(CompareHost)는 처음에 모두 체크 해제 — 보고 싶은 것만 골라 켠다(사용자 2026-11-10 "기본은 모두 체크 해제"). 검색으로 더한 종목은 켜진 채로
+  const [off, setOff] = useState<Set<string>>(() => new Set(startUnchecked ? seed.map(x => x.ticker) : []));
+  const offRef = useRef(off); offRef.current = off;   // 차트 안 값 상자(한 번 만든 함수)가 지금 체크 상태를 읽게
+  // 흐리게 판정 — 체크 푼 종목은 늘 흐림. 마우스를 올리면 그 종목은 굵게, 체크한 종목은 그대로 둔다
+  //   (사용자 2026-11-10 "hover 시에 체크된 건 그대로"). 전부 체크 상태면 예전처럼 올린 것만 남기고 흐림
+  const isDim = (t: string) => t === hot ? false : off.size ? off.has(t) : hot != null;
+  const toggleOff = (t: string) => setOff(o => { const n = new Set(o); if (n.has(t)) n.delete(t); else n.add(t); return n; });
+  const seriesRef = useRef(new Map<string, ISeriesApi<SeriesType>>());
 
   const stocks = items;
   const colorMap = useMemo(() => {
@@ -175,10 +213,29 @@ export function EtfCompareChartDialog({ isOpen, onClose, seed }: Props) {
     })),
   });
   const stamp = qs.map(q => q.dataUpdatedAt).join(",");
+  const [perBar, setPerBar] = useState(false);   // false = 누적(첫날 대비) · true = 매일(전날 대비)
+  // 배경 지수 — 코스피·코스닥을 골라 같은 기준(시작=0%)으로 뒤에 회색 면으로 깐다(사용자 2026-11-10 "코스피, 코스닥 그래프를 배경으로 선택해서")
+  const [bgIdx, setBgIdx] = useState<string[]>(["^KS11"]);   // 코스피 배경 기본(사용자 2026-11-10)
+  const bgQs = useQueries({
+    queries: bgIdx.map(sym => ({
+      queryKey: ["cmp", mode, range, sym],
+      queryFn: () => (mode === "min" ? fetchMin(sym, range) : fetchDaily(sym, range)),
+      staleTime: mode === "min" ? 5 * 60_000 : 30 * 60_000,
+      enabled: isOpen,
+    })),
+  });
+  const bgStamp = bgQs.map(q => q.dataUpdatedAt).join(",");
+  const bgBuilt = useMemo(() => bgIdx.map((sym, i) => {
+    const data = bgQs[i]?.data;
+    const b = mode === "month" ? buildMonthly((data as PricePoint[]) ?? []) : mode === "week" ? buildWeekly((data as PricePoint[]) ?? [])
+      : mode === "day" ? buildDaily((data as PricePoint[]) ?? []) : buildMin((data as IntradayBar[]) ?? []);
+    return { sym, b: perBar ? toPerBar(b) : b };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [bgIdx, mode, bgStamp, perBar]);
   const loading = qs.some(q => q.isLoading);
 
   // ticker → 정규화 시리즈
-  const built = useMemo(() => {
+  const builtCum = useMemo(() => {
     const m = new Map<string, Built>();
     stocks.forEach((s, i) => {
       const data = qs[i]?.data;
@@ -191,6 +248,7 @@ export function EtfCompareChartDialog({ isOpen, onClose, seed }: Props) {
     return m;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stocks, mode, stamp]);
+  const built = useMemo(() => (perBar ? new Map([...builtCum].map(([t, b]) => [t, toPerBar(b)])) : builtCum), [builtCum, perBar]);
 
   // 차트 그리기
   useEffect(() => {
@@ -229,6 +287,19 @@ export function EtfCompareChartDialog({ isOpen, onClose, seed }: Props) {
 
     const seriesList: { ticker: string }[] = [];
     let zeroAnchor: ISeriesApi<SeriesType> | null = null;
+    // 배경 지수 먼저(뒤에 깔리게)
+    for (const { sym, b } of bgBuilt) {
+      if (b.data.length < 2) continue;
+      const kq = sym === "^KQ11";
+      const bg = chart.addSeries(AreaSeries, {
+        // 채운 면을 진하게(사용자 2026-11-10 "배경이 채워진 걸로, 잘 안 보여")
+        lineColor: "rgba(0,0,0,0)", lineWidth: 1,   // 선은 빼고 면만(사용자 2026-11-10 "선은 빼고 배경만")
+        topColor: kq ? "rgba(13,148,136,0.38)" : "rgba(71,85,105,0.38)", bottomColor: kq ? "rgba(13,148,136,0.12)" : "rgba(71,85,105,0.12)",
+        priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false,
+        title: kq ? "코스닥" : "코스피",
+      });
+      bg.setData(b.data);
+    }
     for (const s of visible) {
       const b = built.get(s.ticker)!;
       const ser = chart.addSeries(LineSeries, {
@@ -240,6 +311,7 @@ export function EtfCompareChartDialog({ isOpen, onClose, seed }: Props) {
         crosshairMarkerRadius: 3,
       });
       ser.setData(b.data);
+      seriesRef.current.set(s.ticker, ser);
       seriesList.push({ ticker: s.ticker });
       if (!zeroAnchor) zeroAnchor = ser;
     }
@@ -292,7 +364,7 @@ export function EtfCompareChartDialog({ isOpen, onClose, seed }: Props) {
     const PAD_L = 8, PAD_T = 8;
 
     const fmtTime = (timeKey: string): string => {
-      if (mode === "week") return timeKey;   // YYYY-MM-DD (주 마지막 거래일)
+      if (mode !== "min") return timeKey;   // 일·주·월봉은 YYYY-MM-DD 문자열(예전엔 일봉에서 NaN/NaN 으로 깨졌다)
       const dt = new Date(Number(timeKey) * 1000);   // +9h 반영된 epoch → UTC 표기가 KST 벽시계
       const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
       const dd = String(dt.getUTCDate()).padStart(2, "0");
@@ -316,6 +388,7 @@ export function EtfCompareChartDialog({ isOpen, onClose, seed }: Props) {
       rows.forEach((r, i) => {
         const pc = r.v >= 0 ? "#e11d48" : "#2563eb";
         html += `<div style="display:flex;align-items:center;gap:5px;line-height:1.7;`
+          // 값 상자는 체크와 상관없이 전 종목을 똑같이(사용자 2026-11-10 "레이어는 선택 상관없이 다 보이게")
           + `background:${r.color};border-radius:4px;padding:1px 5px;margin-bottom:2px">`
           + `<span style="color:rgba(255,255,255,0.8);width:13px;text-align:right;flex:none;font-weight:700">${i + 1}</span>`
           + `<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#fff;font-weight:600;text-shadow:0 1px 1px rgba(0,0,0,0.3)">${r.name}</span>`
@@ -505,6 +578,7 @@ export function EtfCompareChartDialog({ isOpen, onClose, seed }: Props) {
     window.addEventListener("resize", rafDraw);
 
     return () => {
+      seriesRef.current.clear();
       clearTimeout(t1);
       try { chart.unsubscribeCrosshairMove(onMove); } catch { /* noop */ }
       try { ts.unsubscribeVisibleLogicalRangeChange(drawBg); } catch { /* noop */ }
@@ -512,8 +586,18 @@ export function EtfCompareChartDialog({ isOpen, onClose, seed }: Props) {
       chart.remove();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, built, mode, stocks]);
+  }, [isOpen, built, mode, stocks, bgBuilt]);
 
+  useEffect(() => {
+    for (const [t, ser] of seriesRef.current) {
+      const c = colorOf(t);
+      const dim = isDim(t);
+      ser.applyOptions(t === hot ? { color: c, lineWidth: 3, lastValueVisible: true }
+        : dim ? { color: hexA(c, 0.3), lineWidth: 1, lastValueVisible: false }   // 흐린 선 조금 진하게(사용자 2026-11-10 "너무 안 보여")
+        : { color: c, lineWidth: off.size ? 2 : 1, lastValueVisible: true });
+      // (0% 아래를 옅게 칠하던 것은 뺐다 — 사용자 2026-11-10 "0% 이하 색 변화 기능 없애자")
+    }
+  });   // 매 그리기마다 — 차트를 새로 만든 뒤에도 강조가 이어지게
   if (!isOpen) return null;
 
   return createPortal(
@@ -525,15 +609,23 @@ export function EtfCompareChartDialog({ isOpen, onClose, seed }: Props) {
            onClick={e => e.stopPropagation()}>
         {/* 헤더 */}
         <header className="px-4 py-2 border-b bg-gray-50 flex items-center gap-2 flex-wrap">
-          <span className="text-base font-bold">📊 ETF 등락률 비교</span>
-          <span className="text-[11px] text-gray-500">시작점=0% 정규화</span>
+          <span className="text-base font-bold">📊 {title ?? "ETF 등락률 비교"}</span>
+          {/* 누적 | 매일 */}
+          <span className="inline-flex rounded border border-gray-300 overflow-hidden text-[11px] font-bold">
+            {([[false, "누적"], [true, mode === "week" ? "매주" : mode === "month" ? "매월" : mode === "min" ? "매분" : "매일"]] as const).map(([v, label]) => (
+              <button key={label} onClick={() => setPerBar(v)}
+                      title={v ? "봉마다 직전 봉 대비 등락률(그날 하루 몇 % 움직였나)" : "첫날을 0% 로 놓고 그날부터 지금까지 누적 등락률"}
+                      className={`px-2 py-0.5 ${perBar === v ? "bg-gray-800 text-white" : "bg-white text-gray-600 hover:bg-gray-100"}`}>{label}</button>
+            ))}
+          </span>
+          <span className="text-[11px] text-gray-500">{perBar ? "전날(직전 봉) 대비 %" : "첫날 대비 누적 %"}</span>
 
           {/* 분봉 / 주봉 토글 */}
           <span className="ml-auto inline-flex items-center gap-0.5">
             {([["min", "분봉"], ["day", "일봉"], ["week", "주봉"], ["month", "월봉"]] as const).map(([m, label]) => (
               <button key={m} onClick={() => pickMode(m)}
                       title={m === "min" ? "최근 5거래일 1분봉 — 요일·시간대 패턴"
-                             : m === "day" ? "6개월 일봉 — 단·중기 추세"
+                             : m === "day" ? "1개월 일봉 — 단기 추세"
                              : m === "week" ? "2년 주봉 — 중기 추세"
                              : "10년 월봉 — 장기 추세"}
                       className={`px-2.5 py-0.5 rounded text-[11px] font-bold border transition
@@ -551,6 +643,19 @@ export function EtfCompareChartDialog({ isOpen, onClose, seed }: Props) {
 
         {/* 기간 선택 — 현재 봉 모드에서 고를 수 있는 기간 칩 */}
         <div className="px-4 py-1.5 border-b bg-white flex items-center justify-end gap-1.5 flex-wrap text-[11px]">
+          <span className="mr-auto inline-flex items-center gap-1">
+            <span className="text-gray-400 font-medium">배경</span>
+            {([["^KS11", "코스피"], ["^KQ11", "코스닥"]] as const).map(([sym, label]) => {
+              const on = bgIdx.includes(sym);
+              return (
+                <button key={sym} onClick={() => setBgIdx(xs => (on ? xs.filter(x => x !== sym) : [...xs, sym]))}
+                        title={`${label} 지수를 같은 기준(시작=0%)으로 뒤에 깔기`}
+                        className={`px-2 py-0.5 rounded border transition font-semibold ${on ? (sym === "^KQ11" ? "bg-teal-600 text-white border-teal-600" : "bg-slate-600 text-white border-slate-600") : "bg-white text-gray-600 border-gray-300 hover:bg-gray-100"}`}>
+                  {on ? "✓ " : ""}{label}
+                </button>
+              );
+            })}
+          </span>
           <span className="text-gray-400 font-medium mr-0.5">기간</span>
           {PERIODS[mode].map(p => (
             <button key={p.range} onClick={() => setRange(p.range)}
@@ -566,12 +671,40 @@ export function EtfCompareChartDialog({ isOpen, onClose, seed }: Props) {
         {/* 종목 줄 — 비교 대상(색칩) */}
         <div className="px-4 py-2 border-b flex items-center gap-2 flex-wrap">
           {stocks.map(s => (
-            <span key={s.ticker}
-                  className="inline-flex items-center gap-1.5 px-2 py-1 rounded text-[12px] font-bold text-white"
+            <span key={s.ticker} onMouseEnter={() => setHot(s.ticker)} onMouseLeave={() => setHot(null)}
+                  onClick={() => toggleOff(s.ticker)}   /* 칩 어디를 눌러도 체크 켜기/끄기(사용자 2026-11-10) */
+                  className={`inline-flex items-center gap-1.5 px-2 py-1 rounded text-[12px] font-bold text-white transition-opacity cursor-pointer select-none ${isDim(s.ticker) ? "opacity-35" : ""}`}
                   style={{ background: colorOf(s.ticker) }}>
-              {s.name} <span className="opacity-80 font-normal">{s.ticker}</span>
+              <input type="checkbox" checked={!off.has(s.ticker)} readOnly tabIndex={-1}
+                     title="체크하면 또렷하게, 풀면 흐리게" className="w-3.5 h-3.5 accent-white pointer-events-none" />
+              {s.name}   {/* 종목코드는 뺐다(사용자 2026-11-10 "종목명만") */}
+              <button type="button" onClick={e => { e.stopPropagation(); removeItem(s.ticker); }} title="이 종목 빼기"
+                      className="ml-0.5 opacity-70 hover:opacity-100 leading-none">✕</button>
             </span>
           ))}
+          {stocks.length > 1 && (
+            <span className="inline-flex rounded border border-gray-300 overflow-hidden text-[11px] font-bold">
+              <button type="button" onClick={() => setOff(new Set())} className="px-2 py-1 bg-white text-gray-600 hover:bg-gray-100">전체 선택</button>
+              <button type="button" onClick={() => setOff(new Set(stocks.map(x => x.ticker)))} className="px-2 py-1 bg-white text-gray-600 hover:bg-gray-100 border-l border-gray-300">전체 해제</button>
+            </span>
+          )}
+          {/* 종목 더하기 — 이름·코드로 검색 */}
+          <span className="relative">
+            <input value={q} onChange={e => setQ(e.target.value)} placeholder="+ 종목 추가 (이름·코드)"
+                   onKeyDown={e => { if (e.key === "Enter" && found?.[0]) addItem(found[0]); }}
+                   className="w-44 px-2 py-1 rounded border border-gray-300 text-[12px] focus:outline-none focus:border-indigo-400" />
+            {dq && found && found.length > 0 && (
+              <div className="absolute left-0 top-full mt-1 z-30 w-64 max-h-64 overflow-y-auto rounded border border-gray-200 bg-white shadow-lg">
+                {found.filter(r => !items.some(x => x.ticker === r.ticker)).map(r => (
+                  <button key={r.ticker} type="button" onClick={() => addItem(r)}
+                          className="w-full text-left px-2 py-1 text-[12px] hover:bg-indigo-50 flex items-baseline gap-1.5">
+                    <b className="text-gray-800 truncate">{r.name}</b>
+                    <span className="text-[10.5px] text-gray-400 shrink-0">{r.ticker} · {r.market}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </span>
         </div>
 
         {/* 차트 */}
@@ -601,7 +734,9 @@ export function EtfCompareChartDialog({ isOpen, onClose, seed }: Props) {
           {stocks.map(s => {
             const f = built.get(s.ticker)?.final ?? null;
             return (
-              <span key={s.ticker} className="inline-flex items-center gap-1.5">
+              <span key={s.ticker} className={`inline-flex items-center gap-1.5 cursor-pointer ${isDim(s.ticker) ? "opacity-35" : ""}`}
+                    onClick={() => toggleOff(s.ticker)}
+                    onMouseEnter={() => setHot(s.ticker)} onMouseLeave={() => setHot(null)}>
                 <span className="w-3 h-3 rounded-sm inline-block" style={{ background: colorOf(s.ticker) }} />
                 <span className="font-semibold text-gray-700">{s.name}</span>
                 {f != null && (
@@ -625,7 +760,8 @@ export function EtfCompareChartDialog({ isOpen, onClose, seed }: Props) {
           )}
           <span className="ml-auto text-gray-400">
             {(PERIODS[mode].find(p => p.range === range)?.label ?? "")}{" "}
-            {mode === "min" ? "1분봉 · KST · 요일·시간대 패턴 · 첫 봉 대비 %"
+            {perBar ? (mode === "min" ? "1분봉 · 직전 분 대비 %" : mode === "day" ? "일봉 · 전날 대비 %" : mode === "week" ? "주봉 · 전주 대비 %" : "월봉 · 전달 대비 %")
+             : mode === "min" ? "1분봉 · KST · 요일·시간대 패턴 · 첫 봉 대비 %"
              : mode === "day" ? "일봉 · 첫 거래일 대비 %"
              : mode === "week" ? "주봉 · 시작주 대비 %"
              : "월봉 · 시작월 대비 %"}

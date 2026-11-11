@@ -1,31 +1,50 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
+import { openGoogleAi, STOCK_ANALYSIS_PROMPT, aiNowStamp } from "../lib/googleAi";
+import { SectorTabBar, sectorAvg, sectionsForTab, sectorTabsOf, useSectorTab } from "./SectorTabBar";
+import { SectorSummaryBoard } from "./SectorSummaryBoard";
+import { useRecentDisc } from "../lib/recentDisclosures";
+import { DiscTags } from "./DiscTags";
+import { SobuGrid } from "./SobuGrid";
+import { KisExpRankBox } from "./KisExpRankBox";
+import { ValueupTags } from "./ValueupTags";
+import { useKisRadar, radarLabel } from "../lib/kisRadar";
+import { useKisVi, viLabel, viActive } from "../lib/kisVi";
+import { HoverTip } from "./HoverTip";
+import { indicatorHelp, indicatorNow, indicatorBand } from "../lib/indicatorHelp";
+import { SeohakTag } from "./SeohakBox";
+import { tagsFor, useValueupFile } from "../lib/valueupTags";
+import { openStockInfo, canTickPopup } from "../lib/tickPopup";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { useMarketAlerts } from "../lib/marketAlerts";
+import { dashboardCardDim } from "../lib/dashboardCardDim";
 import { IndexWarnTag } from "./IndexWarnTag";
-import { fetchYahooBatch, fetchKrFuturesMinute, fetchKrRegularPrices, fetchYahooSparkDay, fetchDashboardChart, fetchYasunNightFutures, fetchTossUsStockCandles, fetchKrBondYieldSeries } from "../lib/api";
+import { fetchYahooBatch, fetchKrFuturesMinute, fetchKrFuturesNightSession, fetchKrRegularPrices, daySparkPlan, fetchYahooSparkDay, fetchDashboardChart, fetchYasunNightFutures, fetchTossUsStockCandles, fetchKrBondYieldSeries, fetchTossIntraday, fetchSinaMetalDay, SINA_DAY_SYMBOLS, fetchCnbcDay, CNBC_DAY_SYMBOLS, fetchKrIndexDay, KR_INDEX_DAY_SYMBOLS, type DaySpark } from "../lib/api";
 import type { UsIndex, MarketIndexKey } from "../lib/api";
-import { isSymbolSleeping, isMarketOpen, marketOfSymbol, fmtAgo, isUsExtendedTradingOpen, krFuturesName, krFuturesDesc, isKrNightSession, isQuoteStale, isKrHoldingClosed, isUsRateSymbol, displayPctOf, isFxFuturesWeekendClosed, isKrAfterRegularClose, nowKstDateStr } from "../lib/format";
+import { isSymbolSleeping, isMarketOpen, marketOfSymbol, isUsExtendedTradingOpen, krFuturesName, krFuturesDesc, isKrNightSession, isKrHoldingClosed, isUsRateSymbol, displayPctOf, isKrAfterRegularClose, isKrAfterWindow, nowKstDateStr } from "../lib/format";
 import { getDimSleepingEnabled, checkPersonalProxyYasunSupport } from "../lib/proxyConfig";
-import { useChartRange, pickCardChart } from "../lib/chartRange";
-import { ChartRangeToggle } from "./ChartRangeToggle";
-import { buildDashboardPage, dashboardGroupNav, dashboardTagTone, dashboardRowLabelTone, dashboardTagCard, leadRowOf, isLastLead, rowLead, sortedRows, loadLeaderSort, saveLeaderSort, type LeaderSort, type DashboardPage } from "../lib/dashboardGroups";
+import { useChartRange, pickCardChart, historyRange } from "../lib/chartRange";
+import { ChartRangeToggle, AvgMarketToggle } from "./ChartRangeToggle";
+import { AftPill } from "./SectorTabBar";
+import { usRegExtOf, rotRowAvg } from "../lib/avgMarket";
+import { DRAWER_SECTION_IDS, buildDashboardPage, dashboardGroupNav, dashboardTagTone, dashboardRowLabelTone, dashboardTagCard, leadRowOf, isLastLead, rowLead, sortedRows, loadLeaderSort, saveLeaderSort, type LeaderSort, type DashboardPage, type DashboardSection } from "../lib/dashboardGroups";
 import { RotationTab } from "./RotationTab";
 import { requestTab, isTabVisible } from "../lib/tabNav";
 import { GroupNavBar } from "./GroupNavBar";
 import { US_PAIRS, allYahooSymbols, DAY_SPARK_SYMBOLS } from "../lib/usMarketData";
 import { useAdaptiveRefreshMs } from "../lib/proxyStatus";
 import { reportRefresh } from "../lib/lastRefresh";
-import { handleTossLinkClick, TOSS_SYMBOL_URL } from "../lib/toss";
+import { handleTossLinkClick, TOSS_SYMBOL_URL, worldQuoteUrl } from "../lib/toss";
 import { Sparkline } from "./Sparkline";
 import { KrDaySparkline } from "./KrDaySparkline";
 import { MarketFlowModal } from "./MarketFlowModal";
 import { EtfCompositionDialog } from "./EtfCompositionDialog";
 import { TicsSectorBoard } from "./TicsSectorBoard";
 import { RealRateNote } from "./RealRateNote";
+import { BreadthNote, UsBreadthNote } from "./BreadthNote";
 import { EtfTopCards } from "./EtfTopCards";
 import { ValueupMiniCard } from "./ValueupCard";
 import { HlPerpCard } from "./HlPerpCard";
-import { CnnFearGreedTag } from "./CnnFearGreedTag";
+import { CnnFearGreedTag, CnnFgPanel } from "./CnnFearGreedTag";
 import { TickArrow } from "./TickArrow";
 import { requestHeatmap, CARD_HEATMAP_LINK } from "../lib/heatmapNav";
 
@@ -48,7 +67,8 @@ function fmtPrice(symbol: string, price: number): string {
   // 원엔은 한국 관행대로 100엔 기준 표기 (Yahoo 는 1엔당 원 = 8.6원 꼴)
   if (symbol === "JPYKRW=X") return (price * 100).toFixed(2);
   if (symbol.includes("KRW")) return price.toFixed(2);
-  if (symbol === "CNNFG") return Math.round(price).toString();   // CNN 공포·탐욕 — 0~100 점수, CNN 표기처럼 정수
+  if (symbol === "CNNFG") return Math.round(price).toString();
+  if (symbol === "HYSPREAD") return `${price.toFixed(2)}%`;   // 하이일드 스프레드 — 국채 대비 가산금리(%)   // CNN 공포·탐욕 — 0~100 점수, CNN 표기처럼 정수
   if (symbol === "^TIPS10" || symbol === "^MOVE" || symbol === "^VIX" || symbol === "^TNX" || symbol === "^TYX" || symbol === "^US2Y") return price.toFixed(2);
   if (price >= 1000) return Math.round(price).toLocaleString();
   return price.toFixed(2);
@@ -63,7 +83,7 @@ function quoteUrl(symbol: string): string {
   // 한국 보유 종목 (6자리) 또는 KODEX/.KS ETF (6자리.KS) — 모두 토스
   const krMatch = /^([\dA-Za-z]{6})(?:\.KS)?$/.exec(symbol);
   if (krMatch) return `https://tossinvest.com/stocks/A${krMatch[1]}`;
-  return `https://finance.yahoo.com/quote/${encodeURIComponent(symbol)}`;
+  return worldQuoteUrl(symbol);   // 도쿄 상장·닛케이 = 네이버, 그 밖 = 야후
 }
 
 function chunk<T>(arr: T[], size: number): T[][] {
@@ -80,9 +100,11 @@ interface UsMarketTabProps {
   page?: DashboardPage;   // 주간·야간·반도체 — 메뉴의 지수 탭 셋 중 어느 것인지
   // 그룹 색인바 sticky 고정 위치(px) — App 의 헤더+탭바 아래. 미지정 시 0.
   navStickyTop?: number;
+  // 지수 서랍(IndexSideDrawer) — 이 묶음들만 그대로 카드로(색인바·동시호가 칸 없이)(사용자 2026-11-09 "지금 있는 카드를 그대로")
+  sectionsOverride?: DashboardSection[];
 }
 
-export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0, page = "day" }: UsMarketTabProps = {}) {
+export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0, page = "day", sectionsOverride }: UsMarketTabProps = {}) {
   const yahooSymbols = allYahooSymbols();
   const REFRESH_MS = useAdaptiveRefreshMs(BASE_REFRESH_MS);
 
@@ -99,7 +121,7 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
   const { data: idxKrReg } = useQuery({
     queryKey: ["idx-kr-reg", nowKstDateStr()],
     queryFn: () => fetchKrRegularPrices(krStockCodes),
-    enabled: krAfter && krStockCodes.length > 0,
+    enabled: (krAfter || isKrAfterWindow()) && krStockCodes.length > 0,   // 자정·주말에도 마지막 정규장 종가(애프터 꼬리표, 사용자 2026-11-07)
     staleTime: 6 * 60 * 60_000, refetchOnWindowFocus: false,
     // 야후 확인이 빠진 종목이 있으면(일시 실패) 5분 뒤 다시 — 다 채워지면 멈춘다
     refetchInterval: q => (q.state.data && [...q.state.data.values()].filter(v => !v.fromYahoo).length > 3 ? 5 * 60_000 : false),   // 야후에 없는 신규 상장 몇 개는 봐준다
@@ -130,9 +152,33 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
   useEffect(() => { if (usUpdatedAt > 0) reportRefresh(usUpdatedAt); }, [usUpdatedAt]);
 
   const tier0 = US_PAIRS.filter(p => p.tier === "T0");
+  // 종목 하나의 '정규장 등락 + 그 뒤(애프터·프리) 움직임' — 국내는 15:30 뒤 정규장 종가 책갈피, 미국은 장 밖이면 최근 정규장 종가 기준
+  const regExtOf = (sym: string): { reg: number; aft: number; ses?: "프리" | "애프터" | "데이" } | null => {
+    const q = usMap.get(sym);
+    const r = isKrAfterWindow() && tier0.find(x => x.symbol === sym)?.krStock ? idxKrReg?.get(sym.slice(0, 6)) : undefined;
+    return q && r?.fromYahoo && r.regularPrice > 0 ? { reg: r.regularPct, aft: (q.price / r.regularPrice - 1) * 100, ses: "애프터" as const } : usRegExtOf(sym, q);
+  };
+  // 국내 종목이 흐리면(프리장에 아직 체결 없음·장 마감) 평균에서 뺀다 — 마감 뒤엔 regExtOf 의 정규장 등락이 대신 들어간다
+  //   (사용자 2026-11-11 "프리장에 오픈 안 된 것도 포함해서 국내 % 가 나와")
+  const pctOfSym = (sym: string) => (/\.(KS|KQ)$/.test(sym) && dimOf(sym) ? null : displayPctOf(sym, usMap.get(sym)));
+  // 업종 칸(SobuGrid) 시세 — 업종 탭과 한눈에 요약판이 같이 쓴다. 국내는 15:30 뒤 정규장 종가 책갈피(야후 확인분), 미국 대장주는 장 밖이면 최근 정규장
+  const sobuQuote = (sym: string) => {
+    const q = usMap.get(sym); if (!q) return undefined;
+    const r = isKrAfterWindow() && tier0.find(x => x.symbol === sym)?.krStock ? idxKrReg?.get(sym.slice(0, 6)) : undefined;
+    const ux = usRegExtOf(sym, q);
+    return { price: ux?.price ?? q.price, pct: displayPctOf(sym, q) ?? q.pct, reg: r?.fromYahoo ? { price: r.regularPrice, pct: r.regularPct } : ux ? { price: ux.regPrice, pct: ux.reg } : undefined };
+  };
+
+  const rotAvg = (section: DashboardSection, gi: number) => rotRowAvg(section, gi, pctOfSym, regExtOf);
   // 지수 대시보드 그룹 — 데스크톱·모바일 공용 정의(lib/dashboardGroups).
   //   주간·야간·반도체 중 어느 페이지인지는 메뉴 탭이 정한다(page).
-  const T0_SECTIONS = buildDashboardPage(page);
+  // 지수(한국/주간)·(미국/야간)은 서랍으로 옮긴 위쪽 묶음(한국·미국 지수·환율·금리·선물·원자재)을 뺀다(사용자 2026-11-09)
+  const movedToDrawer = !sectionsOverride && (page === "day" || page === "night");
+  const PAGE_SECTIONS = sectionsOverride ?? buildDashboardPage(page).filter(s => !movedToDrawer || !DRAWER_SECTION_IDS.has(s.id));
+  // 지수(업종) — 업종 블록 중 하나만(페이지 안 탭, 사용자 2026-11-03)
+  const SECTOR_TABS = page === "sobu" ? sectorTabsOf(PAGE_SECTIONS) : [];
+  const [sectorTab, setSectorTab] = useSectorTab(SECTOR_TABS);
+  const T0_SECTIONS = page === "sobu" ? sectionsForTab(PAGE_SECTIONS, sectorTab) : PAGE_SECTIONS;
 
   // T0 카드 sparkline — 일부 심볼 (SOX=F) 은 Yahoo 가 historical 안 줌 → 가장 가까운 현물 차트로 폴백
   const SPARKLINE_FALLBACK: Record<string, string> = {
@@ -143,8 +189,10 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
   const pairBySym = new Map(US_PAIRS.map(p => [p.symbol, p]));
   const chartSet = new Set<string>();
   for (const sec of T0_SECTIONS) {
-    if (sec.render) continue;
-    for (const sym of sec.rows.flat()) {
+    // 업종 칸(sobuGrid)도 같은 지수 카드를 그린다 — 예전엔 render 가 있는 블록을 다 건너뛰어 업종별 3개월·1년 그래프가 비었다
+    //   (24시간은 다른 경로라 보였다, 사용자 2026-11-10 "종목별은 되는데 업종별에 3개월/1년 안 나와")
+    if (sec.render && sec.render !== "sobuGrid") continue;
+    for (const sym of [...sec.rows.flat(), ...(sec.etfs ?? [])]) {
       const p = pairBySym.get(sym);
       if (!p) continue;
       chartSet.add(sym);
@@ -153,12 +201,15 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
     }
   }
   const allYahooForCharts = [...chartSet];
+  const chartHist = historyRange(useChartRange());   // 3개월 | 1년 — 아래 chartRange 선언보다 먼저 쓰여 따로 읽는다
   const yahooChartQs = useQueries({
     queries: allYahooForCharts.map(sym => ({
-      queryKey: ["yahoo-chart", sym, "3mo"],
-      queryFn: () => fetchDashboardChart(sym),
+      queryKey: ["yahoo-chart", sym, chartHist],   // 3개월 | 1년(앱 설정)
+      queryFn: () => fetchDashboardChart(sym, chartHist),
       staleTime: 60 * 60 * 1000,
       refetchOnWindowFocus: false,
+      // 빈 차트는 던진다(fetchDashboardChart) — 실패면 5분 뒤 다시(원래 차트가 없는 심볼이 매분 부르지 않게 1번만 재시도)
+      retry: 1, refetchInterval: (q: { state: { status: string } }) => (q.state.status === "error" ? 5 * 60_000 : false),
     })),
   });
   const yahooChartMap = new Map(
@@ -169,8 +220,8 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
   const TOSS_CHART_SYMBOLS = ["SKHY"];
   const tossStockChartQs = useQueries({
     queries: TOSS_CHART_SYMBOLS.map(sym => ({
-      queryKey: ["toss-us-candles", sym],
-      queryFn: () => fetchTossUsStockCandles(sym),
+      queryKey: ["toss-us-candles", sym, chartHist],
+      queryFn: () => fetchTossUsStockCandles(sym, chartHist === "1y" ? 252 : 120),
       staleTime: 60 * 60 * 1000,
       refetchOnWindowFocus: false,
     })),
@@ -187,8 +238,8 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
   const krBondSyms = Object.keys(KR_BOND_CODE);
   const krBondQs = useQueries({
     queries: krBondSyms.map(sym => ({
-      queryKey: ["kr-bond-series", sym],
-      queryFn: () => fetchKrBondYieldSeries(KR_BOND_CODE[sym], 60),
+      queryKey: ["kr-bond-series", sym, chartHist],
+      queryFn: () => fetchKrBondYieldSeries(KR_BOND_CODE[sym], chartHist === "1y" ? 252 : 60),
       staleTime: 60 * 60 * 1000,
       refetchOnWindowFocus: false,
     })),
@@ -222,32 +273,75 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
   );
 
   const dimEnabled = getDimSleepingEnabled();
+  // 흐린(장 안 열린) 카드는 줄 뒤로 — 카드 반복문과 같은 판정(dashboardCardDim)
+  const dimOf = (sym: string) => { const tp = tier0.find(x => x.symbol === sym); return !!tp && dashboardCardDim(tp, usMap.get(sym), dimEnabled); };
+  const radar = useKisRadar();   // 거래대금 급증(앱+한국투자) — 카드 꼬리표·업종 칸 정렬
+  const viMap = useKisVi();      // VI 발동(앱+한국투자) — 카드 꼬리표
   const [marketFlowFor, setMarketFlowFor] = useState<MarketIndexKey | null>(null);
   const [leaderSort, setLeaderSort] = useState<LeaderSort>(loadLeaderSort);   // 대장주 줄 정렬(등락률순 기본)
-  const chartRange = useChartRange();   // 카드 배경 차트 3개월 | 24시간 — 앱 전체 설정
+  const chartRange = useChartRange();   // 카드 배경 차트 3개월 | 1년 | 24시간 — 앱 전체 설정
   // 미국 종목·ETF 24시간 차트 — 야후 spark(20종목 1콜). '24시간' 을 골랐을 때만 받는다(5분마다).
-  const { data: usSpark } = useQuery({
-    queryKey: ["us-spark-day", US_SPARK_SYMBOLS.length],
-    queryFn: () => fetchYahooSparkDay(US_SPARK_SYMBOLS),
+  const sparkPlan = useMemo(() => daySparkPlan(US_SPARK_SYMBOLS), []);   // 앱=토스 1순위, 웹=야후 1순위(api.daySparkPlan)
+  const { data: usSpark, isFetched: usSparkFetched } = useQuery({
+    queryKey: ["us-spark-day", sparkPlan.yahoo.length],
+    queryFn: () => fetchYahooSparkDay(sparkPlan.yahoo),
     enabled: chartRange === "day",
     refetchInterval: chartRange === "day" ? 5 * 60_000 : false,
-    staleTime: 4 * 60_000, refetchOnWindowFocus: false,
+    // 창을 다시 띄우면(4분 지났을 때만) 바로 새로 — 숨겨진 동안은 5분 갱신이 멈춰, 앱을 다시 열면 장 시작 전 그래프
+    //   (오늘 시작 점선 없음)가 그대로 남아 있었다(사용자 지적 2026-10-23). 40종목당 1콜이라 부담 작다
+    staleTime: 4 * 60_000, refetchOnWindowFocus: true,
   });
+  // 야후 spark 가 못 준 종목(데스크톱 앱은 네이티브 요청이 쿠키가 없어 야후 429 를 자주 맞는다 — 2026-10-26 "앱에서만 세로선이 안 보여")
+  //   → 토스 5분봉 어제+오늘(fetchTossIntraday)로. 정규장 시작·종가 세로선·끊김·기준선을 같이 만들어 야후와 같은 모양.
+  //   야후가 된 종목은 안 부른다(종목당 2콜이라). 야후 응답이 끝난 뒤에만 빠진 종목을 센다(대기 중엔 전부 빠진 걸로 보이므로)
+  const usSparkMissing = chartRange === "day"
+    ? [...sparkPlan.toss, ...(usSparkFetched ? sparkPlan.yahoo.filter(sym => !usSpark?.get(sym)?.closes?.length) : [])]
+    : [];
+  const tossUsDayQs = useQueries({
+    queries: usSparkMissing.map(sym => ({
+      queryKey: ["toss-us-day", sym],
+      queryFn: () => fetchTossIntraday(sym),
+      staleTime: 4 * 60_000, refetchInterval: 5 * 60_000, refetchOnWindowFocus: true, retry: 1,
+    })),
+  });
+  const tossUsSpark = (sym: string) => {
+    const i = usSparkMissing.indexOf(sym);
+    const d = i >= 0 ? tossUsDayQs[i]?.data : undefined;
+    return d && d.closes.length > 1 ? { markXs: d.markXs, rolling: d.rolling, closes: d.closes, xs: d.xs, openIdx: d.openIdx, closeIdx: d.closeIdx, prevOpenIdx: d.prevOpenIdx, prevCloseIdx: d.prevCloseIdx, prevClose: d.base, breakIdx: d.breakIdx, prevBase: d.prevBase, nextBase: d.nextBase } : undefined;
+  };
   // 코스피200·코스닥150 **주간**선물 — 낮엔 한경 1분봉 어제+오늘(야선은 당일 세션뿐). 야간장(18~05시)엔 야선 그대로.
-  const krFutDayOn = chartRange === "day" && !isKrNightSession();
+  // 야간장 동안엔 주간(한경)+야간(yasun) 세션 그래프 — 다른 선물처럼(사용자 2026-11-02)
+  const krNight = isKrNightSession();
+  const krFutDayOn = chartRange === "day";
   const krFutDay = useQueries({
     queries: (["kospi200", "kosdaq150"] as const).map(k => ({
-      queryKey: ["hk-futures-min", k], queryFn: () => fetchKrFuturesMinute(k),
+      queryKey: krNight ? ["kr-fut-night-sess", k] : ["hk-futures-min", k], queryFn: () => krNight ? fetchKrFuturesNightSession(k) : fetchKrFuturesMinute(k),
       enabled: krFutDayOn, refetchInterval: krFutDayOn ? 60_000 : (false as const), staleTime: 30_000, refetchOnWindowFocus: false,
     })),
   });
+  // 리튬·니켈 — 시나 분봉 24시간(fetchSinaMetalDay, 1분마다). 야후·토스엔 분봉이 없다(사용자 2026-10-30)
+  //   + CNBC 5일 분봉(미국 10년 실질금리 등 — api.fetchCnbcDay). 같은 모양이라 한 목록으로
+  //   + 코스피·코스닥 지수(토스 5분봉 — api.fetchKrIndexDay)
+  const EXTRA_DAY_SYMBOLS = [...CNBC_DAY_SYMBOLS, ...KR_INDEX_DAY_SYMBOLS];   // 리튬·니켈(시나)은 카드를 뺐다(2026-11-02)
+  const sinaDayQs = useQueries({
+    queries: EXTRA_DAY_SYMBOLS.map(sym => ({
+      queryKey: ["extra-day", sym], queryFn: () => SINA_DAY_SYMBOLS.includes(sym) ? fetchSinaMetalDay(sym) : KR_INDEX_DAY_SYMBOLS.includes(sym) ? fetchKrIndexDay(sym) : fetchCnbcDay(sym),
+      enabled: chartRange === "day", refetchInterval: chartRange === "day" ? 60_000 : (false as const), staleTime: 30_000, refetchOnWindowFocus: false,
+    })),
+  });
+  const sinaSpark = (sym: string): DaySpark | undefined => {
+    const d = sinaDayQs[EXTRA_DAY_SYMBOLS.indexOf(sym)]?.data;
+    return d && d.closes.length > 1 ? { rolling: d.rolling, closes: d.closes, xs: d.xs, prevClose: d.base, breakIdx: d.breakIdx, prevBase: d.prevBase, markXs: d.markXs, openIdx: d.openIdx, closeIdx: d.closeIdx, prevOpenIdx: d.prevOpenIdx, prevCloseIdx: d.prevCloseIdx } : undefined;
+  };
   const krFutSpark = (sym: string) => {
     if (!krFutDayOn) return undefined;
     const d = (sym === "^KS200N" ? krFutDay[0] : sym === "^KQ150N" ? krFutDay[1] : undefined)?.data;
-    return d && d.closes.length > 1 ? { closes: d.closes, openIdx: d.openIdx, closeIdx: d.closeIdx, prevClose: d.base, breakIdx: d.breakIdx, prevBase: d.prevBase } : undefined;
+    return d && d.closes.length > 1 ? { markXs: d.markXs, rolling: d.rolling, closes: d.closes, xs: d.xs, openIdx: d.openIdx, closeIdx: d.closeIdx, prevOpenIdx: d.prevOpenIdx, prevCloseIdx: d.prevCloseIdx, prevClose: d.base, breakIdx: d.breakIdx, prevBase: d.prevBase, nextBase: d.nextBase } : undefined;
   };
   const [etfDialog, setEtfDialog] = useState<{ ticker: string; name: string } | null>(null);
   const marketAlerts = useMarketAlerts();   // 종목코드 → 투자주의·경고·위험
+  const discMap = useRecentDisc();   // 종목코드 → 최근 5거래일 공시(카드 공시 종류 꼬리표)
+  const valueupFile = useValueupFile();   // 종목코드 → 저PBR·고배당·밸류업 우수(거래소 KIND)
   // 야간선물(yasun.gg)은 프록시를 타므로 구버전 개인 워커면 값이 빈다 → 그때만 업데이트 안내.
   //   "값이 없다"만으로 워커를 탓하면 업스트림 차단(예: investing.com Cloudflare 챌린지)까지
   //   워커 탓으로 오진한다. 반드시 실제 화이트리스트 검사 결과("outdated")로만 띄운다.
@@ -260,102 +354,8 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
   const navItems = dashboardGroupNav(T0_SECTIONS);
   const idxScrollMargin = navStickyTop + 44;
 
-  return (
-    <div className="space-y-3">
-      {/* 차트 기간(3개월|24시간)은 그룹 칩 줄 끝에 — 스크롤해도 늘 보이는 자리(사용자 결정 2026-10-20) */}
-      <GroupNavBar items={navItems} idPrefix="usidx-"
-                   stickyTop={navStickyTop} scrollMarginTop={idxScrollMargin}
-                   trailing={<ChartRangeToggle />} />
-      {/* ─── Tier 0 — 한국시장 영향 관계 기준 그룹 (라벨 헤더 + 한 화면 표시) ─── */}
-      {/* 다른 탭과 같은 전체 폭 — 예전엔 lg 에서 75% 로 줄여 PC 에서만 좁아 보였다 */}
-      <div className="space-y-4">
-        {T0_SECTIONS.map((section) => (
-          <div key={section.label} id={`usidx-${section.id}`}
-               style={{ scrollMarginTop: idxScrollMargin }}
-               className="relative space-y-2 rounded-xl border border-gray-300 bg-white p-2.5 pt-4 mt-1.5">
-            {/* 섹터명 책갈피 — 카드 상단에 겹치게 */}
-            <span className="absolute -top-3 left-3 z-10 px-2 py-0.5 rounded-md border border-gray-300 bg-gray-50
-                             text-sm font-bold text-gray-700 whitespace-nowrap">
-              {section.label}
-              {section.link && isTabVisible(section.link.vis) && (
-                <button onClick={() => requestTab(section.link!.tab)}
-                        className="ml-1.5 text-[11px] font-bold text-indigo-600 hover:underline">
-                  자세히 →
-                </button>
-              )}
-              {/* 정렬 버튼은 페이지에 하나 — 첫 정렬 그룹 제목에만(누르면 페이지 전체가 바뀐다) */}
-{section.sortable && section.id === T0_SECTIONS.find(x => x.sortable)?.id && (
-                <span className="ml-2 inline-flex rounded border border-gray-300 overflow-hidden align-middle text-[11px] font-bold">
-                  {(["pct", "value"] as const).map(v => (
-                    <button key={v} onClick={() => { setLeaderSort(v); saveLeaderSort(v); }}
-                            className={`px-1.5 py-0 ${leaderSort === v ? "bg-indigo-600 text-white" : "bg-white text-gray-500 hover:bg-gray-100"}`}>
-                      {v === "pct" ? "등락률순" : "거래대금순"}
-                    </button>
-                  ))}
-                </span>
-              )}
-            </span>
-            {/* 한국 섹터 — 토스 TICS 분류. 미국 블록과 **같은 한글 분류**라 이름으로 맞출 수 있다. */}
-            {section.render === "etfTop" && (
-                  <EtfTopCards onOpenEtf={(code, name) => setEtfDialog({ ticker: code, name })} />
-                )}
-                {section.note && <div className="text-[11px] text-gray-500 leading-snug">{section.note}</div>}
-                {section.id === "krfx" && <RealRateNote usMap={usMap} />}
-                {section.render === "rotation" && (
-              <RotationTab embedded extrasOnly onOpenValuation={(t, n) => onOpenValuation?.(t, n ?? "")} />
-            )}
-                {section.render === "sectorFlow" && (
-              <TicsSectorBoard onOpenValuation={onOpenValuation}
-                                krClosed={page === "night" || page === "rot"} />
-            )}
-            {(arr => !section.pairRows ? arr : (
-              // 짝 줄 — 상자 둘을 좌우로 **붙여서**. 상자 폭은 카드 수에 비례(flex-grow), 남는 자리는 오른쪽 빈칸(한 줄 8장 기준)
-              <div className="space-y-0">
-                {(() => {
-                  // 줄마다 상자 묶음 — boxLines([2,3]) 가 있으면 그대로, 없으면 boxesPerLine(기본 2)씩
-                  const per = section.boxesPerLine ?? 2;
-                  const sizes = section.boxLines ?? Array.from({ length: Math.ceil(arr.length / per) }, () => per);
-                  let at = 0;
-                  return sizes.map(n => { const idx = Array.from({ length: n }, (_, j) => at + j).filter(i => i < arr.length); at += n; return idx; });
-                })().map((idx, k, lines) => {
-                  // 상자 폭 = 카드 n장 + 카드 사이 틈 + 상자 안쪽 여백(왼쪽 책갈피 36 + 오른쪽 8 + 테두리 2).
-                  //   카드 한 장 = 전체 폭 8칸 카드((100% - 7×8px)/8)와 같게 맞춘다 — 상자가 몇 개든 카드 크기가 다른 그룹과 같다.
-                  //   단, 상자 여백 때문에 한 줄에 다 안 들어가는 줄이 있으면 **그룹 전체** 카드 폭을 그 줄에 맞춰 줄인다
-                  //   (줄마다 따로 눌리면 상자가 하나뿐인 줄만 카드가 커 보인다). 줄 하나(C장·B상자) 필요 폭 = C·w + 8C + 46B − 8.
-                  const fits = lines.map(l => {
-                    const c = l.reduce((s, i) => s + section.rows[i].length, 0);
-                    return `(100% - ${8 * c + 46 * l.length - 8}px) / ${c}`;
-                  });
-                  const card = `min((100% - 56px) / 8, ${fits.join(", ")})`;
-                  const boxW = (n: number) => `calc(${n} * ${card} + ${(n - 1) * 8}px + 46px)`;
-                  return (
-                    <div key={k} className="flex gap-2">
-                      {idx.map(i => <div key={i} className="min-w-0" style={{ flex: `0 1 ${boxW(section.rows[i].length)}` }}>{arr[i]}</div>)}
-                    </div>
-                  );
-                })}
-              </div>
-            ))((section.render ? []
-              : section.id === "sector"
-              ? chunk(
-                  section.rows.flat().sort((a, b) =>
-                    (displayPctOf(b, usMap.get(b)) ?? -Infinity) - (displayPctOf(a, usMap.get(a)) ?? -Infinity)),
-                  6)
-              : sortedRows(section, leaderSort, sym => displayPctOf(sym, usMap.get(sym)))
-            ).map((group, gi) => (
-              // 6열 그리드 — 화면은 전체 폭이지만 카드 줄만 lg 75% 로 묶어 카드 크기는 예전 그대로(왼쪽 정렬)
-              <div key={gi} className={section.rowLabels ? `relative ${section.pairRows ? "" : "-mr-[9px]"} rounded-lg border border-gray-200 bg-gray-50/50 pl-9 pr-2 pb-2 pt-4 mt-2` : ""}>
-                {/* 줄 책갈피 — 이 줄이 어느 단계인지(반도체·전공정…). 위에 얹으면 카드 위 가격 띠와 겹쳐
-                    안 보여서, 상자 **왼쪽에 세로 띠**로 따로 뺐다(글자는 위→아래로 세워 쓴다). */}
-                {section.rowLabels?.[gi] && (
-                  <span className={`absolute left-0 inset-y-0 w-7 flex items-center justify-center border-0 border-r rounded-l-lg
-                                    text-xs font-bold tracking-widest [writing-mode:vertical-rl] [text-orientation:upright]
-                                    ${dashboardRowLabelTone(section, section.rowLabels[gi])}`}>
-                    {section.rowLabels[gi]}
-                  </span>
-                )}
-              {(() => {
-                const cards = group.map(symbol => {
+  // 지수 탭 종목 카드 한 장 — 그룹 줄과 업종(SobuGrid) 칸이 같이 쓴다(사용자 2026-11-03 "지수에 있는 종목 카드와 동일하게, 똑같은 기능으로")
+  const renderIdxCard = (section: DashboardSection, symbol: string): React.ReactNode => {
               // 코리아 밸류업 — 네이버 KVALUE 전용 카드(Yahoo 미제공). 다른 지수 카드와 동일 크기 셀.
               if (symbol === "KVALUE") return <ValueupMiniCard key="KVALUE" />;
               if (symbol === "SKHY-PERP") return <HlPerpCard key="SKHY-PERP" coin="SKHY" name="SK하이닉스 24h" />;
@@ -375,16 +375,13 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
                 : isSymbolSleeping(p.symbol);
               // 메인 가격/변동률 — 한국 입장(미국장 마감 후 아침에 확인):
               // · REGULAR: regularPct (어제 종가 대비)
-              // · 시간외(PRE/POST/POSTPOST/PREPRE/CLOSED): postPrice + 어제 종가(prevClose) 대비
-              //   = 정규장 + 시간외 누적 변동률 (예: -7.75%)
+              // · 시간외(PRE/POST/POSTPOST/PREPRE/CLOSED): postPrice + 기준 종가 대비
+              //   미국 종목 = 최근 정규장 종가(토스식, 아래 usOffBase) · 그 외 = 어제 종가(prevClose)
               // 시간외 진입~마감 전체 구간에서 postPrice 일관 사용 → POST↔POSTPOST 전환 시 점프 없음
               const offHoursStates = ["PRE", "POST", "POSTPOST", "PREPRE", "CLOSED"];
               const isOffHours = q?.marketState != null && offHoursStates.includes(q.marketState);
               // dim 처리(흐리게) — 정규장 마감 후 모든 상태 (POST 부터). PRE 는 새 거래일 시작 직전이라 제외.
               // 24h 시장(환율 KRW=X, 달러 인덱스, 선물·암호화폐 등)은 Yahoo가 CLOSED 를 자주 반환하지만 흐림 제외.
-              const is24h = marketOfSymbol(p.symbol) === "OTHER";
-              const isClosed = !is24h && q?.marketState != null
-                && ["POST", "POSTPOST", "PREPRE", "CLOSED"].includes(q.marketState);
               // 거래중('열림')이면 흐림 제외 — 정규/시간외 marketState 또는 미국 개별종목 24h 거래창(토스).
               //   (정규장 마감은 별도 '마감 책갈피'로 표시되므로 흐림과 무관)
               const inSession = !!(q?.marketState
@@ -392,25 +389,25 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
                 || (marketOfSymbol(p.symbol) === "US" && isUsExtendedTradingOpen());
               // 한국 야간선물(KR_NIGHT) — 거래중(REGULAR)이면 inSession 으로 흐림 제외,
               //   개장 대기·마감 구간(marketState CLOSED + sleeping)이면 다른 종목과 동일하게 흐림.
-              const isNightFut = marketOfSymbol(p.symbol) === "KR_NIGHT";
               // 갱신 정체(흐림) — 24h 거래(시각창) 중에도 '진짜 멈춘' 종목(VIX·데이터 끊김)을 freshTime 90분+ 정체로 잡음.
               //   미국 종목/ETF 는 토스 실측 체결시각이 24h 갱신돼 통과(밝게), 주말·VIX 마감은 정체/시각창으로 흐림.
-              const stale = isQuoteStale(q?.freshTime);
               // 국채 yield(2Y/10Y 등)는 출처(토스·Yahoo)가 섞여도 표현 통일 — 흐림 제외.
-              const isRate = isUsRateSymbol(p.symbol);
               // 24h 시장(외환·선물·달러인덱스)의 주말 휴장 — isMarketOpen("OTHER") 이 늘 true 라
               //   sleeping/isClosed 로는 안 잡힌다. 암호화폐는 진짜 24/7 이라 제외된다.
-              const weekendClosed = is24h && isFxFuturesWeekendClosed(p.symbol);
               // 미 국채 yield 는 **미국 정규장에만 움직이는 게 아니다** — 아시아·런던 세션에도
               //   거래된다(한국 낮에도 값이 바뀐다, 실측). sleeping(미국 정규장)으로 흐리면
               //   멀쩡히 살아 있는 값을 죽은 것처럼 보여준다.
               //   출처(토스·Yahoo)가 섞여 freshTime·marketState 는 못 믿으니 외환·선물과 같은
               //   **주말 휴장**만 본다 — 셋이 같은 근거라 2Y 만 흐리는 일도 없다.
-              const dimNow = dimEnabled && (isRate
-                ? isFxFuturesWeekendClosed(p.symbol)
-                : (stale || weekendClosed || (!inSession && (sleeping || isClosed))));
+              const dimNow = dashboardCardDim(p, q, dimEnabled);   // lib 한 벌 — 줄 정렬(흐린 카드 뒤로)도 같은 판정
               const effPrice = isOffHours && q?.postPrice ? q.postPrice : q?.price;
-              const effBase = q?.prevClose;
+              // 미국 종목이 정규장 밖(애프터·데이마켓·프리)이면 기준 = **최근 정규장 종가**(토스·내 주식 카드와 같은 규칙).
+              //   야후 prevClose 는 다음 날 프리장(04:00 ET)이 열려야 넘어가, 그 사이(정규장 마감~다음 프리) 큰 % 가
+              //   이틀치 누적으로 떴다(NVDA 데이마켓 토스 −2.00% ↔ 우리 +0.49%, 사용자 지적 2026-10-22).
+              // 미 국채(^US2Y·^TNX·^TYX·^TIPS10)는 빼다 — 토스 지표라 regularPrice = 지금 값이라 기준이 되면 % 가 0 으로 사라졌다(사용자 2026-11-02 "채권 % 가 없어?")
+              const usOffBase = marketOfSymbol(p.symbol) === "US" && !isUsRateSymbol(p.symbol) && !isMarketOpen("US_INDEX") && q?.regularPrice && q.regularPrice > 0
+                ? q.regularPrice : undefined;
+              const effBase = usOffBase ?? q?.prevClose;
               const pct = (q?.marketState === "REGULAR" && q.regularPct != null)
                 ? q.regularPct
                 : (effPrice != null && effBase != null && effBase > 0
@@ -419,23 +416,24 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
               // 개장 전·마감 등 현재 세션 변동이 0(토스 base==close)이면 마지막 정규장 %로 폴백 표시.
               //   한국 지수·ETF 가 개장 전 % 가 비는 문제 — 미국 종목은 마감 후에도 마지막 % 가 노출되므로 동일하게 맞춤.
               const liveFlat = pct == null || Math.abs(pct) < 0.005;
-              const showPct = (sleeping && liveFlat && q?.regularPct != null && Math.abs(q.regularPct) >= 0.005)
+              const showPct = (!usOffBase && sleeping && liveFlat && q?.regularPct != null && Math.abs(q.regularPct) >= 0.005)   // 미국 장 밖은 0% 도 그대로(토스처럼)
                 ? q.regularPct : pct;
-              // 메인 변동률(본문 큰 %) = 어제 종가 대비 누적(정규장 + 시간외) = showPct.
+              // 메인 변동률(본문 큰 %) = showPct. 한국은 어제 종가 대비 누적(정규장 + NXT), 미국 종목은 장 밖이면 최근 정규장 종가 대비.
               //   정규장 마감가·마감 변동%는 상단 노란 책갈피가 담당.
               //   (예전엔 본문에 '애프터 변동분'만 떠서, 시간외 보합이면 0.00% 로 죽던 문제 → 누적으로 환원)
               const mainPct = showPct;
               // direction === "inverse"(공포지수·환율·달러인덱스·금리 등) → 상승=한국 위험 → 색 반전
               // (빨강=좋음 / 파랑=나쁨 기준). SemiCheckTab 과 동일 규칙.
-              const isInverse = p.direction === "inverse";
+              const isInverse = false;   // 색 반전 없음 — 모든 카드 오르면 빨강·내리면 파랑(사용자 결정 2026-10-21). direction 은 설명용으로만 남긴다
               const effUp = isInverse ? (mainPct != null && mainPct < 0) : (mainPct != null && mainPct > 0);
               const effDn = isInverse ? (mainPct != null && mainPct > 0) : (mainPct != null && mainPct < 0);
-              const dayArr = krFutSpark(p.symbol)?.closes ?? nightClosesMap.get(p.symbol) ?? usSpark?.get(p.symbol)?.closes ?? usMap?.get(p.symbol)?.sparkline;   // 야후 어제+오늘이 있으면 그걸 먼저
+              const dayArr = krFutSpark(p.symbol)?.closes ?? nightClosesMap.get(p.symbol) ?? sinaSpark(p.symbol)?.closes ?? usSpark?.get(p.symbol)?.closes ?? tossUsSpark(p.symbol)?.closes ?? usMap?.get(p.symbol)?.sparkline;   // 야후 어제+오늘이 있으면 그걸 먼저, 없으면 토스 5분봉(세로선 포함)
               const chartArr = pickCardChart(chartRange, t0ChartMap.get(p.symbol) ?? [], dayArr);
               // 24시간 차트가 야후 spark 에서 왔으면 '오늘 정규장 시작' 위치를 표시
-              const daySpark = chartRange === "day" ? (krFutSpark(p.symbol) ?? (!nightClosesMap.get(p.symbol) ? usSpark?.get(p.symbol) : undefined)) : undefined;
+              const daySpark = chartRange === "day" ? (krFutSpark(p.symbol) ?? (!nightClosesMap.get(p.symbol) ? (sinaSpark(p.symbol) ?? usSpark?.get(p.symbol) ?? tossUsSpark(p.symbol)) : undefined)) : undefined;
               const markIdx = daySpark && chartArr === daySpark.closes ? daySpark.openIdx : undefined;
               const closeIdx = daySpark && chartArr === daySpark.closes ? daySpark.closeIdx : undefined;   // 오늘 정규장 종가 세로선
+              const prevMarks = daySpark && chartArr === daySpark.closes ? [daySpark.prevOpenIdx, daySpark.prevCloseIdx] : undefined;   // 어제 정규장 시작·종가 세로선
               const breakIdx = daySpark && chartArr === daySpark.closes ? daySpark.breakIdx : undefined;   // 어제·오늘 사이 끊기
               // 24시간 차트의 기준선·색 기준 = 어제 종가(카드 큰 숫자와 같은 기준). 야후 spark 는 달러라 그 응답의 전일 종가를,
               //   토스·야선 당일 봉은 카드 값과 같은 단위라 카드의 전일 종가(prevClose)를 쓴다. 3개월 차트엔 안 쓴다.
@@ -443,6 +441,13 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
               // 24시간 차트 끝에 **지금 가격**을 붙인다 — 분봉 이력은 5분마다지만 현재가는 5초마다라, 큰 숫자가 바뀔 때
               //   그래프 끝도 같이 움직이게(추가 호출 0). 단위가 같은 경우만: 미국 종목(달러)·토스 지수·야간선물.
               const liveChart = isDayChart && effPrice != null && effPrice > 0 ? [...chartArr, effPrice] : chartArr;
+              // 어제 50%·오늘 50% 시간 축(야후·한경 자료에 xs 가 있을 때) — 끝에 붙인 지금 가격은 마지막 점 바로 뒤
+              const dayXs = daySpark?.xs && chartArr === daySpark.closes
+                ? (liveChart.length > chartArr.length ? [...daySpark.xs, daySpark.rolling ? 1 : Math.min(1, daySpark.xs[daySpark.xs.length - 1] + 0.002)] : daySpark.xs) : undefined;
+              // 메모리 현물가(=ML) — 하루·주 단위 값이라 24시간 그래프가 없다. 직전 값이 찍힌 자리에 종가 세로선만(사용자 2026-11-02).
+              //   기준선 색칠은 하지 않는다 — 몇 달 치 일봉을 오늘 기준 위·아래로 칠하면 지난 구간 색이 가짜다(사용자 "붉은 부분은 가짜 아냐?")
+              //   CNN 공포·탐욕(CNNFG)도 하루 한 번 점수라 같은 방식(사용자 2026-11-02)
+              const isMemSpot = /=ML$/.test(p.symbol) || p.symbol === "CNNFG" || p.symbol === "HYSPREAD" || p.symbol === "VKOSPI";   // V-KOSPI 도 분봉 출처가 없다(CNBC 일봉뿐, 2026-11-02)
               const dayBase = !isDayChart ? undefined
                 : daySpark && chartArr === daySpark.closes && marketOfSymbol(p.symbol) === "US" ? daySpark.prevClose   // 미국만 야후 값(달러 단위) — 한국·아시아 지수는 야후 전일 종가가 틀릴 때가 있어(^KQ11 이 그저께 값, 2026-10-21) 카드 값으로
                 : (q?.prevClose && q.prevClose > 0 ? q.prevClose : undefined);
@@ -458,7 +463,7 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
               const bg = dimNow
                 ? "bg-gray-100 border-transparent"
                 : effUp ? "bg-rose-50 border-rose-200"
-                : effDn ? "bg-blue-50/70 border-blue-200"
+                : effDn ? "bg-blue-50 border-blue-200"   // 불투명 — 반투명(/70)이면 야간 배경이 비쳐 칙칙했다(사용자 지적 2026-10-23)
                 : "bg-white border-gray-200";
               const sign =
                 effUp ? "text-rose-600"
@@ -479,10 +484,10 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
               // 야후로 확인된 값만 — 확인 못 했으면(야후 실패) 토스 meta 는 NXT 현재가라 정규장 종가로 보여주면 안 된다
               const krRegHere = p.krStock ? idxKrReg?.get(p.symbol.slice(0, 6)) : undefined;
               const krAfterTag = !!krRegHere?.fromYahoo && isKrAfterRegularClose();
-              const showCloseTag = (sleeping || usOffRegular || krAfterTag) && effPrice != null && p.symbol !== "CNNFG";
+              const showCloseTag = (sleeping || usOffRegular || krAfterTag) && effPrice != null && p.symbol !== "CNNFG" && p.symbol !== "HYSPREAD";   // 하이일드는 일별 지표라 마감 책갈피 없음
               const krRegOk = krRegHere?.fromYahoo ? krRegHere : undefined;
               const closeVal = krRegOk?.regularPrice ?? q?.regularPrice ?? effPrice;
-              const regPct = krRegOk?.regularPct ?? q?.regularPct ?? pct;
+              const regPct = krRegOk?.regularPct ?? q?.regularPct ?? (usOffBase ? null : pct);   // 미국 장 밖이면 pct 는 정규장 종가 대비라 정규장 등락이 아니다 — 모르면 비운다
               const regSign = regPct == null ? "text-gray-700"
                 : (isInverse ? regPct < 0 : regPct > 0) ? "text-rose-600"
                 : (isInverse ? regPct > 0 : regPct < 0) ? "text-blue-600" : "text-gray-700";
@@ -493,7 +498,7 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
               // 마감 책갈피는 노란 배경 + 흐림 제외 → dim 은 콘텐츠 자식에만 적용
               const dimCls = dimNow ? "opacity-60" : "";
               return (
-                <div key={p.symbol} className={`relative h-full`}>
+                <div key={p.symbol} className={`pg-card relative h-full`}>   {/* pg-card — 야간 배경에서 카드·책갈피·버튼 함께 톤 낮춤 */}
                   {/* 왼쪽 위 책갈피 줄 — [ETF] [투자주의…]. 해당되는 것만, 한 줄로 붙여 겹치지 않게.
                       기업정보는 아이콘 대신 **종목명 클릭**으로 연다(아이콘이 마감 책갈피와 겹쳐 화면을 가렸다 — 사용자 결정 2026-10-21). */}
                   {(() => {
@@ -507,7 +512,7 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
                         {isKrEtf && (
                           <button onClick={() => setEtfDialog({ ticker: krTk!, name: p.name })}
                                 title="ETF 구성 종목 보기"
-                                className={`${tag} text-violet-700 bg-violet-100/30 hover:bg-violet-100/60 border-violet-300/40`}>
+                                className={`${tag} text-violet-700 bg-violet-50 hover:bg-violet-100 border-violet-300/40`}>
                           ETF
                         </button>
                         )}
@@ -518,7 +523,7 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
                   {/* 정규장 마감가 책갈피 — 카드 위로 올림(-top-2). 노란 배경 + 흐림 제외(z-20) */}
                   {showCloseTag && closeVal != null && (
                     <div className="absolute -top-2 right-1 z-20 px-1.5 py-0
-                                    border rounded bg-yellow-200/25 border-yellow-400/40
+                                    border rounded bg-yellow-50 border-yellow-400/60
                                     text-[10px] font-medium leading-tight whitespace-nowrap">
                       {q?.currency === "KRW" && q?.regularPriceUsd != null && (
                         <span className={`tabular-nums mr-1 text-gray-900 ${dimNow ? "opacity-50" : ""}`}>
@@ -570,12 +575,18 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
 
                              markIndex={markIdx}
 
-                             closeIndex={closeIdx}
+                             closeIndex={p.symbol === "CNNFG" ? undefined : isMemSpot && chartArr.length > 2 ? chartArr.length - 2 : closeIdx}   /* 공포·탐욕은 장 마감이 없는 점수라 세로선 뺌(사용자 2026-11-02) */
+
+                             extraMarks={prevMarks}
+                             markXs={daySpark && chartArr === daySpark.closes ? daySpark.markXs : undefined}
+
+                             xs={dayXs}
 
                              breakIndex={breakIdx}
                              prevBaseline={breakIdx != null ? daySpark?.prevBase : undefined}
+                             nextBaseline={daySpark && chartArr === daySpark.closes ? daySpark.nextBase : undefined}
 
-                             baseline={dayBase}
+                             baseline={isMemSpot ? undefined : dayBase}
 
                              color={sparkColor}
 
@@ -601,6 +612,16 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
                       {p.name}
                     </a>
                     {p.symbol === "CNNFG" && <CnnFearGreedTag />}
+                    {/* 지금 구간 꼬리표 — 오른쪽 위에 잘 보이게(사용자 2026-11-07 "평온을 카드 오른쪽 위에") */}
+                    {p.symbol !== "CNNFG" && (() => { const bd = indicatorBand(p.symbol, effPrice); return bd && (
+                      <span className={`ml-auto shrink-0 px-1 rounded border text-[10px] font-bold leading-tight ${bd.level === 0 ? "border-emerald-300 bg-emerald-50 text-emerald-700" : bd.level === 1 ? "border-gray-300 bg-gray-50 text-gray-600" : bd.level === 2 ? "border-amber-300 bg-amber-50 text-amber-700" : "border-rose-400 bg-rose-600 text-white"}`}>{bd.name}</span>
+                    ); })()}
+                    {/* 지표 설명 ? — 마우스를 올리면 레이어(사용자 2026-11-07) */}
+                    {indicatorHelp(p.symbol) && (
+                      <HoverTip tip={[indicatorHelp(p.symbol), indicatorNow(p.symbol, effPrice, (() => { const c = p.symbol === "HYSPREAD" ? q?.diff : (mainPct != null && Math.abs(mainPct) >= 0.005 ? mainPct : q?.regularPct ?? mainPct); return c != null && Number.isFinite(c) ? `${c >= 0 ? "+" : ""}${c.toFixed(2)}${p.symbol === "HYSPREAD" ? "%p" : "%"}` : undefined; })())].filter(Boolean).join("\n")} width={300}>
+                        <span className="shrink-0 w-4 h-4 inline-flex items-center justify-center rounded-full border border-gray-300 bg-white text-[10px] font-bold text-gray-500 cursor-help leading-none">?</span>
+                      </HoverTip>
+                    )}
                     {/* 매매동향 모달 버튼 — KOSPI/KOSDAQ 만 */}
                     {hasFlow && indexKey && (
                       <button onClick={() => setMarketFlowFor(indexKey)}
@@ -641,6 +662,9 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
                       {p.symbol === "CNNFG" && effPrice != null && effBase != null
                         // 0~100 점수라 % 가 아니라 점수 차(전일 대비). 31→18 이 "−43%" 로 찍히면 과장돼 보인다
                         ? (() => { const d = Math.round(effPrice - effBase); return `${d > 0 ? "+" : d < 0 ? "−" : "±"}${Math.abs(d)}점`; })()
+                        // 하이일드 스프레드 — 이미 % 인 값이라 변화율 대신 %p 변화(3.32→3.48 = +0.16%p)(사용자 2026-11-07)
+                        : p.symbol === "HYSPREAD" && effPrice != null && effBase != null
+                        ? (() => { const d = effPrice - effBase; return `${d > 0 ? "+" : d < 0 ? "−" : "±"}${Math.abs(d).toFixed(2)}%p`; })()
                         : showPct != null && Math.abs(showPct) >= 0.005
                         ? `${showPct >= 0 ? "+" : ""}${showPct.toFixed(2)}%`
                         : ""}
@@ -654,42 +678,235 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
                     <div className="absolute top-1/2 left-full ml-1 lg:ml-[22px] -translate-x-1/2 -translate-y-1/2 z-30
                                     text-4xl font-black text-gray-400 opacity-20 leading-none pointer-events-none">➜</div>
                   )}
-                  {/* 역할 책갈피 — 이 그룹에서 이 종목이 무엇인지(예: 전공정·원자력). 오른쪽 아래가 비어
-                      있어 그 자리에 둔다(🗺️ 히트맵은 코덱스200·코스닥150 전용이라 겹치지 않는다). */}
-                  {section.tags?.[p.symbol] && (
-                    <div className={`absolute -bottom-1 right-1 z-20 px-1.5 py-0 rounded border
-                                     text-[9px] leading-tight whitespace-nowrap font-bold
-                                     ${dashboardTagTone(section.tags[p.symbol])}`}>
-                      {section.tags[p.symbol]}
-                    </div>
-                  )}
-                  {/* 구성종목 히트맵 — 코덱스200·코스닥150 만. '정규장 마감' 책갈피와 같은 모양으로
-                      카드 **바깥 오른쪽 아래**에 붙인다(카드 안은 overflow-hidden 이라 잘린다). */}
-                  {CARD_HEATMAP_LINK[p.symbol] && (
-                    <button
-                      onClick={() => requestHeatmap(CARD_HEATMAP_LINK[p.symbol], { sizeMode: "volume" })}
-                      title={`${p.name} 구성종목 히트맵(거래량) 보기`}
-                      className="absolute -bottom-1 right-1 z-20 px-1.5 py-0 rounded
-                                 text-[9px] leading-tight whitespace-nowrap font-bold
-                                 text-emerald-700 bg-emerald-50 border border-emerald-300/70
-                                 hover:bg-emerald-100 transition">
-                      🗺️ 히트맵
-                    </button>
-                  )}
-                  {sleeping && !isRate && fmtAgo(q?.regularMarketTime) && (
-                    <div className="absolute -bottom-1 left-1 z-20 px-1.5 py-0 rounded
-                                    text-[9px] leading-tight whitespace-nowrap
-                                    text-gray-500 bg-gray-100 border border-gray-300/60">
-                      {fmtAgo(q?.regularMarketTime, isNightFut ? (isKrNightSession() ? "야간 마감" : "주간 마감") : "정규장 마감")}
-                    </div>
-                  )}
+                  {/* 오른쪽 아래 책갈피 줄 — 역할 태그 · 🗺️ 히트맵 · ⚡체결(국내 종목) · 🔍AI(국내·미국 종목)를 한 줄로(겹치지 않게).
+                      카드 **바깥** 아래에 걸친다(카드 안은 overflow-hidden 이라 잘린다). ⚡체결은 AI 옆(사용자 요청 2026-10-22) */}
+                  {(() => {
+                    const krCode = p.symbol.replace(/\.(KS|KQ)$/, "");   // 지수 탭 국내 종목은 005930.KS 꼴
+                    const isKrStock = krCode !== p.symbol && canTickPopup(krCode);
+                    const isUsStock = /^[A-Z][A-Z.]{0,5}$/.test(p.symbol) && marketOfSymbol(p.symbol) === "US" && p.symbol !== "CNNFG";
+                    const tag = section.tags?.[p.symbol];
+                    const pill = "px-1.5 py-0 rounded text-[9px] leading-tight whitespace-nowrap font-bold transition";
+                    // 밸류업 꼬리표(저PBR·고배당·밸류업★)는 아래 줄 맨 앞(사용자 2026-11-02 "아래로 내리자")
+                    const vu = isKrStock ? tagsFor(valueupFile, krCode) : undefined;
+                    const hasDisc = isKrStock && !!discMap.get(krCode)?.length;   // 공시 종류 꼬리표(사용자 2026-11-03)
+                    if (!tag && !CARD_HEATMAP_LINK[p.symbol] && !isKrStock && !isUsStock && !vu && !hasDisc && !indicatorHelp(p.symbol)) return null;   // 지표 카드(VIX·MOVE 등)는 AI 버튼 줄이 있어야 한다
+                    return (
+                      <div data-no-peek className="absolute -bottom-1 right-1 z-20 flex items-center gap-0.5">
+                        {/* 거래대금 급증(한국투자 1분 레이더, 사용자 2026-11-03) — 맨 앞에 */}
+                        {isKrStock && radar.get(krCode) && (() => { const l = radarLabel(radar.get(krCode)!); return (
+                          <HoverTip tip={l.title}><span className="px-1 py-0 rounded text-[9px] leading-tight whitespace-nowrap font-bold border border-orange-400 bg-orange-500 text-white animate-pulse">{l.text}</span></HoverTip>); })()}
+                        {isKrStock && viMap.get(krCode) && (() => { const v = viMap.get(krCode)!, l = viLabel(v); return (
+                          <HoverTip tip={l.title}><span className={`px-1 py-0 rounded text-[9px] leading-tight whitespace-nowrap font-bold border ${v.dir === "up" ? "border-rose-400" : "border-blue-400"} ${viActive(v) ? `${v.dir === "up" ? "bg-rose-600" : "bg-blue-600"} text-white animate-pulse` : v.dir === "up" ? "bg-rose-50 text-rose-700" : "bg-blue-50 text-blue-700"}`}>{l.text}</span></HoverTip>); })()}
+                        {hasDisc && <DiscTags code={krCode} name={p.name} max={2} />}
+                        {vu && <ValueupTags code={krCode} flat />}
+                        {isUsStock && <SeohakTag symbol={p.symbol} flat />}
+                        {tag && <span className={`${pill} border ${dashboardTagTone(tag)}`}>{tag}</span>}
+                        {CARD_HEATMAP_LINK[p.symbol] && (
+                          <button onClick={() => requestHeatmap(CARD_HEATMAP_LINK[p.symbol], { sizeMode: "volume" })}
+                                  title={`${p.name} 구성종목 히트맵(거래량) 보기`}
+                                  className={`${pill} text-emerald-700 bg-emerald-50 border border-emerald-300/70 hover:bg-emerald-100`}>
+                            🗺️ 히트맵
+                          </button>
+                        )}
+                        {isKrStock && (
+                          <button onClick={() => openStockInfo(krCode, p.name)}
+                                  title="종목정보 — 실시간 체결·호가·거래원 / 기업가치 (팝업)"
+                                  className={`${pill} text-amber-700 bg-amber-50 border border-amber-300/70 hover:bg-amber-100`}>
+                            📊
+                          </button>
+                        )}
+                        {/* 지표 카드(EWY·VIX·MOVE·하이일드 등) AI — 지금 값이 무슨 뜻인지(사용자 2026-11-07) */}
+                        {indicatorHelp(p.symbol) && !isKrStock && !isUsStock && (
+                          <button onClick={() => openGoogleAi(`${aiNowStamp()} 기준. ${p.name}(${p.symbol}) 지금 ${effPrice != null ? fmtPrice(p.symbol, effPrice) : "?"}${mainPct != null ? ` (전일 대비 ${mainPct >= 0 ? "+" : ""}${mainPct.toFixed(2)}${p.symbol === "HYSPREAD" ? "%p" : "%"})` : ""}. ① 이 수준이 역사적으로 어느 구간인지(평온·경계·위기) ② 최근 며칠 흐름이 말하는 것 ③ 한국 증시(코스피·반도체)에 주는 의미를 각각 한 줄로.`)}
+                                  title="구글 AI에 이 지표가 지금 무슨 뜻인지 묻기 (팝업)"
+                                  className={`${pill} text-blue-700 bg-blue-50 border border-blue-300/70 hover:bg-blue-100`}>
+                            AI
+                          </button>
+                        )}
+                        {(isKrStock || isUsStock) && (
+                          <button onClick={() => openGoogleAi(`${STOCK_ANALYSIS_PROMPT}\n\n[기준시각] ${aiNowStamp()}\n[분석 대상] ${p.name}(${isKrStock ? krCode : p.symbol}) — ${p.desc}`
+                                    + (effPrice != null ? (isKrStock ? `, 현재가 ${Math.round(effPrice).toLocaleString()}원` : `, 현재가 $${effPrice.toFixed(2)}`) : "")
+                                    + (mainPct != null ? ` (${mainPct >= 0 ? "+" : ""}${mainPct.toFixed(2)}%)` : ""))}
+                                  title="구글 AI에 현재상태 분석 요청 (팝업)"
+                                  className={`${pill} text-blue-700 bg-blue-50 border border-blue-300/70 hover:bg-blue-100`}>
+                            AI
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })()}
+                  {/* 마감 경과 꼬리표("17시간전 정규장 마감")는 뺐다 — 아래 버튼을 덮고 카드마다 필요 없다(사용자 2026-11-07). 흐림(zZ)이 이미 마감을 알린다 */}
                 </div>
               );
-                });
+  };
+
+  return (
+    <div className="space-y-3">
+      {/* 차트 기간(3개월|24시간)은 그룹 칩 줄 끝에 — 스크롤해도 늘 보이는 자리(사용자 결정 2026-10-20) */}
+      {page === "sobu"
+        ? <div className="lg:hidden sticky z-30 bg-gray-50 pg-bg py-1.5" style={{ top: navStickyTop }}>
+            {/* 좁은 화면은 가로 탭, 넓은 화면(lg)은 아래 왼쪽 세로 탭(사용자 2026-11-03 "탭을 왼쪽에") — 여기엔 차트 기간만 */}
+            <div className="lg:hidden">
+              <SectorTabBar sections={SECTOR_TABS} active={sectorTab} onChange={setSectorTab} trailing={<span className="inline-flex gap-1"><ChartRangeToggle /><AvgMarketToggle /></span>}
+                            avgOf={s => sectorAvg(s, sym => displayPctOf(sym, usMap.get(sym)), dimOf, regExtOf)} />
+            </div>
+          </div>
+        : sectionsOverride ? null : <GroupNavBar items={navItems} idPrefix="usidx-"
+                   stickyTop={navStickyTop} scrollMarginTop={idxScrollMargin}
+                   trailing={<ChartRangeToggle />} />}
+      {/* ─── Tier 0 — 한국시장 영향 관계 기준 그룹 (라벨 헤더 + 한 화면 표시) ─── */}
+      {/* 다른 탭과 같은 전체 폭 — 예전엔 lg 에서 75% 로 줄여 PC 에서만 좁아 보였다 */}
+      <div className={page === "sobu" ? "lg:flex lg:items-start lg:gap-2" : ""}>
+      {page === "sobu" && (
+        <aside className="hidden lg:flex lg:flex-col lg:gap-2 sticky shrink-0 w-[116px]" style={{ top: navStickyTop + 8 }}>   {/* 위 빈 줄 없이 — 차트 기간 단추도 왼쪽 줄 맨 위(사용자 2026-11-03) */}
+          <ChartRangeToggle small />
+          <AvgMarketToggle className="self-start" />
+          <SectorTabBar vertical sections={SECTOR_TABS} active={sectorTab} onChange={setSectorTab}
+                        avgOf={s => sectorAvg(s, sym => displayPctOf(sym, usMap.get(sym)), dimOf, regExtOf)} />
+        </aside>
+      )}
+      <div className={`space-y-4 ${page === "sobu" ? "lg:flex-1 lg:min-w-0" : ""}`}>
+        {/* 동시호가 예상 순위 — 앱+한국투자, 동시호가 동안만(사용자 2026-11-02) */}
+        {!sectionsOverride && <KisExpRankBox />}
+        {movedToDrawer && (
+          <div className="rounded-lg border border-indigo-200 bg-indigo-50/70 px-3 py-2 text-[12.5px] text-indigo-900 flex items-center gap-2">
+            {/* '「📈 지수」' 글자를 누르면 바로 열린다(따로 '지금 열기' 단추 없이, 사용자 2026-11-09) */}
+            <span>📈 한국·미국 지수, 환율·금리·투심, 선물, 원자재는 화면 오른쪽 가장자리의{" "}
+              <button onClick={() => window.dispatchEvent(new Event("open-index-drawer"))} title="지금 열기"
+                      className="font-bold text-indigo-700 underline decoration-dotted underline-offset-2 hover:text-indigo-900">「📈 지수」</button>
+              {" "}버튼을 누르면 어느 탭에서든 열어 볼 수 있습니다.</span>
+          </div>
+        )}
+        {T0_SECTIONS.map((section) => page === "sobu" && section.id === "rotflow" ? (
+          // 한눈에 — AI 순환매 카드 줄 대신 업종 요약판(사용자 2026-11-07 "한눈에는 요약만, 카드는 섹터별로")
+          <div key="sector-summary" id="usidx-sector-summary" style={{ scrollMarginTop: idxScrollMargin }}
+               className="relative rounded-xl border border-gray-300 bg-white pg-box p-2.5 pt-4 mt-1.5">
+            <span className="pg-title absolute -top-3 left-3 z-10 px-2 py-0.5 rounded-md border border-gray-300 bg-gray-50 text-sm font-bold text-gray-700 whitespace-nowrap">📋 업종 한눈에 — 해외 ➜ 국내</span>
+            <SectorSummaryBoard sections={SECTOR_TABS.filter(x => x.id !== "overview")} pctOf={pctOfSym} regExtOf={regExtOf}
+                                nameOf={sym => tier0.find(x => x.symbol === sym)?.name ?? sym} onOpen={id => { setSectorTab(id); window.scrollTo({ top: 0 }); }}  renderDetail={(sec: DashboardSection) => <SobuGrid headersOnly rows={sec.rows} labels={sec.rowLabels ?? []} leadByRow={sec.leadByRow ?? []} quote={sobuQuote} dimOf={dimOf} />} />
+          </div>
+        ) : (
+          <div key={section.label} id={`usidx-${section.id}`}
+               style={{ scrollMarginTop: idxScrollMargin }}
+               className={`relative space-y-2 rounded-xl border border-gray-300 bg-white ${section.render === "rotation" ? "" : section.render ? "pg-box pg-render" : "pg-box"} p-2.5 pt-4 mt-1.5`}>
+            {/* 섹터명 책갈피 — 카드 상단에 겹치게 */}
+            <span hidden={section.render === "sobuGrid"} className="pg-title absolute -top-3 left-3 z-10 px-2 py-0.5 rounded-md border border-gray-300 bg-gray-50
+                             text-sm font-bold text-gray-700 whitespace-nowrap">
+              {section.label}
+              {section.link && isTabVisible(section.link.vis) && (
+                <button onClick={() => requestTab(section.link!.tab)}
+                        className="ml-1.5 text-[11px] font-bold text-indigo-600 hover:underline">
+                  자세히 →
+                </button>
+              )}
+              {/* 정렬 버튼은 페이지에 하나 — 첫 정렬 그룹 제목에만(누르면 페이지 전체가 바뀐다) */}
+{section.sortable && section.id === T0_SECTIONS.find(x => x.sortable)?.id && (
+                <span className="ml-2 inline-flex rounded border border-gray-300 overflow-hidden align-middle text-[11px] font-bold">
+                  {(["pct", "value"] as const).map(v => (
+                    <button key={v} onClick={() => { setLeaderSort(v); saveLeaderSort(v); }}
+                            className={`px-1.5 py-0 ${leaderSort === v ? "bg-indigo-600 text-white" : "bg-white text-gray-500 hover:bg-gray-100"}`}>
+                      {v === "pct" ? "등락률순" : "거래대금순"}
+                    </button>
+                  ))}
+                </span>
+              )}
+            </span>
+            {/* 폴백 고정 카드(한국 섹터·반도체 TOP2+·소부장)는 오늘 등락률(%) 내림차순 정렬 (6개씩 줄바꿈) */}
+            {/* 한국 섹터 — 토스 TICS 분류. 미국 블록과 **같은 한글 분류**라 이름으로 맞출 수 있다. */}
+            {section.render === "etfTop" && (
+                  <EtfTopCards onOpenEtf={(code, name) => setEtfDialog({ ticker: code, name })} />
+                )}
+                {section.note && <div className="text-[11px] text-gray-500 leading-snug">{section.note}</div>}
+                {section.id === "krfx" && <RealRateNote usMap={usMap} />}
+                {section.id === "kr" && <BreadthNote usMap={usMap} />}
+                {section.id === "macro" && <UsBreadthNote usMap={usMap} />}
+                {section.render === "rotation" && (
+              <RotationTab embedded extrasOnly onOpenValuation={(t, n) => onOpenValuation?.(t, n ?? "")} />
+            )}
+                {section.render === "sobuGrid" && (
+                  <SobuGrid rows={section.rows} labels={section.rowLabels ?? []} leadByRow={section.leadByRow ?? []} etfs={section.etfs}
+                            quote={sobuQuote}   /* 장 전·마감 뒤엔 마지막 정규장 % — 다른 지수 카드와 같은 규칙(자정 지나 0.00% 였다) */ dimOf={dimOf} renderCard={sym => renderIdxCard(section, sym)} hotOf={sym => radar.get(sym.slice(0, 6))?.ratio ?? 0} />
+                )}
+                {section.render === "sectorFlow" && (
+              <TicsSectorBoard onOpenValuation={onOpenValuation}
+                                krClosed={page !== "day"} />
+            )}
+            {(arr => !section.pairRows ? arr : (
+              // 짝 줄 — 상자 둘을 좌우로 **붙여서**. 상자 폭은 카드 수에 비례(flex-grow), 남는 자리는 오른쪽 빈칸(한 줄 8장 기준)
+              <div className="space-y-0">
+                {(() => {
+                  // 줄마다 상자 묶음 — boxLines([2,3]) 가 있으면 그대로, 없으면 boxesPerLine(기본 2)씩
+                  const per = section.boxesPerLine ?? 2;
+                  const sizes = section.boxLines ?? Array.from({ length: Math.ceil(arr.length / per) }, () => per);
+                  let at = 0;
+                  return sizes.map(n => { const idx = Array.from({ length: n }, (_, j) => at + j).filter(i => i < arr.length); at += n; return idx; });
+                })().map((idx, k, lines) => {
+                  // 상자 폭 = 카드 n장 + 카드 사이 틈 + 상자 안쪽 여백(왼쪽 책갈피 36 + 오른쪽 8 + 테두리 2).
+                  //   카드 한 장 = 전체 폭 8칸 카드((100% - 7×8px)/8)와 같게 맞춘다 — 상자가 몇 개든 카드 크기가 다른 그룹과 같다.
+                  //   단, 상자 여백 때문에 한 줄에 다 안 들어가는 줄이 있으면 **그룹 전체** 카드 폭을 그 줄에 맞춰 줄인다
+                  //   (줄마다 따로 눌리면 상자가 하나뿐인 줄만 카드가 커 보인다). 줄 하나(C장·B상자) 필요 폭 = C·w + 8C + 46B − 8.
+                  const fits = lines.map(l => {
+                    const c = l.reduce((s, i) => s + section.rows[i].length, 0);
+                    return `(100% - ${8 * c + 46 * l.length - 8}px) / ${c}`;
+                  });
+                  const card = `min((100% - 56px) / 8, ${fits.join(", ")})`;
+                  const boxW = (n: number) => `calc(${n} * ${card} + ${(n - 1) * 8}px + 46px)`;
+                  return (
+                    <div key={k} className="flex gap-2">
+                      {idx.map(i => <div key={i} className="min-w-0" style={{ flex: `0 1 ${boxW(section.rows[i].length)}` }}>{arr[i]}</div>)}
+                    </div>
+                  );
+                })}
+              </div>
+            ))((section.render ? []
+              : section.id === "sector"
+              ? chunk(
+                  section.rows.flat().sort((a, b) => Number(dimOf(a)) - Number(dimOf(b)) ||
+                    (displayPctOf(b, usMap.get(b)) ?? -Infinity) - (displayPctOf(a, usMap.get(a)) ?? -Infinity)),
+                  6)
+              : sortedRows(section, leaderSort, sym => displayPctOf(sym, usMap.get(sym)), dimOf)
+            ).map((group, gi) => [group, gi] as const)
+              // 순환매 줄은 해외(간밤 미국) 평균이 큰 순 — 간밤 가장 강했던 분야가 맨 위(사용자 2026-11-07). 값 없는 줄은 뒤로, 같으면 원래 순서
+              .sort((x, y) => section.id !== "rotflow" ? 0 : ((rotAvg(section, y[1]).ov?.avg ?? -Infinity) - (rotAvg(section, x[1]).ov?.avg ?? -Infinity)) || x[1] - y[1])
+              .map(([group, gi]) => (
+              // 6열 그리드 — 화면은 전체 폭이지만 카드 줄만 lg 75% 로 묶어 카드 크기는 예전 그대로(왼쪽 정렬)
+              <div key={gi} className={section.rowLabels ? `relative ${section.pairRows ? "" : "-mr-[9px]"} rounded-lg border border-gray-200 bg-gray-50/50 pg-row pl-9 pr-2 pb-2 pt-4 mt-2` : ""}>
+                {/* 줄 책갈피 — 이 줄이 어느 단계인지(반도체·전공정…). 위에 얹으면 카드 위 가격 띠와 겹쳐
+                    안 보여서, 상자 **왼쪽에 세로 띠**로 따로 뺐다(글자는 위→아래로 세워 쓴다). */}
+                {section.rowLabels?.[gi] && (
+                  <span className={`pg-rowlabel absolute left-0 inset-y-0 w-7 flex items-center justify-center border-0 border-r rounded-l-lg
+                                    text-xs font-bold tracking-widest [writing-mode:vertical-rl] [text-orientation:upright]
+                                    ${dashboardRowLabelTone(section, section.rowLabels[gi])}`}>
+                    {section.rowLabels[gi]}
+                  </span>
+                )}
+                {section.id === "rotflow" && (() => {
+                  // 줄 요약 — 해외 → 국내, 각각 정규장%(애프터·프리%) · ▲▼(사용자 2026-11-07)
+                  const { ov, kr } = rotAvg(section, gi);
+                  const part = (lb: string, v: ReturnType<typeof rotAvg>["ov"]) => v && (
+                    <span className="inline-flex items-baseline gap-1 whitespace-nowrap">
+                      <span className="text-gray-500 font-normal">{lb}</span>
+                      <b className={v.avg > 0 ? "text-rose-600" : v.avg < 0 ? "text-blue-600" : "text-gray-600"}>{v.avg > 0 ? "+" : ""}{v.avg.toFixed(2)}%</b>
+                      {v.aft != null && <AftPill v={v.aft} />}
+                      <span className="text-[10px] text-gray-500 font-normal">▲{v.up}·▼{v.n - v.up}</span>
+                    </span>
+                  );
+                  if (!ov && !kr) return null;
+                  return (
+                    <span className="absolute -top-2.5 left-9 z-10 inline-flex items-baseline gap-2 px-1.5 rounded border border-gray-200 bg-white text-[11.5px] tabular-nums leading-[18px]"
+                          title="해외 = 이 줄 미국 대장주 평균(장 밖이면 정규장 등락 + 꼬리표 = 프리·애프터), 국내 = 한국 종목 평균(참고 ETF 제외, 마감 뒤면 정규장 + 애프터 꼬리표)">
+                      {part("해외", ov)}{ov && kr && <span className="text-gray-300">➜</span>}{part("국내", kr)}
+                    </span>
+                  );
+                })()}
+              {(() => {
+                const cards = group.map(symbol => renderIdxCard(section, symbol));
                 if (!section.extras) return (
                   <div style={section.pairRows ? { gridTemplateColumns: `repeat(${group.length}, minmax(0, 1fr))` } : undefined}
-                       className={`grid grid-cols-3 sm:grid-cols-4 gap-y-4 gap-x-2 ${section.pairRows ? "" : section.wide ? "lg:grid-cols-8" : `lg:max-w-[75%] ${section.lead ? "lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_1.75rem_repeat(4,minmax(0,1fr))]" : "lg:grid-cols-6"}`}`}>
+                       className={`grid grid-cols-3 sm:grid-cols-4 gap-y-4 gap-x-2 ${section.pairRows ? "" : section.wide || group.includes("CNNFG") || group.includes("HYSPREAD") ? "lg:grid-cols-8" : `lg:max-w-[75%] ${section.lead ? "lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_1.75rem_repeat(4,minmax(0,1fr))]" : "lg:grid-cols-6"}`}`}>
                     {cards}
+                    {/* 공포·탐욕 카드 오른쪽 빈 칸 — 구성 지표 7개(사용자 2026-11-03 "오른쪽 빈곳에") */}
+                    {group.includes("CNNFG") && <CnnFgPanel split className="col-span-full sm:col-span-2 lg:col-span-2" />}
                   </div>
                 );
                 // 순환매 줄 — 블록 셋: [미국 대장주] ➜ [한국] [국내 상장 미국 ETF(참고, 따로 상자)].
@@ -726,6 +943,7 @@ export function UsMarketTab({ onRequestSearch, onOpenValuation, navStickyTop = 0
             )))}
           </div>
         ))}
+      </div>
       </div>
 
       {/* 시장 매매동향 모달 — KOSPI/KOSDAQ 카드 📊 클릭 시 */}

@@ -19,7 +19,8 @@
     "android:apk": "npm run build:android && cd android && ./gradlew assembleDebug",
     "pack:app": "node scripts/pack-app.mjs",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "deploy:preview": "PREVIEW=1 tsc -b && PREVIEW=1 vite build && gh-pages -d dist-preview -b gh-pages --dest preview --add"
   },
   "dependencies": {
     "@capacitor/app": "^8.1.1",
@@ -27,6 +28,7 @@
     "@capacitor/core": "^8.5.1",
     "@tanstack/react-query": "^5.100.5",
     "dexie": "^4.4.2",
+    "html-to-image": "^1.11.13",
     "lightweight-charts": "^5.2.0",
     "lucide-react": "^1.11.0",
     "react": "^19.2.5",

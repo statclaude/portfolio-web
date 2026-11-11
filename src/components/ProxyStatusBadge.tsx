@@ -8,13 +8,14 @@ import { isNativeApp } from "../lib/nativeProxy";
 interface Props {
   baseRefreshMs: number;       // adaptive 계산용 (5/10/30/60초)
   usePersonalProxy: boolean;   // 전용 프록시 사용 여부 — 정상 시에도 헤더에 안내
-  onOpenSettings: () => void;  // 힌트의 ⚙️ 설정 클릭 시 다이얼로그 열기
+  onOpenSettings?: () => void; // 힌트의 ⚙️ 설정 클릭 시 다이얼로그 열기
+  compact?: boolean;           // 모바일 헤더 — 직결(앱·확장)이면 배지를 띄우지 않는다(upstream 2026-10-25)
 }
 
 const GUIDE_URL =
   "https://github.com/statclaude/portfolio-web/blob/main/workers/proxy/DEPLOY-USER.md";
 
-export function ProxyStatusBadge({ baseRefreshMs, usePersonalProxy, onOpenSettings }: Props) {
+export function ProxyStatusBadge({ baseRefreshMs, usePersonalProxy, onOpenSettings, compact }: Props) {
   const [state, setState] = useState<ProxyState>(
     { health: "ok", total: 0, downHosts: [] }
   );
@@ -37,6 +38,7 @@ export function ProxyStatusBadge({ baseRefreshMs, usePersonalProxy, onOpenSettin
   //     "공용 프록시 1/3 사용량 소진 — 갱신 10초로 늦춤" 같은 무관한 경고가 이긴다(실제 제보).
   let statusMsg: { emoji: string; text: string; color: string } | null = null;
   if (direct) {
+    if (compact) return null;   // 모바일 헤더 — 옆 "갱신 (5초)" 와 겹치는 말이라(upstream)
     statusMsg = {
       emoji: isNativeApp() ? "📱" : "🧩",
       text: `${isNativeApp() ? "앱" : "확장"} 직결 · ${baseSec}초 갱신`,

@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Settings, StickyNote } from "lucide-react";
+import { DiscTags } from "./DiscTags";
+import { ValueupTags } from "./ValueupTags";
+import { SeohakTag } from "./SeohakBox";
+import { isSyncedHolding } from "../lib/linkedGroups";
 import type { Stock, Price, Consensus, Investor, Memo } from "../types";
 import { formatSigned, signColor, formatVolume, isKrHoldingClosed, isEtfByName, etfActiveType, krCloseTimeLabel, krCloseImminentMin, krFinalCloseHHMM, krSinglePriceSession, fmtAgo, holdingYesterdayBaseSum, marketOfSymbol, isUsExtendedTradingOpen, isQuoteStale, tradeSecOf, isEtfOrEtnByName, isKrAfterRegularClose } from "../lib/format";
 import { getDimSleepingEnabled } from "../lib/proxyConfig";
@@ -8,6 +12,7 @@ import { memoTagClass } from "../lib/memoColor";
 import { pickTodayInvestor, twoDayTodayX, TWO_DAY_HALF, type DaySeries } from "../lib/api";
 import { openTossStock } from "../lib/toss";
 import { openGoogleAi, STOCK_ANALYSIS_PROMPT, aiNowStamp } from "../lib/googleAi";
+import { openStockInfo, canStockInfo } from "../lib/tickPopup";
 import { Sparkline } from "./Sparkline";
 import { useChartRange, pickCardChart } from "../lib/chartRange";
 import { Tooltip, ColorName } from "./Tooltip";
@@ -104,7 +109,7 @@ const WARN_TIPS: Record<string, string> = {
 
 export function MobileStockCard({
   stock, price, krReg, sector, market, warning, chart, dayChart, investorHistory, consensus, memo, otherGroups, heldGroups,
-  onOpenValuation, onEdit, onDelete, onOpenMemo, onOpenEtf, onOpenEtfReverse, onVisible, lastBuy, lastSell,
+  onEdit, onDelete, onOpenMemo, onOpenEtf, onOpenEtfReverse, onVisible, lastBuy, lastSell,
 }: Props) {
   // 뷰포트 진입 감지 — PC(StockCard) 와 동일. 화면 밖 카드의 표시용 쿼리를 켜지 않기 위함.
   const ioRef = useRef<IntersectionObserver | null>(null);
@@ -214,7 +219,7 @@ export function MobileStockCard({
     if (`${parts.year}-${parts.month}-${parts.day}` !== dayChart.date) return dayChart;
     const mins = (Number(parts.hour) % 24) * 60 + Number(parts.minute);
     const f = isUs ? mins / (24 * 60) : (mins - 8 * 60) / (12 * 60);
-    const x = dayChart.twoDay ? twoDayTodayX(f) : f;   // 어제+오늘 축이면 오늘은 오른쪽 절반
+    const x = dayChart.rolling ? 1 : dayChart.twoDay ? twoDayTodayX(f) : f;   // 밀어 보기(rolling)면 오른쪽 끝 = 지금   // 어제+오늘 축이면 오늘은 오른쪽 절반
     // 토스 봉 시각은 '끝나는 시각' — 지금이 진행 중인 봉 안이면 그 봉 바로 뒤에 붙인다
     const lastX = dayChart.xs[dayChart.xs.length - 1];
     if (x > 1 || x < lastX - (dayChart.twoDay ? TWO_DAY_HALF : 1) * 10 / (isUs ? 24 * 60 : 12 * 60)) return dayChart;
@@ -256,7 +261,7 @@ export function MobileStockCard({
 
 
   return (
-    <div ref={visibilityRef} className={dimmed ? "opacity-60" : ""}>
+    <div ref={visibilityRef} className={`pg-card ${dimmed ? "opacity-60" : ""}`}>
       {/* 메타 줄 — 좌: 경고(섹션 태그 스타일) / 우: 섹션·거래소 + 🔍AI. 종목명 바로 위.
           mb-px: 섹션·AI 아래 1px 간격 */}
       <div className="flex items-center justify-between gap-1 mx-2 mb-px">
@@ -280,6 +285,9 @@ export function MobileStockCard({
               </button>
             </Tooltip>
           )}
+          <ValueupTags code={stock.ticker} size="xs" />
+          {isUsHolding && <SeohakTag symbol={stock.ticker} size="xs" />}
+          <DiscTags code={stock.ticker} name={stock.name} />
         </div>
         <div className="flex items-center gap-1 shrink-0">
           {(() => {
@@ -317,12 +325,21 @@ export function MobileStockCard({
               </span>
             );
           })()}
+          {/* 📊 종목정보 — 실시간·기업가치 탭 팝업. 국내 종목만(PC 카드와 같이) */}
+          {canStockInfo(stock.ticker) && (
+            <button onClick={() => openStockInfo(stock.ticker, stock.name)}
+                    title="종목정보 — 실시간 체결·호가·거래원 / 기업가치 (팝업)"
+                    className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold leading-none
+                               border border-amber-300 text-amber-700 bg-amber-50 active:bg-amber-100">
+              📊종목정보
+            </button>
+          )}
           {/* 🔍AI — 섹션과 같은 9px, 아이콘 축소 */}
           <button onClick={() => openGoogleAi(buildAiQuery())}
                   title="현재가·등락률·컨센서스로 구글 AI에 현재상태 분석 요청 (팝업)"
                   className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-bold leading-none
                              border border-blue-300 text-blue-700 bg-blue-50 active:bg-blue-100">
-            <span className="text-[8px]">🔍</span>AI
+            AI
           </button>
         </div>
       </div>
@@ -388,23 +405,19 @@ export function MobileStockCard({
                           fill={memo ? "currentColor" : "none"} />
             </button>
           )}
-          {onOpenValuation && /^[\dA-Za-z]{6}$/.test(stock.ticker) && (
-            <button onClick={() => onOpenValuation(stock.ticker)}
-                    title="기업가치 보기"
-                    className="px-2 py-1 rounded bg-gray-100 hover:bg-gray-200
-                               text-xs leading-none">
-              📊
-            </button>
+          {/* 📊 기업가치는 위 '📊종목정보' 팝업의 탭으로(2026-10-23) */}
+          {isSyncedHolding(stock) && (
+            <span title="증권사 연동 보유 — 자동 갱신, 수정·삭제 불가" className="px-1 text-[11px] text-violet-700">🔗</span>
           )}
           {onEdit && (
             <button onClick={() => onEdit(stock)}
-                    title="수정 / 매수 / 매도"
+                    title={isSyncedHolding(stock) ? "거래 기록 / 그룹" : "수정 / 매수 / 매도"}
                     className="px-2 py-1 rounded bg-gray-100 hover:bg-gray-200
                                text-gray-700 inline-flex items-center leading-none">
               <Settings size={14} strokeWidth={2.2} />
             </button>
           )}
-          {onDelete && (
+          {onDelete && !isSyncedHolding(stock) && (
             <button onClick={() => onDelete(stock)}
                     title="삭제 (모든 그룹에서 제거)"
                     className="px-2 py-1 rounded bg-gray-100 hover:bg-rose-100
@@ -421,8 +434,8 @@ export function MobileStockCard({
       <article className={`rounded-lg border flex flex-row gap-1.5 p-1.5 min-h-[95px]
                             ${cardBg} ${cardBorder}`}>
       {/* 좌측 — 가격 박스 (50%). 비거래일엔 sparkline 워터마크.
-          Tooltip 으로 감싸서 overflow-hidden 자식이라도 툴팁 영역은 잘리지 않음 */}
-      <Tooltip content={
+          휴대폰엔 마우스 올림이 없어 '상세' 버튼(클릭)으로 — PC 카드와 같은 방식(2026-10-26) */}
+      <Tooltip click content={
         <>
           <div className="text-gray-700 mb-1.5">
             <div className="font-bold mb-1 text-gray-900">{stock.name} ({stock.ticker})</div>
@@ -576,8 +589,11 @@ export function MobileStockCard({
                        xs={bgIsDay ? dayLive?.xs : undefined} baseline={bgIsDay ? dayLive?.base : undefined}
                        markIndex={bgIsDay ? dayLive?.openIdx : undefined}
                        closeIndex={bgIsDay ? dayLive?.closeIdx : undefined}
+                       extraMarks={bgIsDay ? [dayLive?.prevOpenIdx, dayLive?.prevCloseIdx] : undefined}
+                       markXs={bgIsDay ? dayLive?.markXs : undefined}
                        breakIndex={bgIsDay ? dayLive?.breakIdx : undefined}
                        prevBaseline={bgIsDay ? dayLive?.prevBase : undefined}
+                       nextBaseline={bgIsDay ? dayLive?.nextBase : undefined}
                      target={bgIsDay ? undefined : consensus?.target}
                      avgPrice={!bgIsDay && hasPosition ? stock.avg_price : undefined}
                      entry={bgIsDay ? undefined : memo?.entryPrice}

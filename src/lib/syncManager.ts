@@ -5,10 +5,11 @@
 //   "on"      → 자동 sync 활성
 //   "off"     → 일시 중지 (수동 ↑↓ 만)
 
-import { exportAll, replaceAllHoldings, replaceAllPeaks, replaceAllMemos, replaceAllTrades, applyImportedSettings } from "./db";
+import { exportAll, replaceAllHoldings, replaceAllPeaks, replaceAllMemos, replaceAllTrades, applyImportedSettings, loadPeaks } from "./db";
 import type { ExportPayload } from "./db";
 import { signIn, signOut, wasSignedIn, getAccessToken } from "./googleAuth";
 import { downloadFile, uploadFile, getFileMeta, deleteFile, listRevisions, downloadRevision } from "./googleDrive";
+import { isBrokerAvailable } from "./broker";
 
 type SyncMode = "on" | "off";
 const KEY_MODE = "gdrive_sync_mode";
@@ -53,7 +54,20 @@ function getLastSyncedTs(): string | null {
 }
 
 function getLastSyncedHash(): string | null {
-  try { return localStorage.getItem(KEY_LAST_SYNCED_HASH); } catch { return null; }
+  try { const h = localStorage.getItem(KEY_LAST_SYNCED_HASH); return h == null ? null : upgradeSyncedHash(h); } catch { return null; }
+}
+/** 옛 지문(2026-10-27 이전: peaks·연동 메타 전체 포함) → 지금 형식. 저장된 '지문'은 normalize 결과 JSON 그대로라 바꿔 읽을 수 있다.
+ *  안 바꾸면 업데이트 직후 모든 기기가 "로컬이 바뀌었다"로 보고 한 번 더 충돌을 물었다. */
+export function upgradeSyncedHash(h: string): string {
+  try {
+    const o = JSON.parse(h) as { holdings?: unknown; peaks?: unknown; memos?: unknown; trades?: unknown; settings?: Record<string, unknown> };
+    const lg = o.settings?.linkedGroups as Record<string, { broker?: string; accountSeq?: string }> | null | undefined;
+    const slim = lg && typeof lg === "object"
+      ? Object.fromEntries(Object.keys(lg).sort().map(g => [g, { broker: lg[g].broker, accountSeq: lg[g].accountSeq }])) : lg;
+    if (!("peaks" in o) && JSON.stringify(slim) === JSON.stringify(lg)) return h;   // 이미 새 형식
+    const settings = o.settings ? { ...o.settings, linkedGroups: slim ?? null } : o.settings;
+    return JSON.stringify({ holdings: o.holdings, memos: o.memos, trades: o.trades, settings });
+  } catch { return h; }
 }
 
 // 로그인 + 모드 OFF 로 시작 (자동 sync 는 사용자가 명시적으로 ON 해야 활성)
@@ -104,6 +118,7 @@ export function clearPendingSyncAction(): void {
 
 // 내용 정규화 — exported_at 같은 noise 제외, 정렬로 결정적 직렬화
 // 주의: 새 동기화 필드 추가 시 반드시 여기에 포함시켜야 함 (안 그러면 변경이 silent skip 됨)
+import { describeNormDiff, userPartOf } from "./syncDiff";
 export function normalize(p: ExportPayload): string {
   const holdings = [...(p.holdings ?? [])]
     .map(s => ({
@@ -112,11 +127,12 @@ export function normalize(p: ExportPayload): string {
       buy_date: s.buy_date ?? "",
       market: s.market ?? "",
       account: s.account ?? "",
+      source: s.source ?? "",   // 증권사 연동 표식 — 빠지면 Drive 왕복 뒤 잠금이 풀린다(테스트 있음)
     }))
     .sort((a, b) => `${a.ticker}|${a.account}`.localeCompare(`${b.ticker}|${b.account}`));
-  const peakKeys = Object.keys(p.peaks ?? {}).sort();
-  const peaks: Record<string, number> = {};
-  for (const k of peakKeys) peaks[k] = p.peaks[k];
+  // peaks(최고가)는 **지문에서 뺀다** — 가격이 오를 때마다 기기마다 스스로 갱신해, 앱과 웹을 같이 켜 두면 양쪽 다 '바뀜'이
+  //   되어 아무것도 안 고쳤는데 매번 "Drive 와 다르다, 가져올까?" 를 물었다(사용자 2026-10-27). 값은 payload 로 계속 오가고,
+  //   받을 때 기기 값과 **큰 쪽**을 남긴다(downloadFromDrive) — 앞으로만 가는 값이라 합쳐도 잃는 게 없다.
   // memos — updatedAt 은 noise (저장 시점 차이) 라 정규화에서 제외, 콘텐츠만 비교
   //
   // ⚠️ **Memo 에 필드를 추가하면 여기에도 반드시 넣어야 한다.** 빠뜨리면 그 필드만 바꿨을 때
@@ -139,7 +155,7 @@ export function normalize(p: ExportPayload): string {
   const trades = [...(p.trades ?? [])]
     .map(t => ({
       id: t.id, ticker: t.ticker, account: t.account ?? "",
-      type: t.type, date: t.date, qty: t.qty, amount: t.amount,
+      type: t.type, date: t.date, qty: t.qty, amount: t.amount, fee: t.fee ?? 0,
     }))
     .sort((a, b) => a.id.localeCompare(b.id));
   // settings 도 비교에 포함 — 그룹폴더/예수금/탭표시 등만 바뀌어도 업로드되도록 (skip 방지)
@@ -161,8 +177,14 @@ export function normalize(p: ExportPayload): string {
     tabVisibility: s.tabVisibility ?? null,
     dimSleeping: s.dimSleeping ?? null,
     // 전용 프록시(URL/목록/폴링주기)는 기기별 기술 설정 — Drive 동기화 비교 대상에서 제외
+    // 증권사 연동 그룹 — **어떤 계좌가 어느 그룹인지만**. 갱신 시각(lastSyncAt·lastTradeSyncAt)·오류·평단 환산 기억(usdAvg)은
+    //   앱이 5분마다 스스로 바꾸는 값이라 지문에 넣으면 앱 쪽이 늘 '바뀜'이 되어 충돌 질문이 반복됐다(위 peaks 와 같은 사고).
+    //   받을 때도 그 값들은 이 기기 것을 지킨다(db.applyImportedSettings → mergeLinkedGroups).
+    linkedGroups: s.linkedGroups
+      ? Object.fromEntries(Object.keys(s.linkedGroups).sort().map(g => [g, { broker: s.linkedGroups![g].broker, accountSeq: s.linkedGroups![g].accountSeq }]))
+      : null,
   };
-  return JSON.stringify({ holdings, peaks, memos, trades, settings });
+  return JSON.stringify({ holdings, memos, trades, settings });
 }
 
 // ─── 빈 데이터 덮어쓰기 방지 ─────────────────────────────────
@@ -202,18 +224,45 @@ export async function downloadFromDrive(): Promise<boolean> {
   const result = await downloadFile<ExportPayload>();
   if (!result) return false;
   const { data, modifiedTime } = result;
+  await applyPayload(data);
+  setLastSynced(modifiedTime, normalize(await exportAll()));
+  return true;
+}
+/** 받은 내용을 이 기기 DB 에 적용(최고가는 큰 쪽) — downloadFromDrive·연동 값 합치기가 같이 쓴다 */
+async function applyPayload(data: ExportPayload): Promise<void> {
   if (data.holdings) await replaceAllHoldings(data.holdings);
-  if (data.peaks) await replaceAllPeaks(data.peaks);
+  if (data.peaks) {   // 최고가는 큰 쪽을 남긴다(지문 밖 — normalize 주석). 이전 버전 복구(restoreDriveBackup)는 통째로 되돌린다
+    const mine = await loadPeaks();
+    const merged: Record<string, number> = { ...data.peaks };
+    for (const [t, v] of mine) if (!(merged[t] >= v)) merged[t] = v;
+    await replaceAllPeaks(merged);
+  }
   // memos — 구버전 payload 에 없으면 빈 배열 (= 메모 없음 상태로 동기화)
   await replaceAllMemos(data.memos ?? []);
   // trades(거래기록) — 구버전 payload 에 없으면 빈 배열로 동기화
   await replaceAllTrades(data.trades ?? []);
   applyImportedSettings(data.settings);   // 독립 모드 등 동기화 대상 설정
-  // 지문은 **적용 뒤 DB 를 다시 읽어서** 만든다. 원격 payload 를 그대로 해싱하면
-  //   replaceAll* 가 손보는 필드(빈 문자열 정규화 등) 때문에 지문이 어긋나
-  //   바로 다음 검사에서 "로컬이 바뀌었다" 로 오인해 쓸데없이 되올린다.
-  setLastSynced(modifiedTime, normalize(await exportAll()));
-  return true;
+  // 지문은 **적용 뒤 DB 를 다시 읽어서** 만든다(호출한 쪽에서). 원격 payload 를 그대로 해싱하면
+  //   replaceAll* 가 손보는 필드(빈 문자열 정규화 등) 때문에 지문이 어긋난다.
+}
+
+// ─── 증권사 연동 값 합치기 ─────────────────────────────────────
+//   연동 그룹(보유·거래·예수금)은 증권사에서 받아 오는 값이라 '사람이 고친 것'과 충돌하지 않는다(사용자 2026-11-09 "증권사 연결로 바뀐 건 무조건 받아야").
+//   증권사를 직접 부르는 기기(앱 + 키) = 연동 값의 원본 → 이 기기 것. 그 밖(브라우저·폰) = Drive 것을 무조건 받는다. 나머지는 이 기기 것.
+function brokerSource(): boolean { try { return isBrokerAvailable(); } catch { return false; } }
+function mergeBroker(local: ExportPayload, remote: ExportPayload, useRemoteBroker: boolean): ExportPayload {
+  const src = useRemoteBroker ? remote : local, other = useRemoteBroker ? local : remote;
+  const linked = new Set(Object.keys({ ...(local.settings?.linkedGroups ?? {}), ...(remote.settings?.linkedGroups ?? {}) }));
+  const isL = (acc?: string) => !!acc && linked.has(acc);
+  const deposits = { ...Object.fromEntries(Object.entries(other.settings?.deposits ?? {}).filter(([g]) => !linked.has(g))),
+                     ...Object.fromEntries(Object.entries(src.settings?.deposits ?? {}).filter(([g]) => linked.has(g))) };
+  const base = local;   // 사람이 고친 부분은 늘 이 기기 것
+  return {
+    ...base,
+    holdings: [...(base.holdings ?? []).filter(h => !isL(h.account)), ...(src.holdings ?? []).filter(h => isL(h.account))],
+    trades: [...(base.trades ?? []).filter(t => !isL(t.account)), ...(src.trades ?? []).filter(t => isL(t.account))],
+    settings: { ...(base.settings ?? {}), deposits },
+  };
 }
 
 // ─── 충돌 감지 — 편집 시작 전 호출 ──────────────────────────
@@ -272,6 +321,18 @@ const PULL_CHECK_MS = 5 * 60_000;
 
 let conflictPending = false;   // 배너가 떠 있는 동안 또 쏘지 않는다
 
+// 충돌 때 '무엇이 바뀌었나' — 배너가 읽는다(사용자 2026-11-07 "아무것도 안 했는데 갱신됐다고 뜬다")
+export interface ConflictInfo { local: string[]; remote: string[] | null }
+let lastConflictInfo: ConflictInfo | null = null;
+export const getConflictInfo = () => lastConflictInfo;
+function setConflictInfo(localNorm: string, remoteNorm: string | null): void {
+  const base = getLastSyncedHash();
+  lastConflictInfo = { local: describeNormDiff(base, localNorm), remote: remoteNorm == null ? null : describeNormDiff(base, remoteNorm) };
+  try { console.info("[sync] 충돌 — 이 기기:", lastConflictInfo.local, " / Drive:", lastConflictInfo.remote); } catch { /* noop */ }
+  // 알림을 넘겨도 다시 볼 수 있게 저장 — 설정 Drive 칸에 '최근 충돌'(사용자 2026-11-07 "눌러 버려서 지나갔는데 log 는 없어")
+  try { localStorage.setItem("gdrive_last_conflict", JSON.stringify({ at: new Date().toISOString(), ...lastConflictInfo })); } catch { /* noop */ }
+}
+
 function emitConflict(): void {
   if (conflictPending) return;
   conflictPending = true;
@@ -299,9 +360,30 @@ export async function autoPush(): Promise<"pushed" | "none" | "conflict" | "skip
   // ★ 기준 시각이 없는데(이 기기는 Drive 와 한 번도 맞춘 적 없음 — 새 설치) Drive 에 파일이 있으면 **올리지 않는다**.
   //   예전엔 `lastTs &&` 조건 때문에 이 경우 검사를 건너뛰고 그대로 올려 남의(=다른 기기의) 데이터를 덮었다.
   if (meta && (!lastTs || meta.modifiedTime > lastTs)) {
+    let rn: string | null = null;
+    try { const r = await downloadFile<ExportPayload>(); rn = r ? normalize(r.data) : null; } catch { /* 이유만 못 보여 준다 */ }
+    const base = getLastSyncedHash();
+    // Drive 쪽 변경이 증권사 연동 값뿐이면 이 기기 것을 올린다(연동 값은 이 기기도 곧 다시 받는다). 이 기기 변경이 연동뿐이면 Drive 것을 받는다
+    if (base != null && rn != null && userPartOf(rn) === userPartOf(base)) {
+      // Drive 쪽 변경이 연동 값뿐 — 증권사 원본 기기면 이 기기 연동 값, 아니면 Drive 연동 값을 받아 사람이 고친 것과 합쳐 올린다
+      const r = await downloadFile<ExportPayload>();
+      if (r) {
+        const merged = mergeBroker(local, r.data, !brokerSource());
+        await applyPayload(merged);
+        const now = await exportAll();
+        const ts = await guardedUpload(now); setLastSynced(ts, normalize(now));
+        window.dispatchEvent(new CustomEvent(SYNC_PULLED_EVENT));
+        return "pushed";
+      }
+    }
+    if (base != null && rn != null && userPartOf(h) === userPartOf(base)) {
+      await downloadFromDrive(); window.dispatchEvent(new CustomEvent(SYNC_PULLED_EVENT)); return "none";
+    }
+    setConflictInfo(h, rn);
     emitConflict();                                      // Drive 도 앞섰다 — 내가 올리면 저쪽이 사라진다
     return "conflict";
   }
+  try { const why = describeNormDiff(getLastSyncedHash(), h); localStorage.setItem("gdrive_last_push_reason", JSON.stringify({ at: new Date().toISOString(), why })); console.info("[sync] 자동 올림 —", why); } catch { /* noop */ }
   const ts = await guardedUpload(local);
   setLastSynced(ts, h);
   return "pushed";
@@ -325,7 +407,23 @@ export async function autoPull(): Promise<"applied" | "none" | "conflict" | "ski
     return "none";
   }
   const lastHash = getLastSyncedHash();
+  // 이 기기의 변경이 증권사 연동 값뿐이면(사람이 고친 게 없으면) 충돌로 묻지 않고 Drive 것을 받는다 — 연동 값은 앱이 다시 받아 쓴다
+  if (lastHash != null && localNorm !== lastHash && userPartOf(localNorm) === userPartOf(lastHash)) {
+    await downloadFromDrive();
+    window.dispatchEvent(new CustomEvent(SYNC_PULLED_EVENT));
+    return "applied";
+  }
+  // Drive 쪽 변경이 연동 값뿐이고 이 기기는 사람이 고친 게 있으면 — 합친다(연동 = Drive 것, 나머지 = 이 기기 것)
+  if (lastHash != null && localNorm !== lastHash && userPartOf(remoteNorm) === userPartOf(lastHash)) {
+    const merged = mergeBroker(await exportAll(), remote.data, !brokerSource());
+    await applyPayload(merged);
+    const ts = await guardedUpload(await exportAll());
+    setLastSynced(ts, normalize(await exportAll()));
+    window.dispatchEvent(new CustomEvent(SYNC_PULLED_EVENT));
+    return "applied";
+  }
   if (lastHash == null || localNorm !== lastHash) {
+    setConflictInfo(localNorm, remoteNorm);
     emitConflict();                                      // 양쪽 다 바뀜 — 손대지 않는다
     return "conflict";
   }
@@ -366,6 +464,9 @@ export async function reconcileOnEnable(): Promise<"pushed" | "insync" | "confli
     setLastSynced(remote.modifiedTime, h);
     return "insync";
   }
+  // 켤 때도 무엇이 다른지 보여 준다 — 기준 지문이 없으니 이 기기 ↔ Drive 직접 비교(사용자 2026-11-09 내용 없는 충돌 배너)
+  lastConflictInfo = { local: describeNormDiff(normalize(remote.data), h), remote: null };
+  try { localStorage.setItem("gdrive_last_conflict", JSON.stringify({ at: new Date().toISOString(), ...lastConflictInfo })); } catch { /* noop */ }
   emitConflict();
   return "conflict";
 }

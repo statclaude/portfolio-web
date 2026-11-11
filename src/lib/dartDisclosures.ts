@@ -1,0 +1,164 @@
+// DART 오늘의 공시(dart.fss.or.kr/dsac001) — 📋 최신공시 페이지의 출처(사용자 결정 2026-10-28 "오늘의 공시로 바꿔서 이것만").
+//   GET /dsac001/search.ax?selectDate=YYYY.MM.DD&currentPage=N — 한 페이지 100건(maxResults 는 무시된다), 최신순,
+//   전체 건수는 <input id="totalCnt">. 하루 보통 5~15페이지. 종목코드가 없어 정식 회사명으로 맞춘다 —
+//   회사명→종목코드 표는 크롤러가 KIND 상장법인목록으로 매일 내보낸다(portfolio-etf-index data/listed-corps.json).
+//   브라우저에선 CORS 가 없어 프록시를 거친다(허용 목록에 dart.fss.or.kr — 프록시 8곳).
+import { fetchProxied } from "./api";
+import { isDirectApp } from "./nativeProxy";
+
+export type DartMarket = "유가" | "코스닥" | "코넥스" | "기타";
+export interface DartRow {
+  rcpNo: string; date: string; time: string;   // date = YYYY-MM-DD(KST), time = HH:MM
+  market: DartMarket; corp: string; corpCode: string; title: string; submitter: string; url: string;
+  code?: string;   // 종목코드 — 크롤러 파일엔 들어 있다(KIND 상장사 표로 미리 붙임)
+}
+
+const MARKET: Record<string, DartMarket> = { kospi: "유가", kosdaq: "코스닥", konex: "코넥스", etc: "기타" };
+const text = (h: string) => h.replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/\s+/g, " ").trim();
+
+/** search.ax 응답 HTML → 줄들 + 전체 건수. 순수 함수(테스트) */
+export function parseDartList(html: string, ymd: string): { rows: DartRow[]; total: number } {
+  const total = Number((/id="totalCnt"[^>]*value="(\d+)"/.exec(html) ?? /value="(\d+)"[^>]*id="totalCnt"/.exec(html))?.[1] ?? 0);
+  const rows: DartRow[] = [];
+  for (const tr of html.match(/<tr>[\s\S]*?<\/tr>/g) ?? []) {
+    const tds = tr.match(/<td[^>]*>[\s\S]*?<\/td>/g) ?? [];
+    if (tds.length < 4) continue;
+    const [tdTime = "", tdCorp = "", tdTitle = "", tdSub = ""] = tds;
+    const rcp = /rcpNo=(\d+)/.exec(tr)?.[1];
+    if (!rcp) continue;
+    const mk = /tagCom_(kospi|kosdaq|konex|etc)"/.exec(tdCorp)?.[1] ?? "etc";
+    const corpA = /<a[^>]*openCorpInfoNew\('(\d+)'[^>]*>([\s\S]*?)<\/a>/.exec(tdCorp);
+    const titleA = /<a[^>]*rcpNo=\d+[^>]*>([\s\S]*?)<\/a>/.exec(tdTitle);
+    rows.push({
+      rcpNo: rcp, date: ymd, time: text(tdTime).slice(0, 5), market: MARKET[mk] ?? "기타",
+      corp: text(corpA?.[2] ?? ""), corpCode: corpA?.[1] ?? "", title: text(titleA?.[1] ?? ""),
+      submitter: /title="([^"]*)"/.exec(tdSub)?.[1] ?? text(tdSub),
+      url: `https://dart.fss.or.kr/dsaf001/main.do?rcpNo=${rcp}`,
+    });
+  }
+  return { rows, total };
+}
+
+const PAGE = 100, MAX_PAGES = 20, POOL = 3;
+// 시장별 — pageGrouping Y = 유가증권, K = 코스닥(사용자 제안 2026-10-28: mainY·mainK). 비상장 '기타' 법인은 처음부터 안 받는다
+//   (실측 10/27: 전체 431건·5쪽 → 유가 160 + 코스닥 116 = 4쪽, 공시가 많은 날일수록 차이가 크다)
+const GROUPS = ["Y", "K"] as const;
+/** 그날 유가·코스닥 공시 전부(최신순). ymd = YYYY-MM-DD(KST, 기본 오늘) */
+export async function fetchDartDay(ymd = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10)): Promise<DartRow[]> {
+  const sel = ymd.replace(/-/g, ".");
+  const page = async (g: string, n: number) => {
+    const r = await fetchProxied(`https://dart.fss.or.kr/dsac001/search.ax?currentPage=${n}&maxResults=${PAGE}&maxLinks=10&sort=&series=&mdayCnt=0&selectDate=${sel}&pageGrouping=${g}`);
+    // 403 = 공용 프록시 허용 목록에 dart.fss.or.kr 가 아직 없다(워커 배포 전) — 앱은 프록시를 안 거쳐 상관없다
+    if (!r.ok) throw new Error(r.status === 403
+      ? "DART 공시를 받지 못했습니다 (HTTP 403) — 공용 프록시에 DART 허용이 아직 배포되지 않았습니다. 데스크톱·안드로이드 앱에서는 바로 됩니다."
+      : `DART 공시 조회 실패 (HTTP ${r.status})`);
+    return parseDartList(await r.text(), ymd);
+  };
+  const firsts = await Promise.all(GROUPS.map(g => page(g, 1)));
+  const jobs: [string, number][] = GROUPS.flatMap((g, i) =>
+    Array.from({ length: Math.max(0, Math.min(MAX_PAGES, Math.ceil(firsts[i].total / PAGE)) - 1) }, (_, k) => [g, k + 2] as [string, number]));
+  const rest: DartRow[][] = [];
+  let j = 0;
+  await Promise.all(Array.from({ length: Math.min(POOL, jobs.length) }, async () => {
+    while (j < jobs.length) { const [g, n] = jobs[j++]; try { rest.push((await page(g, n)).rows); } catch { /* 한 쪽 실패는 건너뛴다 */ } }
+  }));
+  const seen = new Set<string>();
+  return [...firsts.map(f => f.rows), ...rest].flat()
+    .filter(r => !seen.has(r.rcpNo) && seen.add(r.rcpNo))
+    .sort((a, b) => b.time.localeCompare(a.time) || b.rcpNo.localeCompare(a.rcpNo));
+}
+
+// ── 서버(크롤러) 파일 먼저 — 사용자 제안 2026-10-28 "조회하면 서버에 저장하고 다른 조회들은 서버에서, 일정 시간으로 갱신".
+//   portfolio-etf-index 의 dart 브랜치에 크롤러가 평일 07~20시 10분마다 날짜별 JSON 을 쓴다(scripts/dart.js).
+//   사용자 수와 무관하게 DART 호출은 크롤러 한 곳 + 웹은 GitHub raw(프록시 불필요). 파일이 없거나 오늘 것이
+//   30분 넘게 묵었으면(크롤 지연·실패) 직접 받는다(앱 = 네이티브, 웹 = 프록시).
+const SERVER = "https://raw.githubusercontent.com/hanjungwoo3/portfolio-etf-index/dart/data/dart";
+const STALE_MS = 30 * 60_000;
+export interface DartDay { rows: DartRow[]; source: "server" | "live"; builtAt?: string }
+// 공시 본문 글 — 🔍AI 요약에 넣는다(구글 AI 는 DART 본문을 못 읽는다, 사용자 2026-10-28). 크롤러가 오늘·어제치를
+//   data/dart/body/YYYY-MM-DD.json 에 미리 받아 둔다. 없으면 직접(main.do → viewer.do, EUC-KR — 앱은 네이티브, 웹은 프록시).
+const bodyFiles = new Map<string, Promise<Record<string, string>>>();
+export async function fetchDartBody(ymd: string, rcpNo: string): Promise<string> {
+  let p = bodyFiles.get(ymd);
+  if (!p) {
+    p = fetch(`${SERVER}/body/${ymd}.json?t=${Math.floor(Date.now() / 300_000)}`).then(r => r.ok ? r.json() : {}).catch(() => ({}));
+    bodyFiles.set(ymd, p);
+  }
+  const hit = (await p)[rcpNo];
+  if (hit) return hit;
+  try {
+    const main = await (await fetchProxied(`https://dart.fss.or.kr/dsaf001/main.do?rcpNo=${rcpNo}`)).text();
+    const m = /viewDoc\("(\d+)",\s*"(\d+)",\s*"([^"]*)",\s*"([^"]*)",\s*"([^"]*)",\s*"([^"]*)"/.exec(main);
+    if (!m) return "";
+    const r = await fetchProxied(`https://dart.fss.or.kr/report/viewer.do?rcpNo=${m[1]}&dcmNo=${m[2]}&eleId=${m[3]}&offset=${m[4]}&length=${m[5]}&dtd=${m[6]}`);
+    if (!r.ok) return "";
+    const buf = await r.arrayBuffer();
+    const head = new TextDecoder("latin1").decode(buf.slice(0, 2000));
+    return dartBodyText(new TextDecoder(/charset=utf-8/i.test(head) ? "utf-8" : "euc-kr").decode(buf));
+  } catch { return ""; }
+}
+/** viewer.do HTML → 읽을 글(표는 칸을 | 로). 순수 함수 */
+export function dartBodyText(html: string, max = 3500): string {
+  const t = html.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<\/(tr|p|div|h\d|li)>|<br\s*\/?>/gi, "\n").replace(/<\/t[dh]>/gi, " | ").replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+  return t.split("\n").map(l => l.replace(/[ \t|]+\|[ \t|]*/g, " | ").replace(/[ \t]+/g, " ").trim().replace(/^\|\s*|\s*\|$/g, ""))
+    .filter(Boolean).join("\n").slice(0, max);
+}
+
+/** 서버 날짜 목록의 날짜별 건수 — ◀ ▶ 가 0건 날(주말·휴장일)을 건너뛰는 데 쓴다. 못 받으면 빈 맵 */
+export async function fetchDartCounts(): Promise<Record<string, number>> {
+  try {
+    const r = await fetch(`${SERVER}/index.json?t=${Math.floor(Date.now() / 600_000)}`);
+    if (!r.ok) return {};
+    return ((await r.json()) as { counts?: Record<string, number> }).counts ?? {};
+  } catch { return {}; }
+}
+export async function fetchDartDayPreferServer(ymd: string): Promise<DartDay> {
+  const today = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10);
+  try {
+    const r = await fetch(`${SERVER}/${ymd}.json?t=${Math.floor(Date.now() / 120_000)}`);   // raw CDN 은 5분 캐시 — 2분 단위로 키를 바꿔 너무 묵지 않게
+    if (r.ok) {
+      const j = await r.json() as { meta?: { builtAt?: string; final?: boolean }; rows?: Omit<DartRow, "date" | "url" | "corpCode">[] };
+      const built = Date.parse(j.meta?.builtAt ?? "");
+      const fresh = j.meta?.final || ymd !== today || (Number.isFinite(built) && Date.now() - built < STALE_MS);
+      // 묵었어도 웹은 서버 파일 그대로 — 직접 조회는 프록시가 DART 를 막아 403 이었다(2026-10-29, GitHub 예약 실행이 몇 시간씩 밀림).
+      //   직접 조회는 프록시가 필요 없는 앱(네이티브)에서만.
+      if (Array.isArray(j.rows) && (fresh || !isDirectApp())) return {
+        source: "server", builtAt: j.meta?.builtAt,
+        rows: j.rows.map(x => ({ ...x, date: ymd, corpCode: "", url: `https://dart.fss.or.kr/dsaf001/main.do?rcpNo=${x.rcpNo}` })),
+      };
+    }
+  } catch { /* 서버 파일 실패 → 직접 */ }
+  return { source: "live", rows: await fetchDartDay(ymd) };
+}
+
+// 회사명 → 종목코드(KIND 상장법인목록, 크롤러가 매일). 공백·(주) 무시하고 맞춘다
+const CORPS_URL = "https://raw.githubusercontent.com/hanjungwoo3/portfolio-etf-index/main/data/listed-corps.json";
+export const normCorp = (n: string) => n.replace(/\(주\)|㈜|주식회사|\s+/g, "").toUpperCase();
+export async function loadListedCorps(): Promise<Map<string, string>> {
+  const r = await fetch(CORPS_URL, { cache: "no-store" });
+  if (!r.ok) throw new Error(`상장사 표 HTTP ${r.status}`);
+  const j = await r.json() as { corps?: Record<string, string> };
+  return new Map(Object.entries(j.corps ?? {}).map(([n, c]) => [normCorp(n), c]));
+}
+
+// 단일판매ㆍ공급계약 본문 → 핵심(계약명·금액·매출액 대비·상대·기간). 본문은 '항목 줄 / 값 줄' 꼴(서버 body 파일, 2026-10-30 실측).
+//   정정 공시는 앞에 정정 전·후 표가 붙어 있어 **마지막** 값을 쓴다. 지수(소부장) 공시 목록용(사용자 2026-11-02).
+export interface ContractInfo { name?: string; amountEok?: number; ratio?: number; party?: string; from?: string; to?: string }
+export function parseContract(body: string): ContractInfo | null {
+  if (!body) return null;
+  const last = (re: RegExp) => { let m: RegExpExecArray | null, v: string | undefined; const g = new RegExp(re.source, "g"); while ((m = g.exec(body))) v = m[1]; return v?.trim(); };
+  const amt = last(/계약금액\s*\(원\)\s*\n\s*([\d,]+)/);
+  const ratio = last(/매출액\s*대비\s*\(%\)\s*\n\s*([\d.]+)/);
+  const out: ContractInfo = {
+    name: last(/체결계약명\s*\n\s*([^\n]+)/),
+    amountEok: amt ? Number(amt.replace(/,/g, "")) / 1e8 : undefined,
+    ratio: ratio ? Number(ratio) : undefined,
+    party: last(/\d\.\s*계약상대(?:방)?\s*\n\s*([^\n]+)/),
+    from: last(/시작일\s*\n\s*(\d{4}-\d{2}-\d{2})/),
+    to: last(/종료일\s*\n\s*(\d{4}-\d{2}-\d{2})/),
+  };
+  if (out.party === "-") out.party = undefined;
+  return out.amountEok != null || out.name ? out : null;
+}

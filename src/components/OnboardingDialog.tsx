@@ -14,6 +14,7 @@ const EXT_GUIDE_URL =
 
 interface Props {
   onOpenSettings: () => void;
+  onDone?: () => void;   // 닫은 뒤 — 첫 방문 사용법 안내(upstream)로 잇는다
 }
 
 // 전용 프록시 도입 권유 팝업 — 공개 인프라(합계 40만 req/일) 부담 분산이 목적.
@@ -33,7 +34,7 @@ function snooze(): void {
 }
 
 // 1초 지연 후 등장 — 즉시 띄우면 부담.
-export function OnboardingDialog({ onOpenSettings }: Props) {
+export function OnboardingDialog({ onOpenSettings, onDone }: Props) {
   const [open, setOpen] = useState(false);
   const downOnBackdropRef = useRef(false);
 
@@ -53,12 +54,13 @@ export function OnboardingDialog({ onOpenSettings }: Props) {
   if (!open) return null;
 
   // 어떤 경로로 닫든 유예 시작 — 배경 클릭·나중에·설정 열기 모두 '봤다'로 친다.
-  const close = () => { snooze(); setOpen(false); };
+  const close = () => { snooze(); setOpen(false); onDone?.(); };
 
   const openSettingsAndClose = () => {
     snooze();
     setOpen(false);
     onOpenSettings();
+    onDone?.();
   };
 
   return (
