@@ -7,7 +7,8 @@
 - `origin` = https://github.com/statclaude/portfolio-web.git (내 fork, push 대상, GitHub 계정 statclaude)
 - `upstream` = https://github.com/hanjungwoo3/portfolio-web.git (원본, **절대 push 금지**, pull/fetch 전용)
 - 배포: `npm run deploy` (build → `git push origin main` → `gh-pages -d dist -b gh-pages`)
-- `android-app` 브랜치: 개인용 Android APK 전용, `main`과 분리, **병합 계획 없음**
+- `android-app` 브랜치: 2026-09-09 이후 **멈춘 옛 브랜치** — 실제 APK 소스는 main 의 `android/`(패키지 `io.github.statclaude.portfolio`, GoogleAuth·SystemUi 플러그인) + `capacitor.config.ts`. 빌드: `BUILD_TARGET=native npx vite build; rm -rf dist/app; npx cap sync android; cd android; ./gradlew assembleDebug`(JAVA_HOME=JDK 21, 디버그 서명 `~/.android/debug.keystore` 유지 — 덮어 설치·구글 네이티브 로그인 SHA-1). 현재 설치본 **1.2.4(versionCode 8, 2026-11-12)**
+- 데스크톱 앱(Tauri, `desktop/`): `cd desktop; npx tauri build` → `src-tauri/target/release/portfolio.exe`(설치 없이 실행형, NSIS 설치판 단계는 '액세스 거부'로 실패). **남은 일: 구글 '데스크톱 앱' OAuth 클라이언트 생성 → `GOOGLE_DESKTOP_CLIENT_ID`·`GOOGLE_DESKTOP_CLIENT_SECRET` env 로 다시 빌드**(없으면 데스크톱 앱 Drive 로그인만 안 됨)
 - `extension/`: 크롬 확장(포트폴리오 시세 프록시) 소스, v1.2.0부터 확장 ID 고정(`cmmbglfgocogholdlpihhlghnbkdipni`)
 - remote가 둘(`origin`/`upstream`)이라 `gh` 명령은 기본 저장소를 못 정함 — `gh repo set-default statclaude/portfolio-web`으로 **반드시 fork를 기본 지정**
 
